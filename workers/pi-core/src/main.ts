@@ -52,7 +52,7 @@ export async function run(factory: AgentFactory = createPiAgent): Promise<void> 
         emit("terminal", { status: "success", output }, { request_id: requestId });
       }).catch(() => {
         emit("terminal", {
-          status: abort?.signal.aborted ? "cancelled" : "failure",
+          status: abort?.signal.aborted ? "cancelled" : "failed",
           code: "agent_error",
           message: abort?.signal.aborted ? "turn cancelled" : "agent execution failed",
         }, { request_id: requestId });

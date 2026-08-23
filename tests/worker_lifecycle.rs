@@ -86,6 +86,7 @@ fn write_factory(
     let mut envs = vec!["\"PATH\"".to_owned()];
     if crash_env {
         envs.push("\"MONOLITH_CRASH_FILE\"".to_owned());
+        envs.push("\"MONOLITH_VARY_MARKER\"".to_owned());
     }
     let env_line = format!("allowed_env = [{}]", envs.join(", "));
     let caps_line = if caps.is_empty() {
@@ -314,6 +315,140 @@ fn crash_after_tool_result_does_not_duplicate_effect() {
         effects(dir.path()).len(),
         1,
         "replay must not duplicate the effect"
+    );
+    run_ok(&["destroy", state]);
+}
+
+#[test]
+fn terminal_replay_with_different_output_converges() {
+    // A crash between terminal persist and mark_processed leaves an immutable
+    // terminal with the delivery still pending. A non-deterministic worker
+    // produces DIFFERENT output on replay; the first durable terminal must win
+    // and the delivery must complete instead of failing forever (AGENTOPS-134).
+    let dir = TestDir::new("terminal-replay");
+    let manifest = write_factory(
+        dir.path(),
+        "fixture",
+        "workers/fixture/fixture-worker.mjs",
+        &[],
+        &[],
+        false,
+    );
+    let state = dir.path().to_str().unwrap();
+    let m = manifest.to_str().unwrap();
+    run_ok(&["apply", m, "--state-dir", state]);
+    run_ok(&[
+        "send",
+        state,
+        "--from",
+        "planner",
+        "--to",
+        "worker",
+        "--kind",
+        "work.requested",
+        "--payload",
+        "{\"task\":\"replay\"}",
+    ]);
+    let message_id = worker_message_id(dir.path());
+    wait_for_terminal(dir.path(), &message_id);
+
+    // Simulate a non-deterministic worker: the first durable terminal differs
+    // from what the fixture produces on replay. Overwrite the immutable
+    // terminal file with a different payload, then un-process the delivery so
+    // the next apply replays it.
+    let terminal = terminal_path(dir.path(), &message_id);
+    let mut frame: serde_json::Value =
+        serde_json::from_slice(&fs::read(&terminal).unwrap()).unwrap();
+    frame["payload"]["output"] = serde_json::json!("first durable terminal");
+    fs::write(&terminal, serde_json::to_vec_pretty(&frame).unwrap()).unwrap();
+    fs::remove_file(
+        dir.path()
+            .join("processed")
+            .join("worker")
+            .join(&message_id),
+    )
+    .unwrap();
+
+    // Re-apply replays the delivery. The worker produces a different terminal;
+    // the persisted (first) terminal must win and the delivery must complete.
+    run_ok(&["apply", m, "--state-dir", state]);
+    wait_for_terminal(dir.path(), &message_id);
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&fs::read(&terminal).unwrap()).unwrap();
+    assert_eq!(
+        persisted["payload"]["output"], "first durable terminal",
+        "the first durable terminal must be preserved"
+    );
+    run_ok(&["destroy", state]);
+}
+
+#[test]
+fn replay_with_different_tool_call_id_does_not_duplicate_effect() {
+    // The effect key must be deterministic across replays even when the worker
+    // chooses a DIFFERENT tool_call_id on replay (AGENTOPS-135). The fixture
+    // worker's after_tool_result_vary_id point crashes after the tool result on
+    // the first run and uses tool-<request>-replay on the replay.
+    let dir = TestDir::new("vary-tool-id");
+    let manifest = write_factory(
+        dir.path(),
+        "fixture",
+        "workers/fixture/fixture-worker.mjs",
+        &["pod.send_message"],
+        &["planner"],
+        true,
+    );
+    let crash = write_crash_file(dir.path(), "after_tool_result_vary_id");
+    let marker = dir.path().join("vary-marker");
+    let state = dir.path().to_str().unwrap();
+    let m = manifest.to_str().unwrap();
+    let (ok, text) = run_with_env(
+        &["apply", m, "--state-dir", state],
+        &[
+            ("MONOLITH_CRASH_FILE", crash.to_str().unwrap()),
+            ("MONOLITH_VARY_MARKER", marker.to_str().unwrap()),
+        ],
+    );
+    assert!(ok, "apply failed: {text}");
+    run_ok(&[
+        "send",
+        state,
+        "--from",
+        "planner",
+        "--to",
+        "worker",
+        "--kind",
+        "work.requested",
+        "--payload",
+        "{\"task\":\"vary\"}",
+    ]);
+    let message_id = worker_message_id(dir.path());
+    wait_until("worker pod to fail", || {
+        pod_status(dir.path(), "worker") == Some(PodStatus::Failed)
+    });
+    let effects = |dir: &Path| -> Vec<String> {
+        state::pending_message_ids(dir, "planner")
+            .unwrap()
+            .into_iter()
+            .filter(|id| id.starts_with("effect-"))
+            .collect()
+    };
+    assert_eq!(
+        effects(dir.path()).len(),
+        1,
+        "effect must be applied once before the crash"
+    );
+    // Re-apply replays the delivery. The replacement worker uses a DIFFERENT
+    // tool_call_id, so the effect key must not depend on the worker-chosen id.
+    let (ok, text) = run_with_env(
+        &["apply", m, "--state-dir", state],
+        &[("MONOLITH_VARY_MARKER", marker.to_str().unwrap())],
+    );
+    assert!(ok, "re-apply failed: {text}");
+    wait_for_terminal(dir.path(), &message_id);
+    assert_eq!(
+        effects(dir.path()).len(),
+        1,
+        "replay with a different tool_call_id must not duplicate the effect"
     );
     run_ok(&["destroy", state]);
 }

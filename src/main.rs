@@ -636,13 +636,18 @@ fn command_pod_process(arguments: &[String]) -> Result<(), String> {
                         match state::atomic_create(&terminal, &terminal_bytes, 0o600) {
                             Ok(()) => {}
                             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                                // A terminal already exists for this delivery: a previous
+                                // attempt persisted it before the delivery was marked
+                                // processed. The first durable terminal is the truth — a
+                                // non-deterministic worker may produce different output on
+                                // replay, so accept the persisted terminal and complete the
+                                // delivery instead of failing forever.
                                 let old: Frame = serde_json::from_slice(
                                     &fs::read(&terminal).map_err(|e| e.to_string())?,
                                 )
                                 .map_err(|e| e.to_string())?;
                                 if old.kind != FrameType::Terminal
                                     || old.request_id != persisted_frame.request_id
-                                    || old.payload != persisted_frame.payload
                                 {
                                     return Err("conflicting terminal replay".into());
                                 }
@@ -803,10 +808,14 @@ fn execute_tool(
             policy.authorize_send(&args)?;
             durability::record(root, "effect_requested", request, Some(id), None)
                 .map_err(|e| e.to_string())?;
+            // The effect key must be deterministic across replays. The worker-chosen
+            // tool_call_id is NOT stable (a real LLM generates a new id on replay), so
+            // it must not participate in the key — otherwise a replay enqueues a
+            // duplicate effect. Two identical send_message effects for the same
+            // delivery are the same effect and collapse to one.
             let effect = durability::effect_id(&serde_json::json!({
                 "pod":identity.pod,
                 "delivery":request,
-                "tool_call":id,
                 "to":args.to,
                 "kind":args.kind,
                 "payload":args.payload

@@ -8,6 +8,49 @@
 
 use monolith::protocol::{self, ControlState, Direction, FrameType, Machine};
 
+fn terminal_frame(payload: serde_json::Value) -> String {
+    serde_json::json!({
+        "protocol": protocol::VERSION,
+        "direction": "worker_to_control",
+        "type": "terminal",
+        "factory_gen": 1,
+        "pod": "worker",
+        "session": "s1",
+        "seq": 1,
+        "payload": payload,
+    })
+    .to_string()
+}
+
+#[test]
+fn failed_terminal_requires_safe_error_code() {
+    // The canonical failure terminal carries a safe error code and message
+    // (plan U3). It must parse.
+    let ok = terminal_frame(serde_json::json!({
+        "status": "failed",
+        "code": "agent_error",
+        "message": "agent execution failed",
+    }));
+    protocol::parse(ok.as_bytes(), 65_536)
+        .unwrap_or_else(|e| panic!("failed terminal with code/message rejected: {e}"));
+
+    // A failed terminal without the safe error code must fail closed.
+    let missing_code = terminal_frame(serde_json::json!({
+        "status": "failed",
+        "message": "agent execution failed",
+    }));
+    let error = protocol::parse(missing_code.as_bytes(), 65_536)
+        .expect_err("failed terminal without code must fail");
+    assert!(error.to_string().contains("code"));
+
+    // The legacy 'error' status is not part of the contract.
+    let legacy = terminal_frame(serde_json::json!({
+        "status": "error",
+        "error": "boom",
+    }));
+    protocol::parse(legacy.as_bytes(), 65_536).expect_err("legacy error status must fail closed");
+}
+
 fn fixture_lines(name: &str) -> Vec<String> {
     let path = std::path::Path::new("protocol/fixtures").join(name);
     let text = std::fs::read_to_string(&path)
