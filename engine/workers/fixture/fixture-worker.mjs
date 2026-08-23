@@ -25,11 +25,30 @@ readline.createInterface({input:process.stdin,crlfDelay:Infinity}).on("line",lin
     if(crash==="after_work_receipt")process.exit(42);
     if(crash==="malformed"){process.stdout.write("not-json\n");return}
     if(config.pod.capabilities.includes("pod.send_message")&&config.pod.destinations.includes(f.payload.from)){
-      pendingTool=`tool-${request}`;emit(base("tool_call",{name:"pod.send_message",arguments:{to:f.payload.from,kind:"work.completed",payload:`completed: ${f.payload.body}`}}, {request_id:request,tool_call_id:pendingTool}));
+      // after_tool_result_vary_id: the first run uses tool-<request> and crashes
+      // after the tool result; the replay (marker file present) uses a different
+      // tool_call_id to prove the effect key is independent of the worker-chosen id.
+      const varyMarker=process.env.MONOLITH_VARY_MARKER;
+      const isReplay=varyMarker&&fs.existsSync(varyMarker);
+      pendingTool=isReplay?`tool-${request}-replay`:`tool-${request}`;
+      emit(base("tool_call",{name:"pod.send_message",arguments:{to:f.payload.from,kind:"work.completed",payload:`completed: ${f.payload.body}`}}, {request_id:request,tool_call_id:pendingTool}));
     } else if(crash==="after_terminal_sent"){emitAndExit(base("terminal",{status:"success",output:`completed: ${f.payload.body}`},{request_id:request}),42)}
     else terminal("success",{output:`completed: ${f.payload.body}`});
   } else if(f.type==="tool_result"&&f.tool_call_id===pendingTool){
     if(crash==="after_tool_result")process.exit(42);
+    if(crash==="after_tool_result_vary_id"){
+      const varyMarker=process.env.MONOLITH_VARY_MARKER;
+      if(varyMarker&&fs.existsSync(varyMarker)){
+        // Replay with a different tool_call_id: complete normally.
+        terminal("success",{output:"fixture completed","tool_result":f.payload});
+      } else {
+        // First run: record the marker and crash after the tool result.
+        if(varyMarker)fs.writeFileSync(varyMarker,"1");
+        process.exit(42);
+      }
+      pendingTool=null;
+      return;
+    }
     if(crash==="after_terminal_sent"){emitAndExit(base("terminal",{status:"success",output:"fixture completed","tool_result":f.payload},{request_id:request}),42)}
     else terminal("success",{output:"fixture completed","tool_result":f.payload});
     pendingTool=null;

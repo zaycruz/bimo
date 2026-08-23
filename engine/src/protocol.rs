@@ -98,8 +98,9 @@ fn validate_payload(frame: &Frame) -> io::Result<()> {
                 "success" => {
                     require_string("output")?;
                 }
-                "failed" | "error" => {
-                    require_string("error")?;
+                "failed" => {
+                    require_string("code")?;
+                    require_string("message")?;
                 }
                 "cancelled" => {}
                 _ => {
