@@ -1,0 +1,20 @@
+name = "golden-path"
+state_dir = ".monolith-demo"
+trusted_executable_roots = ["/usr/bin"]
+[[pods]]
+name = "planner"
+role = "planner"
+engine = "fixture"
+protocol = "agent-worker/v1"
+command = ["/usr/bin/env", "node", "workers/fixture/fixture-worker.mjs"]
+allowed_env = ["PATH"]
+destinations = ["worker"]
+[[pods]]
+name = "worker"
+role = "worker"
+engine = "fixture"
+protocol = "agent-worker/v1"
+command = ["/usr/bin/env", "node", "workers/fixture/fixture-worker.mjs"]
+allowed_env = ["PATH"]
+capabilities = ["pod.send_message", "factory.read_state"]
+destinations = ["planner"]
