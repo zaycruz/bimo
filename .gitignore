@@ -1,3 +1,4 @@
 /target
 .omx/
 graphify-out/
+workers/pi-core/node_modules/
