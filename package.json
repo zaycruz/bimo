@@ -1,9 +1,39 @@
 {
   "name": "monolith-workflow",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
+  "description": "Deploy bounded, auditable agent workflows as ephemeral Docker fleets.",
+  "license": "UNLICENSED",
   "type": "module",
+  "bin": {
+    "monolith": "bin/monolith"
+  },
+  "files": [
+    "bin",
+    "etc",
+    "src",
+    "starters",
+    "templates",
+    "examples",
+    "Dockerfile",
+    ".dockerignore",
+    "README.md"
+  ],
   "scripts": {
-    "test": "node --test test/runner.test.mjs"
-  }
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zaycruz/monolith-v2.git"
+  },
+  "homepage": "https://github.com/zaycruz/monolith-v2#readme",
+  "bugs": "https://github.com/zaycruz/monolith-v2/issues",
+  "keywords": [
+    "agents",
+    "docker",
+    "workflow",
+    "openrouter"
+  ]
 }

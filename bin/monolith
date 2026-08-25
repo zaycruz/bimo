@@ -1,57 +1,22 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env node
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+const command = process.argv[2];
+const internal = new Map([
+  ["agent", "../src/agent.mjs"],
+  ["bootstrap", "../src/bootstrap.mjs"],
+  ["probe", "../src/probe.mjs"],
+  ["proxy", "../src/credential-proxy.mjs"],
+  ["serve", "../src/serve.mjs"],
+  ["verify", "../src/verify.mjs"],
+]);
 
-if [ "${1:-}" != "deploy" ]; then
-  exec node "$ROOT/src/runner.mjs" "$@"
-fi
-
-shift
-SPEC=${1:?usage: monolith deploy SPEC --host HOST --task TASK}
-shift
-HOST=
-PROXMOX=
-VMID=
-TASK=
-FIXTURE=0
-
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --host) HOST=$2; shift 2 ;;
-    --proxmox) PROXMOX=$2; shift 2 ;;
-    --vmid) VMID=$2; shift 2 ;;
-    --task) TASK=$2; shift 2 ;;
-    --fixture) FIXTURE=1; shift ;;
-    *) echo "unknown argument: $1" >&2; exit 2 ;;
-  esac
-done
-
-[ -n "$TASK" ] || { echo "--task is required" >&2; exit 2; }
-[ "$FIXTURE" -eq 1 ] || {
-  echo "remote deploy currently requires --fixture; run authenticated agents locally" >&2
-  exit 2
+if (internal.has(command)) {
+  process.argv.splice(2, 1);
+  await import(internal.get(command));
+} else {
+  const { main } = await import("../src/monolith.mjs");
+  main().catch(error => {
+    process.stderr.write(`monolith: ${error.message}\n`);
+    process.exitCode = 1;
+  });
 }
-if [ -n "$PROXMOX" ]; then
-  case "$VMID" in ''|*[!0-9]*) echo "--vmid must be numeric" >&2; exit 2 ;; esac
-elif [ -z "$HOST" ]; then
-  echo "--host or --proxmox with --vmid is required" >&2
-  exit 2
-fi
-
-node "$ROOT/src/runner.mjs" validate "$SPEC"
-IMAGE=monolith-workflow:latest
-docker build --platform linux/amd64 -t "$IMAGE" "$ROOT"
-
-TASK_B64=$(printf %s "$TASK" | base64 | tr -d '\n')
-FIXTURE_B64=$(printf '%s' '["node","/app/test/fixture-agent.mjs"]' | base64 | tr -d '\n')
-
-RUN="mkdir -p /opt/monolith/state /opt/monolith/workspace && chown -R 1000:1000 /opt/monolith/state /opt/monolith/workspace; docker rm -f monolith-workflow >/dev/null 2>&1 || true; docker run --name monolith-workflow -e MONOLITH_TASK_B64=$TASK_B64 -e MONOLITH_AGENT_COMMAND_B64=$FIXTURE_B64 -v /opt/monolith/state:/state -v /opt/monolith/workspace:/workspace $IMAGE run /app/workflows/engineering-loop.json --task-base64-env MONOLITH_TASK_B64 --state-dir /state --workspace /workspace"
-
-if [ -n "$PROXMOX" ]; then
-  docker save "$IMAGE" | ssh "$PROXMOX" "pct exec $VMID -- docker load"
-  ssh "$PROXMOX" "pct exec $VMID -- sh -lc '$RUN'"
-else
-  docker save "$IMAGE" | ssh "$HOST" docker load
-  ssh "$HOST" "$RUN"
-fi

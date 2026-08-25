@@ -1,0 +1,13 @@
+*
+!package.json
+!bin/
+!bin/**
+!src/
+!src/**
+!starters/
+!starters/**
+!templates/
+!templates/**
+!etc/
+!etc/opencode/
+!etc/opencode/opencode.json

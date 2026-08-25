@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "share": "disabled",
+  "autoupdate": false,
+  "enabled_providers": [
+    "openrouter"
+  ],
+  "subagent_depth": 0,
+  "provider": {
+    "openrouter": {
+      "options": {
+        "apiKey": "monolith-runtime-proxy",
+        "baseURL": "{env:MONOLITH_GATEWAY_URL}"
+      }
+    }
+  },
+  "permission": {
+    "external_directory": {
+      "*": "deny",
+      "/instructions/**": "allow",
+      "/handoff/**": "allow"
+    },
+    "question": "deny"
+  }
+}

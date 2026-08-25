@@ -1,0 +1,1136 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  agentCreateArgs,
+  bootstrapArgs,
+  DockerRuntime,
+  proxyCreateArgs,
+  serverCreateArgs,
+  snapshotDirectory,
+} from "../src/docker-runtime.mjs";
+
+const IMAGE = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const APP_ID = "b".repeat(64);
+const SECRET = `sk-or-v1-${"a".repeat(40)}`;
+const common = { deployment: "demo", image: IMAGE };
+const workflow = {
+  output: {
+    directory: "dist",
+    maxFiles: 100,
+    maxBytes: 1_000_000,
+    smoke: { path: "/", status: 200, contains: "Monolith" },
+  },
+};
+
+function dockerResult(overrides = {}) {
+  return { code: 0, stdout: "", stderr: "", ...overrides };
+}
+
+function appInspect(args, { id = APP_ID, running = true } = {}) {
+  if (args.at(-1).includes("backup") && args.includes("{{.Id}}")) {
+    return dockerResult({ code: 1, stderr: "Error: No such container\n" });
+  }
+  return dockerResult({ stdout: `${id} ${running}\n` });
+}
+
+function futureDeadline(milliseconds = 30_000) {
+  return Date.now() + milliseconds;
+}
+
+function stallUntilAborted({ signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new Error("command aborted"));
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+function receiptFor(files) {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for (const relative of Object.keys(files).sort()) {
+    const content = Buffer.from(files[relative]);
+    bytes += content.length;
+    hash.update(`${relative}\0${content.length}\0`);
+    hash.update(content);
+  }
+  return { files: Object.keys(files).length, bytes, sha256: hash.digest("hex") };
+}
+
+function createRuntime() {
+  return new DockerRuntime({
+    image: IMAGE,
+    deployment: "demo",
+    hostRoot: "/var/lib/monolith/deployments/demo",
+    key: SECRET,
+    model: "openrouter/deepseek/deepseek-v4-flash",
+    port: 8080,
+    publicUrl: "https://thisismonolith.sh",
+  });
+}
+
+function mode(stat) {
+  return stat.mode & 0o777;
+}
+
+async function makeWritable(target) {
+  const stat = await lstat(target).catch(() => null);
+  if (!stat || stat.isSymbolicLink()) return;
+  if (stat.isDirectory()) {
+    await chmod(target, 0o700);
+    for (const entry of await readdir(target)) {
+      await makeWritable(path.join(target, entry));
+    }
+  } else {
+    await chmod(target, 0o600);
+  }
+}
+
+async function cleanupTemporary(target) {
+  await makeWritable(target);
+  await rm(target, { recursive: true, force: true });
+}
+
+test("agent containers use only the isolated agent network and external prompt mount", () => {
+  const args = agentCreateArgs({
+    ...common,
+    role: "qa",
+    step: 2,
+    network: "monolith-demo-agents",
+    workspaceHost: "/var/lib/monolith/deployments/demo/workspace",
+    handoffHost: "/var/lib/monolith/deployments/demo/runs/run-1/attempts/qa/handoff",
+    promptHost: "/var/lib/monolith/deployments/demo/runs/run-1/attempts/qa/instructions.md",
+    access: "read",
+    model: "openrouter/deepseek/deepseek-v4-flash",
+    timeoutSeconds: 1200,
+  });
+  const rendered = args.join(" ");
+
+  assert.match(rendered, /--network monolith-demo-agents/);
+  assert.match(rendered, /MONOLITH_GATEWAY_URL=http:\/\/gateway:8787\/api\/v1/);
+  assert.match(rendered, /dst=\/workspace,readonly/);
+  assert.match(rendered, /instructions\.md,dst=\/instructions\/instructions\.md,readonly/);
+  assert.match(rendered, /--read-only/);
+  assert.match(rendered, /--cap-drop ALL/);
+  assert.match(rendered, /no-new-privileges/);
+  assert.doesNotMatch(rendered, /--network container:|127\.0\.0\.1:8787|\.monolith-instructions/);
+  assert.doesNotMatch(rendered, /OPENROUTER_API_KEY|sk-or-|docker\.sock|\/state|Users\/|\.ssh/);
+});
+
+test("only Engineering receives a writable shared workspace", () => {
+  const args = agentCreateArgs({
+    ...common,
+    role: "engineering",
+    step: 1,
+    network: "monolith-demo-agents",
+    workspaceHost: "/var/lib/monolith/deployments/demo/workspace",
+    handoffHost: "/var/lib/monolith/deployments/demo/runs/run-1/attempts/engineering/handoff",
+    promptHost: "/var/lib/monolith/deployments/demo/runs/run-1/attempts/engineering/instructions.md",
+    access: "write",
+    model: "openrouter/deepseek/deepseek-v4-flash",
+    timeoutSeconds: 1200,
+  });
+  assert.match(args.join(" "), /dst=\/workspace(?: |$)/);
+  assert.doesNotMatch(args.join(" "), /dst=\/workspace,readonly/);
+});
+
+test("bootstrap is fixed, offline, and receives only the writable workspace", () => {
+  const args = bootstrapArgs({
+    ...common,
+    workspaceHost: "/var/lib/monolith/deployments/demo/workspace",
+  });
+  const rendered = args.join(" ");
+
+  assert.deepEqual(args.slice(0, 4), ["run", "--rm", "--name", "monolith-demo-bootstrap"]);
+  assert.match(rendered, /--label sh\.thisismonolith\.deployment=demo/);
+  assert.match(rendered, /--label sh\.thisismonolith\.transient=true/);
+  assert.match(rendered, /--network none --read-only/);
+  assert.match(rendered, /src=\/var\/lib\/monolith\/deployments\/demo\/workspace,dst=\/workspace(?: |$)/);
+  assert.deepEqual(args.slice(-2), [IMAGE, "bootstrap"]);
+  assert.doesNotMatch(rendered, /gateway|registry|OPENROUTER|sk-or-/);
+  assert.doesNotMatch(rendered, /dst=\/workspace,readonly/);
+});
+
+test("credential gateway is isolated-listener policy with a hard lifetime", () => {
+  const args = proxyCreateArgs({
+    ...common,
+    network: "monolith-demo-agents",
+    model: "openrouter/deepseek/deepseek-v4-flash",
+  });
+  const rendered = args.join(" ");
+  assert.match(rendered, /--network monolith-demo-agents/);
+  assert.match(rendered, /--network-alias gateway/);
+  assert.match(rendered, /--listen-scope isolated-network/);
+  assert.match(rendered, /--lifetime-seconds 3600/);
+  assert.match(rendered, /--model deepseek\/deepseek-v4-flash/);
+  assert.match(rendered, /--max-requests 100/);
+  assert.match(rendered, /--interactive/);
+  assert.doesNotMatch(rendered, /OPENROUTER_API_KEY|sk-or-/);
+});
+
+test("start bootstraps offline, creates two networks, and dual-homes only the proxy", async () => {
+  const runtime = createRuntime();
+  const calls = [];
+  runtime.command = async (args) => {
+    calls.push(args);
+    if (args[0] === "create" && args.includes("proxy")) {
+      return dockerResult({ stdout: "proxy-id\n" });
+    }
+    return dockerResult();
+  };
+  runtime.startProxy = (containerId, input) => {
+    calls.push(["start-attached", containerId, input.endsWith("\n")]);
+    return { kill() {} };
+  };
+
+  await runtime.start({ deadlineAt: futureDeadline() });
+
+  const bootstrap = calls.find(args => args[0] === "run" && args.includes("bootstrap"));
+  const agentNetwork = calls.find(args => args[0] === "network" && args[1] === "create" && args.includes("--internal"));
+  const egressNetwork = calls.find(args => args[0] === "network" && args[1] === "create" && !args.includes("--internal"));
+  const proxyCreate = calls.find(args => args[0] === "create" && args.includes("proxy"));
+  const networkConnect = calls.find(args => args[0] === "network" && args[1] === "connect");
+  const readinessProbe = calls.find(args => args[0] === "run" && args.includes("probe"));
+  assert.deepEqual(bootstrap.slice(0, 4), [
+    "run", "--rm", "--name", "monolith-demo-bootstrap", "--network", "none",
+  ].slice(0, 4));
+  assert(agentNetwork.includes("monolith-demo-agents"));
+  assert(egressNetwork.includes("monolith-demo-egress"));
+  assert.equal(proxyCreate[proxyCreate.indexOf("--network") + 1], "monolith-demo-agents");
+  assert.deepEqual(networkConnect, ["network", "connect", "monolith-demo-egress", "proxy-id"]);
+  assert(calls.some(args => args[0] === "start-attached" && args[1] === "proxy-id"));
+  assert.equal(readinessProbe[readinessProbe.indexOf("--network") + 1], "monolith-demo-agents");
+  assert.match(readinessProbe.join(" "), /http:\/\/gateway:8787\/healthz/);
+  assert.doesNotMatch(calls.flat().join(" "), /--network container:/);
+  assert.equal(runtime.key, null);
+});
+
+test("close removes both deployment networks after removing the proxy", async () => {
+  const runtime = createRuntime();
+  const calls = [];
+  let killed = false;
+  runtime.proxyId = "proxy-id";
+  runtime.proxyProcess = { kill() { killed = true; } };
+  runtime.agentNetworkCreated = true;
+  runtime.egressNetworkCreated = true;
+  runtime.command = async (args) => {
+    calls.push(args);
+    return dockerResult();
+  };
+
+  await runtime.close();
+
+  assert.deepEqual(calls, [
+    ["rm", "-f", "proxy-id"],
+    ["network", "rm", "monolith-demo-agents"],
+    ["network", "rm", "monolith-demo-egress"],
+  ]);
+  assert.equal(killed, true);
+  assert.equal(runtime.key, null);
+});
+
+test("a failed proxy start cleans both networks created by this runtime", async () => {
+  const runtime = createRuntime();
+  const calls = [];
+  runtime.command = async (args) => {
+    calls.push(args);
+    if (args[0] === "create" && args.includes("proxy")) throw new Error("proxy create failed");
+    return dockerResult();
+  };
+
+  await assert.rejects(runtime.start({ deadlineAt: futureDeadline() }), /proxy create failed/);
+
+  assert.deepEqual(calls.slice(-3), [
+    ["rm", "-f", "monolith-demo-gateway"],
+    ["network", "rm", "monolith-demo-agents"],
+    ["network", "rm", "monolith-demo-egress"],
+  ]);
+  assert.equal(runtime.agentNetworkCreated, false);
+  assert.equal(runtime.egressNetworkCreated, false);
+  assert.equal(runtime.key, null);
+});
+
+test("runRole never creates or deletes a workspace instruction placeholder", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-role-"));
+  t.after(() => cleanupTemporary(temporary));
+  const workspace = path.join(temporary, "workspace");
+  const runDir = path.join(temporary, "run-1");
+  await mkdir(workspace);
+  await mkdir(runDir);
+  const preexisting = path.join(workspace, ".monolith-instructions.md");
+  await writeFile(preexisting, "user-owned\n");
+
+  const runtime = createRuntime();
+  let createArgs;
+  const calls = [];
+  runtime.command = async (args) => {
+    calls.push(args);
+    if (args[0] === "create") {
+      createArgs = args;
+      throw new Error("stop before Docker create");
+    }
+    return dockerResult();
+  };
+
+  await assert.rejects(runtime.runRole({
+    role: "qa",
+    step: 1,
+    attempt: 1,
+    access: "read",
+    prompt: "bounded prompt",
+    timeoutSeconds: 60,
+    runDir,
+    workspace,
+  }), /stop before Docker create/);
+
+  assert.equal(await readFile(preexisting, "utf8"), "user-owned\n");
+  assert.match(createArgs.join(" "), /dst=\/instructions\/instructions\.md,readonly/);
+  assert.doesNotMatch(createArgs.join(" "), /\.monolith-instructions/);
+  assert(calls.some(args => args.join(" ") === "rm -f monolith-demo-qa-1"));
+});
+
+test("a lost network-create response reconciles the attempted deterministic network", async () => {
+  const runtime = createRuntime();
+  const calls = [];
+  runtime.command = async args => {
+    calls.push(args);
+    if (args[0] === "network" && args[1] === "create" && args.includes("--internal")) {
+      throw new Error("transport lost after network create");
+    }
+    return dockerResult();
+  };
+
+  await assert.rejects(
+    runtime.start({ deadlineAt: futureDeadline() }),
+    /transport lost after network create/,
+  );
+
+  assert(calls.some(args => args.join(" ") === "network rm monolith-demo-agents"));
+  assert.equal(calls.some(args => args[0] === "network" && args[1] === "create" && args.includes("monolith-demo-egress")), false);
+  assert.equal(runtime.agentNetworkCreated, false);
+});
+
+test("start removes exactly labeled stale containers and networks before bootstrap", async () => {
+  const runtime = createRuntime();
+  const calls = [];
+  const staleContainer = "1".repeat(12);
+  const staleNetwork = "2".repeat(12);
+  runtime.command = async args => {
+    calls.push(args);
+    if (args[0] === "ps") return dockerResult({ stdout: `${staleContainer}\n` });
+    if (args[0] === "network" && args[1] === "ls") return dockerResult({ stdout: `${staleNetwork}\n` });
+    if (args[0] === "create" && args.includes("proxy")) return dockerResult({ stdout: "proxy-id\n" });
+    return dockerResult();
+  };
+  runtime.startProxy = () => ({ kill() {} });
+
+  await runtime.start({ deadlineAt: futureDeadline() });
+
+  const listContainers = calls.findIndex(args => args[0] === "ps");
+  const removeContainers = calls.findIndex(args => args.join(" ") === `rm -f ${staleContainer}`);
+  const listNetworks = calls.findIndex(args => args[0] === "network" && args[1] === "ls");
+  const removeNetworks = calls.findIndex(args => args.join(" ") === `network rm ${staleNetwork}`);
+  const bootstrap = calls.findIndex(args => args[0] === "run" && args.includes("bootstrap"));
+  assert(listContainers < removeContainers);
+  assert(removeContainers < listNetworks);
+  assert(listNetworks < removeNetworks);
+  assert(removeNetworks < bootstrap);
+  assert.match(calls[listContainers].join(" "), /label=sh\.thisismonolith\.deployment=demo/);
+  assert.match(calls[listContainers].join(" "), /label=sh\.thisismonolith\.transient=true/);
+});
+
+test("snapshotDirectory creates an independent read-only run artifact", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-snapshot-"));
+  t.after(() => cleanupTemporary(temporary));
+  const source = path.join(temporary, "dist");
+  const destination = path.join(temporary, "artifact");
+  await mkdir(path.join(source, "assets"), { recursive: true });
+  await writeFile(path.join(source, "index.html"), "verified-v1\n", { mode: 0o666 });
+  await writeFile(path.join(source, "assets", "app.js"), "console.log('v1');\n", { mode: 0o777 });
+
+  await snapshotDirectory(source, destination, {
+    uid: process.getuid?.() ?? 0,
+    gid: process.getgid?.() ?? 0,
+  });
+  await writeFile(path.join(source, "index.html"), "workspace-mutated\n");
+
+  assert.equal(await readFile(path.join(destination, "index.html"), "utf8"), "verified-v1\n");
+  assert.equal(mode(await lstat(destination)), 0o555);
+  assert.equal(mode(await lstat(path.join(destination, "assets"))), 0o555);
+  assert.equal(mode(await lstat(path.join(destination, "index.html"))), 0o444);
+  assert.equal(mode(await lstat(path.join(destination, "assets", "app.js"))), 0o444);
+  await assert.rejects(
+    snapshotDirectory(source, destination, {
+      uid: process.getuid?.() ?? 0,
+      gid: process.getgid?.() ?? 0,
+    }),
+    /artifact snapshot already exists/,
+  );
+});
+
+test("snapshotDirectory rejects symlinks and removes the incomplete artifact", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-symlink-"));
+  t.after(() => cleanupTemporary(temporary));
+  const source = path.join(temporary, "dist");
+  const destination = path.join(temporary, "artifact");
+  const outside = path.join(temporary, "outside.txt");
+  await mkdir(source);
+  await writeFile(outside, "outside\n");
+  await symlink(outside, path.join(source, "escape.txt"));
+
+  await assert.rejects(
+    snapshotDirectory(source, destination, {
+      uid: process.getuid?.() ?? 0,
+      gid: process.getgid?.() ?? 0,
+    }),
+    /verified output contains a symlink/,
+  );
+  assert.equal(await lstat(destination).catch(() => null), null);
+});
+
+test("verification passes smoke policy and snapshots output before success", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-verify-"));
+  t.after(() => cleanupTemporary(temporary));
+  const workspace = path.join(temporary, "workspace");
+  const runDir = path.join(temporary, "run-1");
+  await mkdir(path.join(workspace, "dist"), { recursive: true });
+  await mkdir(runDir);
+  await writeFile(path.join(workspace, "dist", "index.html"), "Monolith\n");
+
+  const runtime = createRuntime();
+  const calls = [];
+  runtime.snapshotOwner = {
+    uid: process.getuid?.() ?? 0,
+    gid: process.getgid?.() ?? 0,
+  };
+  runtime.command = async (args, options) => {
+    calls.push({ args, options });
+    if (args[0] === "create") return dockerResult({ stdout: "verify-id\n" });
+    if (args[0] === "start") {
+      return dockerResult({
+        stdout: `${JSON.stringify({
+          status: "passed",
+          evidence: ["tests passed"],
+          artifact: receiptFor({ "index.html": "Monolith\n" }),
+        })}\n`,
+      });
+    }
+    return dockerResult();
+  };
+
+  assert.deepEqual(await runtime.verify({
+    workflow,
+    workspace,
+    runDir,
+    timeoutSeconds: 1200,
+  }), {
+    status: "passed",
+    evidence: ["tests passed"],
+    artifact: receiptFor({ "index.html": "Monolith\n" }),
+  });
+  assert.equal(await readFile(path.join(runDir, "artifact", "index.html"), "utf8"), "Monolith\n");
+  assert.equal(mode(await lstat(path.join(runDir, "artifact", "index.html"))), 0o444);
+  assert.match(calls[0].args.join(" "), /--path \/ --status 200 --timeout-seconds 900/);
+  assert(calls[1].options.timeoutMs <= 900_000);
+  assert(calls[1].options.timeoutMs > 899_000);
+});
+
+test("server args publish only a run-scoped snapshot", () => {
+  const finalArgs = serverCreateArgs({
+    ...common,
+    outputHost: "/var/lib/monolith/deployments/demo/runs/run-1/artifact",
+    port: 8080,
+  });
+  const candidateArgs = serverCreateArgs({
+    ...common,
+    outputHost: "/var/lib/monolith/deployments/demo/runs/run-1/artifact",
+    port: 8080,
+    nameSuffix: "app-candidate-run-1",
+    publish: false,
+    restart: false,
+  });
+  const rendered = finalArgs.join(" ");
+
+  assert.match(rendered, /runs\/run-1\/artifact,dst=\/site,readonly/);
+  assert.match(rendered, /--restart unless-stopped/);
+  assert.match(rendered, /--publish 8080:8080/);
+  assert.doesNotMatch(rendered, /workspace|\/dist|docker\.sock|\/state|OPENROUTER/);
+  assert.doesNotMatch(candidateArgs.join(" "), /--restart|--publish/);
+});
+
+async function publicationFixture(t) {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-publish-"));
+  t.after(() => cleanupTemporary(temporary));
+  const runDir = path.join(temporary, "run-1");
+  await mkdir(runDir);
+  const workspace = path.join(temporary, "workspace");
+  const source = path.join(workspace, "dist");
+  await mkdir(source, { recursive: true });
+  await writeFile(path.join(source, "index.html"), "Monolith\n");
+  const runtime = createRuntime();
+  runtime.snapshotOwner = {
+    uid: process.getuid?.() ?? 0,
+    gid: process.getgid?.() ?? 0,
+  };
+  runtime.command = async args => {
+    if (args[0] === "create") return dockerResult({ stdout: "verify-id\n" });
+    if (args[0] === "start") {
+      return dockerResult({ stdout: `${JSON.stringify({
+        status: "passed",
+        evidence: ["fixture verified"],
+        artifact: receiptFor({ "index.html": "Monolith\n" }),
+      })}\n` });
+    }
+    return dockerResult();
+  };
+  const verification = await runtime.verify({ workflow, workspace, runDir, timeoutSeconds: 30 });
+  runtime.healthAttempts = 1;
+  runtime.wait = async () => {};
+  return { runtime, runDir, verification };
+}
+
+test("publish health-checks the candidate before interrupting the old app", async (t) => {
+  const { runtime, runDir } = await publicationFixture(t);
+  const calls = [];
+  runtime.command = async (args) => {
+    calls.push(args);
+    if (args[0] === "container") return appInspect(args);
+    return dockerResult({ stdout: args[0] === "create" ? "container-id\n" : "" });
+  };
+
+  assert.deepEqual(await runtime.publish({ workflow, runDir, timeoutSeconds: 30 }), {
+    url: "https://thisismonolith.sh/",
+  });
+  await runtime.close();
+
+  const candidateProbe = calls.findIndex(args => args[0] === "exec" && args[1].includes("candidate"));
+  const oldRename = calls.findIndex(args => args[0] === "rename" && args[1] === "monolith-demo-app");
+  const oldStop = calls.findIndex(args => args[0] === "stop" && args.at(-1).includes("backup"));
+  const finalProbe = calls.findIndex(args => args[0] === "exec" && args[1] === "monolith-demo-app");
+  const backupRemoval = calls.findIndex(args => args[0] === "rm" && args.at(-1).includes("backup"));
+
+  assert(candidateProbe >= 0);
+  assert(candidateProbe < oldRename);
+  assert(candidateProbe < oldStop);
+  assert(oldStop < finalProbe);
+  assert(finalProbe < backupRemoval);
+  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1) === "monolith-demo-app"), false);
+  assert.equal(calls.every(args => !args.join(" ").includes("/workspace/dist")), true);
+  const createCalls = calls.filter(args => args[0] === "create");
+  assert.match(createCalls[0].join(" "), /runs\/run-1\/artifact,dst=\/site,readonly/);
+  assert.doesNotMatch(createCalls[0].join(" "), /--publish/);
+  assert.match(createCalls[1].join(" "), /--publish 8080:8080/);
+});
+
+test("a failed candidate leaves the old app untouched", async (t) => {
+  const { runtime, runDir } = await publicationFixture(t);
+  const calls = [];
+  runtime.command = async (args) => {
+    calls.push(args);
+    if (args[0] === "exec" && args[1].includes("candidate")) throw new Error("candidate unhealthy");
+    return dockerResult({ stdout: args[0] === "create" ? "candidate-id\n" : "" });
+  };
+
+  await assert.rejects(runtime.publish({ workflow, runDir, timeoutSeconds: 30 }), /candidate unhealthy/);
+
+  assert.equal(calls.some(args => args[0] === "container"), false);
+  assert.equal(calls.some(args => args[0] === "rename" || args[0] === "stop"), false);
+  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1) === "monolith-demo-app"), false);
+  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1).includes("candidate")), true);
+});
+
+test("a failed final replacement restores the previously running app", async (t) => {
+  const { runtime, runDir } = await publicationFixture(t);
+  const calls = [];
+  runtime.command = async (args) => {
+    calls.push(args);
+    if (args[0] === "container") return appInspect(args);
+    if (args[0] === "exec" && args[1] === "monolith-demo-app") {
+      throw new Error("replacement unhealthy");
+    }
+    return dockerResult({ stdout: args[0] === "create" ? "container-id\n" : "" });
+  };
+
+  await assert.rejects(runtime.publish({ workflow, runDir, timeoutSeconds: 30 }), /replacement unhealthy/);
+
+  const candidateProbe = calls.findIndex(args => args[0] === "exec" && args[1].includes("candidate"));
+  const stopOld = calls.findIndex(args => args[0] === "stop" && args.at(-1).includes("backup"));
+  const removeReplacement = calls.findIndex(args => args[0] === "rm" && args.at(-1) === "monolith-demo-app");
+  const restoreRename = calls.findIndex((args, index) => (
+    index > removeReplacement && args[0] === "rename" && args.at(-1) === "monolith-demo-app"
+  ));
+  const restoreStart = calls.findIndex((args, index) => (
+    index > restoreRename && args[0] === "start" && args[1] === "monolith-demo-app"
+  ));
+
+  assert(candidateProbe < stopOld);
+  assert(stopOld < removeReplacement);
+  assert(removeReplacement < restoreRename);
+  assert(restoreRename < restoreStart);
+});
+
+test("the absolute deployment deadline rejects stalled image inspection and bootstrap", async () => {
+  for (const operation of ["image", "start"]) {
+    const runtime = createRuntime();
+    runtime.command = async (args, options) => {
+      if (operation === "start" && (args[0] === "ps" || (args[0] === "network" && args[1] === "ls"))) {
+        return dockerResult();
+      }
+      return stallUntilAborted(options);
+    };
+    const startedAt = Date.now();
+    const deadlineAt = futureDeadline(75);
+    const promise = operation === "image"
+      ? runtime.imageDigest({ deadlineAt })
+      : runtime.start({ deadlineAt });
+
+    await assert.rejects(promise, /deployment deadline exceeded/);
+    assert(Date.now() - startedAt < 1_000, `${operation} exceeded its absolute deadline`);
+  }
+});
+
+test("a bootstrap deadline waits for ambiguous command settlement before cleanup", async () => {
+  const runtime = createRuntime();
+  const calls = [];
+  let bootstrapExists = false;
+  runtime.command = async args => {
+    calls.push(args);
+    if (args[0] === "ps" || (args[0] === "network" && args[1] === "ls")) return dockerResult();
+    if (args[0] === "run" && args.includes("monolith-demo-bootstrap")) {
+      return new Promise(resolve => {
+        setTimeout(() => {
+          bootstrapExists = true;
+          resolve(dockerResult());
+        }, 100);
+      });
+    }
+    if (args[0] === "rm" && args.at(-1) === "monolith-demo-bootstrap") {
+      bootstrapExists = false;
+    }
+    return dockerResult();
+  };
+
+  await assert.rejects(runtime.start({ deadlineAt: futureDeadline(30) }), /deployment deadline exceeded/);
+
+  const bootstrap = calls.findIndex(args => args[0] === "run" && args.includes("monolith-demo-bootstrap"));
+  const cleanup = calls.findIndex(args => args.join(" ") === "rm -f monolith-demo-bootstrap");
+  assert(bootstrap >= 0 && cleanup > bootstrap);
+  assert.equal(bootstrapExists, false);
+  await new Promise(resolve => setTimeout(resolve, 125));
+  assert.equal(bootstrapExists, false);
+});
+
+test("a Docker callback cannot report success after blocking past its deadline", async () => {
+  const runtime = createRuntime();
+  runtime.command = async () => {
+    const stopAt = Date.now() + 60;
+    while (Date.now() < stopAt) {}
+    return dockerResult({ stdout: `${IMAGE}\n` });
+  };
+
+  await assert.rejects(
+    runtime.imageDigest({ deadlineAt: futureDeadline(20) }),
+    /deployment deadline exceeded/,
+  );
+});
+
+test("a stalled snapshot read is aborted by its deadline and the partial tree is removed", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-stalled-snapshot-"));
+  t.after(() => cleanupTemporary(temporary));
+  const source = path.join(temporary, "dist");
+  const destination = path.join(temporary, "artifact");
+  const sourceFile = path.join(source, "index.html");
+  await mkdir(source);
+  await writeFile(sourceFile, "Monolith\n");
+  const startedAt = Date.now();
+
+  await assert.rejects(snapshotDirectory(
+    source,
+    destination,
+    { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 },
+    {
+      deadlineAt: futureDeadline(75),
+      operations: {
+        async open(target, ...args) {
+          const handle = await open(target, ...args);
+          if (target !== sourceFile) return handle;
+          return {
+            stat: (...statArgs) => handle.stat(...statArgs),
+            close: () => handle.close(),
+            readFile: ({ signal }) => new Promise((resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            }),
+          };
+        },
+      },
+    },
+  ), /snapshot deadline exceeded/);
+
+  assert(Date.now() - startedAt < 1_000);
+  assert.equal(await lstat(destination).catch(() => null), null);
+});
+
+test("a stalled snapshot metadata callback is deadline-bounded and cleaned with trusted operations", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-stalled-metadata-"));
+  t.after(() => cleanupTemporary(temporary));
+  const source = path.join(temporary, "dist");
+  const destination = path.join(temporary, "artifact");
+  await mkdir(source);
+  const startedAt = Date.now();
+
+  await assert.rejects(snapshotDirectory(
+    source,
+    destination,
+    { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 },
+    {
+      deadlineAt: futureDeadline(75),
+      operations: { readdir: async () => new Promise(() => {}) },
+    },
+  ), /snapshot deadline exceeded/);
+
+  assert(Date.now() - startedAt < 1_000);
+  assert.equal(await lstat(destination).catch(() => null), null);
+});
+
+test("a locked nested snapshot is made writable and removed when its receipt mismatches", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-mismatch-cleanup-"));
+  t.after(() => cleanupTemporary(temporary));
+  const source = path.join(temporary, "dist");
+  const destination = path.join(temporary, "artifact");
+  await mkdir(path.join(source, "assets", "nested"), { recursive: true });
+  await writeFile(path.join(source, "assets", "nested", "app.js"), "verified\n");
+
+  await assert.rejects(snapshotDirectory(
+    source,
+    destination,
+    { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 },
+    {
+      deadlineAt: futureDeadline(),
+      expectedArtifact: { files: 1, bytes: 9, sha256: "0".repeat(64) },
+      maxFiles: 10,
+      maxBytes: 1_000,
+    },
+  ), /does not match verification receipt/);
+
+  assert.equal(await lstat(destination).catch(() => null), null);
+});
+
+test("empty-directory fanout counts against the snapshot entry bound", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-entry-bound-"));
+  t.after(() => cleanupTemporary(temporary));
+  const source = path.join(temporary, "dist");
+  const destination = path.join(temporary, "artifact");
+  await mkdir(source);
+  await Promise.all(["a", "b", "c"].map(name => mkdir(path.join(source, name))));
+
+  await assert.rejects(snapshotDirectory(
+    source,
+    destination,
+    { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 },
+    { deadlineAt: futureDeadline(), maxEntries: 2 },
+  ), /exceeds 2 entries/);
+  assert.equal(await lstat(destination).catch(() => null), null);
+});
+
+test("verification kills its container then rejects a workspace mutation that changes the snapshot receipt", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-verify-race-"));
+  t.after(() => cleanupTemporary(temporary));
+  const workspace = path.join(temporary, "workspace");
+  const runDir = path.join(temporary, "run-1");
+  const output = path.join(workspace, "dist", "index.html");
+  await mkdir(path.dirname(output), { recursive: true });
+  await mkdir(runDir);
+  await writeFile(output, "Monolith\n");
+  const runtime = createRuntime();
+  runtime.snapshotOwner = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+  const calls = [];
+  runtime.command = async args => {
+    calls.push(args);
+    if (args[0] === "create") return dockerResult({ stdout: "verify-id\n" });
+    if (args[0] === "start") {
+      return dockerResult({ stdout: `${JSON.stringify({
+        status: "passed",
+        evidence: ["verified original"],
+        artifact: receiptFor({ "index.html": "Monolith\n" }),
+      })}\n` });
+    }
+    if (args[0] === "rm") await writeFile(output, "Mutated!\n");
+    return dockerResult();
+  };
+
+  await assert.rejects(runtime.verify({ workflow, workspace, runDir, timeoutSeconds: 30 }), /does not match verification receipt/);
+  assert.deepEqual(calls.at(-1), ["rm", "-f", "verify-id"]);
+  assert.equal(await lstat(path.join(runDir, "artifact")).catch(() => null), null);
+});
+
+test("publication deadline rejects a stalled candidate probe and still attempts candidate cleanup", async (t) => {
+  const { runtime, runDir } = await publicationFixture(t);
+  runtime.deploymentDeadlineAt = futureDeadline(75);
+  runtime.cleanupTimeoutMs = 100;
+  runtime.cleanupCommandTimeoutMs = 25;
+  const calls = [];
+  runtime.command = async (args, options) => {
+    calls.push(args);
+    if (args[0] === "exec") return stallUntilAborted(options);
+    return dockerResult({ stdout: args[0] === "create" ? "candidate-id\n" : "" });
+  };
+  const startedAt = Date.now();
+
+  await assert.rejects(runtime.publish({ workflow, runDir, timeoutSeconds: 1 }), /publication deadline exceeded/);
+
+  assert(Date.now() - startedAt < 1_000);
+  assert(calls.some(args => args[0] === "rm" && args.at(-1).includes("candidate")));
+  assert.equal(calls.some(args => args[0] === "rename" || args[0] === "stop"), false);
+});
+
+test("an ambiguous final create is reconciled before the previous app is restored", async (t) => {
+  const { runtime, runDir } = await publicationFixture(t);
+  const calls = [];
+  runtime.command = async args => {
+    calls.push(args);
+    if (args[0] === "container") return appInspect(args);
+    if (args[0] === "create" && args[args.indexOf("--name") + 1] === "monolith-demo-app") {
+      throw new Error("transport lost after create");
+    }
+    return dockerResult({ stdout: args[0] === "create" ? "candidate-id\n" : "" });
+  };
+
+  await assert.rejects(
+    runtime.publish({ workflow, runDir, timeoutSeconds: 30 }),
+    /transport lost after create/,
+  );
+
+  const failedCreate = calls.findIndex(args => args[0] === "create" && args.includes("monolith-demo-app"));
+  const removeUnknownReplacement = calls.findIndex((args, index) => (
+    index > failedCreate && args[0] === "rm" && args.at(-1) === "monolith-demo-app"
+  ));
+  const restoreRename = calls.findIndex((args, index) => (
+    index > removeUnknownReplacement && args[0] === "rename" && args.at(-1) === "monolith-demo-app"
+  ));
+  assert(failedCreate < removeUnknownReplacement);
+  assert(removeUnknownReplacement < restoreRename);
+  assert(calls.some((args, index) => index > restoreRename && args[0] === "start" && args[1] === "monolith-demo-app"));
+});
+
+test("an ambiguous old-app rename is reconciled without attempting a replacement", async (t) => {
+  const { runtime, runDir } = await publicationFixture(t);
+  const calls = [];
+  let firstRename = true;
+  runtime.command = async args => {
+    calls.push(args);
+    if (args[0] === "container") return appInspect(args);
+    if (args[0] === "rename" && firstRename) {
+      firstRename = false;
+      throw new Error("transport lost after rename");
+    }
+    return dockerResult({ stdout: args[0] === "create" ? "candidate-id\n" : "" });
+  };
+
+  await assert.rejects(runtime.publish({ workflow, runDir, timeoutSeconds: 30 }), /transport lost after rename/);
+
+  assert.equal(calls.filter(args => args[0] === "create").length, 1);
+  assert(calls.some(args => args[0] === "rename" && args[1].includes("backup") && args[2] === "monolith-demo-app"));
+  assert(calls.some(args => args[0] === "start" && args[1] === "monolith-demo-app"));
+});
+
+test("backup retirement is deferred until close and cannot roll back the healthy replacement", async (t) => {
+  const { runtime, runDir } = await publicationFixture(t);
+  runtime.cleanupTimeoutMs = 100;
+  runtime.cleanupCommandTimeoutMs = 25;
+  const calls = [];
+  runtime.command = async (args, options) => {
+    calls.push(args);
+    if (args[0] === "container") return appInspect(args);
+    if (args[0] === "rm" && args.at(-1).includes("backup")) return stallUntilAborted(options);
+    return dockerResult({ stdout: args[0] === "create" ? "container-id\n" : "" });
+  };
+
+  assert.deepEqual(await runtime.publish({ workflow, runDir, timeoutSeconds: 30 }), {
+    url: "https://thisismonolith.sh/",
+  });
+  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1).includes("backup")), false);
+  await runtime.close();
+  assert(calls.some(args => args[0] === "rm" && args.at(-1).includes("backup")));
+  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1) === "monolith-demo-app"), false);
+  assert.equal(calls.filter(args => args[0] === "rename").length, 1);
+});
+
+test("mutating a returned verification receipt cannot change the private publication trust anchor", async (t) => {
+  const { runtime, runDir, verification } = await publicationFixture(t);
+  verification.artifact.sha256 = "0".repeat(64);
+  runtime.command = async args => {
+    if (args[0] === "container") {
+      return dockerResult({ code: 1, stderr: "Error: No such container\n" });
+    }
+    return dockerResult({ stdout: args[0] === "create" ? "container-id\n" : "" });
+  };
+
+  assert.deepEqual(await runtime.publish({ workflow, runDir, timeoutSeconds: 30 }), {
+    url: "https://thisismonolith.sh/",
+  });
+});
+
+test("rollback rejects a still-running replacement instead of mistaking it for the previous app", async (t) => {
+  const { runtime, runDir } = await publicationFixture(t);
+  const oldId = "c".repeat(64);
+  const newId = "d".repeat(64);
+  const containers = new Map([
+    ["monolith-demo-app", { id: oldId, running: true, healthy: true }],
+  ]);
+  runtime.command = async args => {
+    const operation = args[0];
+    if (operation === "container") {
+      const container = containers.get(args.at(-1));
+      if (!container) return dockerResult({ code: 1, stderr: "Error: No such container\n" });
+      return dockerResult({
+        stdout: args.includes("{{.Id}}")
+          ? `${container.id}\n`
+          : `${container.id} ${container.running}\n`,
+      });
+    }
+    if (operation === "create") {
+      const name = args[args.indexOf("--name") + 1];
+      containers.set(name, {
+        id: name.includes("candidate") ? "e".repeat(64) : newId,
+        running: false,
+        healthy: name.includes("candidate"),
+      });
+      return dockerResult({ stdout: `${name}-id\n` });
+    }
+    if (operation === "rename") {
+      const [source, destination] = args.slice(1);
+      if (containers.has(destination)) return dockerResult({ code: 1, stderr: "name conflict\n" });
+      const container = containers.get(source);
+      if (!container) return dockerResult({ code: 1, stderr: "no such container\n" });
+      containers.delete(source);
+      containers.set(destination, container);
+      return dockerResult();
+    }
+    if (operation === "start") {
+      const container = containers.get(args[1]);
+      if (container) container.running = true;
+      return dockerResult();
+    }
+    if (operation === "stop") {
+      const container = containers.get(args.at(-1));
+      if (container) container.running = false;
+      return dockerResult();
+    }
+    if (operation === "exec") {
+      const container = containers.get(args[1]);
+      if (!container?.healthy) throw new Error("replacement unhealthy");
+      return dockerResult();
+    }
+    if (operation === "rm") {
+      const name = args.at(-1);
+      if (name.includes("candidate")) containers.delete(name);
+      return dockerResult();
+    }
+    return dockerResult();
+  };
+
+  await assert.rejects(
+    runtime.publish({ workflow, runDir, timeoutSeconds: 30 }),
+    error => error instanceof AggregateError
+      && error.message.includes("previous app could not be restored"),
+  );
+
+  assert.deepEqual(containers.get("monolith-demo-app"), {
+    id: newId,
+    running: true,
+    healthy: false,
+  });
+  assert.deepEqual(containers.get("monolith-demo-app-backup-run-1"), {
+    id: oldId,
+    running: false,
+    healthy: true,
+  });
+});
+
+test("fresh-deploy rollback rejects a failed app that cleanup did not remove", async (t) => {
+  const { runtime, runDir } = await publicationFixture(t);
+  const newId = "f".repeat(64);
+  let finalExists = false;
+  runtime.command = async args => {
+    if (args[0] === "container") {
+      if (!finalExists) return dockerResult({ code: 1, stderr: "Error: No such container\n" });
+      return dockerResult({ stdout: args.includes("{{.Id}} {{.State.Running}}") ? `${newId} true\n` : `${newId}\n` });
+    }
+    if (args[0] === "create") {
+      const name = args[args.indexOf("--name") + 1];
+      if (name === "monolith-demo-app") finalExists = true;
+      return dockerResult({ stdout: "container-id\n" });
+    }
+    if (args[0] === "exec" && args[1] === "monolith-demo-app") {
+      throw new Error("replacement unhealthy");
+    }
+    if (args[0] === "rm" && args.at(-1) === "monolith-demo-app") {
+      return dockerResult();
+    }
+    return dockerResult();
+  };
+
+  await assert.rejects(
+    runtime.publish({ workflow, runDir, timeoutSeconds: 30 }),
+    error => error instanceof AggregateError && error.message.includes("failed app could not be removed"),
+  );
+  assert.equal(finalExists, true);
+});
+
+test("cancelling a stalled role removes its exact active name and blocks verification", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-cancel-role-"));
+  t.after(() => cleanupTemporary(temporary));
+  const workspace = path.join(temporary, "workspace");
+  const runDir = path.join(temporary, "run-1");
+  await mkdir(workspace);
+  await mkdir(runDir);
+  const runtime = createRuntime();
+  runtime.deploymentDeadlineAt = futureDeadline();
+  const calls = [];
+  let childSettled = false;
+  let roleContainerExists = false;
+  let lateCreateTimer;
+  let cancelStartedAt;
+  runtime.command = async (args, options = {}) => {
+    calls.push(args);
+    if (args[0] === "create") {
+      roleContainerExists = true;
+      return dockerResult({ stdout: "role-id\n" });
+    }
+    if (args[0] === "start") {
+      lateCreateTimer = setTimeout(() => { roleContainerExists = true; }, 150);
+      setTimeout(() => {
+        cancelStartedAt = Date.now();
+        void runtime.cancel();
+      }, 10);
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener("abort", () => {
+          clearTimeout(lateCreateTimer);
+          setTimeout(() => {
+            childSettled = true;
+            reject(new Error("child operation aborted"));
+          }, 10);
+        }, { once: true });
+      });
+    }
+    if (args[0] === "rm") {
+      roleContainerExists = false;
+    }
+    return dockerResult();
+  };
+
+  await assert.rejects(runtime.runRole({
+    role: "engineering",
+    step: 1,
+    attempt: 1,
+    access: "write",
+    prompt: "cancel me",
+    timeoutSeconds: 30,
+    runDir,
+    workspace,
+  }), /deployment cancelled/);
+  await runtime.cancel();
+
+  assert(childSettled);
+  assert(Date.now() - cancelStartedAt < 1_000);
+  assert(calls.some(args => args.join(" ") === "rm -f monolith-demo-engineering-1"));
+  await new Promise(resolve => setTimeout(resolve, 175));
+  assert.equal(roleContainerExists, false);
+  const callsBeforeVerify = calls.length;
+  await assert.rejects(
+    runtime.verify({ workflow, workspace, runDir, timeoutSeconds: 30 }),
+    /deployment cancelled/,
+  );
+  assert.equal(calls.length, callsBeforeVerify);
+  assert.strictEqual(runtime.cancel(), runtime.close());
+});
+
+test("cancel aborts and settles the underlying spawned command", async () => {
+  const runtime = createRuntime();
+  runtime.docker = process.execPath;
+  const startedAt = Date.now();
+  const operation = runtime.commandWithin(
+    ["-e", "setInterval(() => {}, 1000)"],
+    {},
+    futureDeadline(30_000),
+    "role",
+  );
+  setTimeout(() => { void runtime.cancel(); }, 20);
+
+  await assert.rejects(operation, /deployment cancelled/);
+  await runtime.cancel();
+  assert(Date.now() - startedAt < 1_000);
+});
+
+test("near-deadline cancel kills a TERM-resistant child before its late mutation", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-cancel-child-"));
+  const ready = path.join(temporary, "ready");
+  const lateMarker = path.join(temporary, "late-marker");
+  const runtime = createRuntime();
+  t.after(async () => {
+    await runtime.cancel();
+    await cleanupTemporary(temporary);
+  });
+  runtime.docker = process.execPath;
+  const deadlineAt = futureDeadline(3_000);
+  const operation = runtime.commandWithin([
+    "-e",
+    [
+      'const { writeFileSync } = require("node:fs");',
+      'process.on("SIGTERM", () => {',
+      '  setTimeout(() => writeFileSync(process.argv[2], "late"), 500);',
+      '});',
+      'writeFileSync(process.argv[1], "ready");',
+      'setInterval(() => {}, 1000);',
+    ].join(""),
+    ready,
+    lateMarker,
+  ], {}, deadlineAt, "role");
+  const settledOperation = operation.then(
+    value => ({ value }),
+    error => ({ error }),
+  );
+
+  while (!await lstat(ready).catch(() => null) && Date.now() < deadlineAt - 1_000) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert(await lstat(ready).catch(() => null), "child did not become ready before cancellation");
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, deadlineAt - Date.now() - 50)));
+  const cancelStartedAt = Date.now();
+  const cancellation = runtime.cancel();
+
+  const outcome = await settledOperation;
+  assert.match(outcome.error?.message ?? "", /deployment cancelled/);
+  await cancellation;
+  assert(Date.now() - cancelStartedAt < 1_000, "cancel did not await prompt child termination");
+  await new Promise(resolve => setTimeout(resolve, 600));
+  assert.equal(await lstat(lateMarker).catch(() => null), null);
+});
+
+test("publication rejects a zero timeout before any Docker command", async (t) => {
+  const { runtime, runDir } = await publicationFixture(t);
+  const calls = [];
+  runtime.command = async args => {
+    calls.push(args);
+    return dockerResult();
+  };
+
+  await assert.rejects(runtime.publish({ workflow, runDir, timeoutSeconds: 0 }), /invalid publication timeout/);
+  assert.deepEqual(calls, []);
+});
