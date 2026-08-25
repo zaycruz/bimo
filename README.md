@@ -157,8 +157,21 @@ Controller-owned verification is the separate fixed step described above.
 
 ## Install from GitHub
 
-Monolith v0.2 is not published to the npm registry. Clone the GitHub repository,
-build its npm tarball, and install that exact file:
+Monolith v0.2 is not published to the npm registry. Download the release
+tarball, verify it, and install that exact file:
+
+```bash
+curl --fail --location --remote-name \
+  https://github.com/zaycruz/monolith-v2/releases/download/v0.2.0/monolith-workflow-0.2.0.tgz
+printf '%s  %s\n' \
+  3f93ed7439313066e5fa031f3a6b63df45519cd03c04d3b198bccfa8ef10051c \
+  monolith-workflow-0.2.0.tgz | shasum --algorithm 256 --check
+npm install --global ./monolith-workflow-0.2.0.tgz
+monolith list --json
+monolith validate react-app
+```
+
+To build the package from source instead:
 
 ```bash
 git clone --depth 1 https://github.com/zaycruz/monolith-v2.git
