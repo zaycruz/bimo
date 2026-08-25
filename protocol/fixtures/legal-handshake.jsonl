@@ -1,2 +1,0 @@
-{"protocol":"agent-worker/v1","direction":"worker_to_control","type":"hello","factory_gen":1,"pod":"worker","session":"s1","seq":1,"payload":{"engine":"fixture","launch_fingerprint":"abc"}}
-{"protocol":"agent-worker/v1","direction":"control_to_worker","type":"hello_ack","factory_gen":1,"pod":"worker","session":"s1","seq":1,"payload":{"capabilities":[],"max_frame_bytes":65536}}

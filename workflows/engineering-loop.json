@@ -1,0 +1,25 @@
+{
+  "name": "engineering-loop",
+  "start": "engineering",
+  "maxRounds": 5,
+  "agent": ["claude", "-p", "--dangerously-skip-permissions"],
+  "roles": {
+    "engineering": "../roles/engineering.md",
+    "qa": "../roles/qa.md",
+    "testing": "../roles/testing.md"
+  },
+  "states": {
+    "engineering": {
+      "role": "engineering",
+      "on": { "completed": "qa" }
+    },
+    "qa": {
+      "role": "qa",
+      "on": { "passed": "testing", "failed": "engineering" }
+    },
+    "testing": {
+      "role": "testing",
+      "on": { "passed": "done", "failed": "engineering" }
+    }
+  }
+}

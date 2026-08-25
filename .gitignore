@@ -1,4 +1,5 @@
-/target
 .omx/
 graphify-out/
-workers/pi-core/node_modules/
+.monolith/
+node_modules/
+/target/
