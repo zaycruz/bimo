@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Check JavaScript syntax
+        run: |
+          for file in bin/monolith src/*.mjs test/*.mjs; do
+            node --check "$file"
+          done
+      - run: npm pack --dry-run
+      - run: docker build --tag monolith-workflow:ci .
+      - run: docker run --rm monolith-workflow:ci list --json
+      - run: docker run --rm monolith-workflow:ci validate react-app --json
+      - run: docker run --rm monolith-workflow:ci validate react-solo --json
+      - name: Prove the baked React starter works offline
+        run: |
+          starter_volume="monolith-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker volume create "$starter_volume"
+          trap 'docker volume rm "$starter_volume"' EXIT
+          docker run --rm --user 0:0 --entrypoint chown \
+            --mount "type=volume,source=$starter_volume,target=/workspace" \
+            monolith-workflow:ci -R 1000:1000 /workspace
+          docker run --rm --network none \
+            --mount "type=volume,source=$starter_volume,target=/workspace" \
+            monolith-workflow:ci bootstrap
+          for command in test build smoke; do
+            docker run --rm --network none --workdir /workspace --entrypoint npm \
+              --mount "type=volume,source=$starter_volume,target=/workspace" \
+              monolith-workflow:ci run "$command"
+          done

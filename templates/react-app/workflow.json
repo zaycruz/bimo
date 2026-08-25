@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "name": "react-app",
+  "start": "engineering",
+  "maxSteps": 15,
+  "timeouts": {
+    "stepSeconds": 1200,
+    "workflowSeconds": 3600
+  },
+  "roles": {
+    "engineering": {
+      "prompt": "roles/engineering.md",
+      "write": true,
+      "on": {
+        "completed": "qa"
+      }
+    },
+    "qa": {
+      "prompt": "roles/qa.md",
+      "write": false,
+      "on": {
+        "passed": "testing",
+        "failed": "engineering"
+      }
+    },
+    "testing": {
+      "prompt": "roles/testing.md",
+      "write": false,
+      "on": {
+        "passed": "done",
+        "failed": "engineering"
+      }
+    }
+  },
+  "output": {
+    "directory": "dist",
+    "maxFiles": 500,
+    "maxBytes": 10485760,
+    "smoke": {
+      "path": "/",
+      "status": 200,
+      "contains": "MONOLITH_DEMO_READY"
+    }
+  }
+}
