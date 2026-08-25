@@ -3,6 +3,10 @@
 Monolith deploys a predefined agent workflow to one Docker host. The complete
 workflow definition is deliberately small:
 
+**[Open the live agent-built demo](https://thisismonolith.pages.dev/).** It is
+the unchanged static artifact from the final `react-app` run on `pve-05`, not a
+hosted Monolith control plane.
+
 ```text
 template = workflow.json + one Markdown prompt per role
 ```
@@ -361,6 +365,12 @@ Live `pve-05` verification on the same date:
   gateway, and controller containers were removed.
 - A browser replayed the `react-app` workflow twice, returned to its published
   state both times, and produced no console or page errors.
+- The final fleet artifact was direct-uploaded unchanged to
+  [Cloudflare Pages](https://thisismonolith.pages.dev/). Its controller receipt
+  was 3 files, 151,507 bytes, SHA-256
+  `8e47126f917d033d7ca930b74f4a10b0134bd0d2cb13bd81b509bb7ef9bd862e`.
+  The public origin returned HTTP 200 and all three served files matched the
+  exported artifact byte-for-byte.
 
 These run IDs prove only the bounded workflows described here, not production
 HA, arbitrary workload support, or Kubernetes-equivalent isolation.
