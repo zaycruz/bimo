@@ -9,8 +9,9 @@ import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
 
-import { runController, runPodController } from "../src/bimo.mjs";
+import { runController, runPodController, startRunHeartbeat, streamRunProgress } from "../src/bimo.mjs";
 import { loadPodTemplate } from "../src/pod-contract.mjs";
+import { createPodRunStore } from "../src/pod-store.mjs";
 import { loadWorkflow } from "../src/workflow.mjs";
 
 const execute = promisify(execFile);
@@ -119,6 +120,14 @@ if (args[0] === "context" && args[1] === "inspect") process.stdout.write(process
 else if (args[0] === "version") process.stdout.write("linux/arm64\\n");
 else if (args[0] === "image" && args[1] === "inspect") process.stdout.write(process.env.BIMO_TEST_LOCAL_INSPECT + "\\n");
 else if (args[0] === "save") process.stdout.write("fake-image-archive");
+else if (args[0] === "kill") {
+  const name = args[args.length - 1];
+  if ((process.env.BIMO_TEST_KILL ?? "").split(",").includes(name)) process.stdout.write(name + "\\n");
+  else {
+    process.stderr.write("Error: No such container: " + name + "\\n");
+    process.exitCode = 1;
+  }
+}
 else if (args[0] === "run") {
   const internalCommand = args.find(value => value === "internal-prepare" || value === "internal-run");
   if (internalCommand === "internal-prepare") process.stdout.write("prepared\\n");
@@ -133,11 +142,12 @@ else if (args[0] === "run") {
         fields: Object.keys(envelope).sort(),
         templateDigest: envelope.templateDigest,
         image: envelope.image,
+        runId: envelope.runId,
       });
       process.stdout.write(JSON.stringify({
         template: envelope.template,
         deployment: envelope.deployment,
-        runId: "local-test-run",
+        runId: envelope.runId,
         url: envelope.publicUrl,
       }) + "\\n");
     });
@@ -155,6 +165,15 @@ const log = value => fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify
 log({ tool: "ssh", args, command });
 if (runtimeCommand[0] === "true" || runtimeCommand[0] === "test") {
   process.exit(0);
+} else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "kill") {
+  const name = runtimeCommand[runtimeCommand.length - 1];
+  log({ tool: "docker-kill", name });
+  if ((process.env.BIMO_TEST_KILL ?? "").split(",").includes(name)) {
+    process.stdout.write(name + "\\n");
+  } else {
+    process.stderr.write("Error: No such container: " + name + "\\n");
+    process.exitCode = 1;
+  }
 } else if (runtimeCommand[0] === "df") {
   process.stdout.write("Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk1 488245288 10000000 470000000 3% /\\n");
 } else if (runtimeCommand[0] === "pct") {
@@ -189,7 +208,7 @@ if (runtimeCommand[0] === "true" || runtimeCommand[0] === "test") {
       image: envelope.image,
     });
     const internalCommand = command.find(value => value === "internal-pod-run"
-      || value === "internal-publish" || value === "internal-organize");
+      || value === "internal-publish" || value === "internal-publish-resume" || value === "internal-organize");
     if (process.env.BIMO_TEST_CONTROLLER === "conflict") {
       process.stderr.write("Conflict: controller name is already in use\\n");
       process.exitCode = 125;
@@ -239,6 +258,32 @@ if (runtimeCommand[0] === "true" || runtimeCommand[0] === "test") {
           baseSha: envelope.baseSha,
         },
       }) + "\\n");
+    } else if (process.env.BIMO_TEST_CONTROLLER === "publish-resume-success"
+      && internalCommand === "internal-publish-resume") {
+      log({
+        tool: "publish-resume-envelope",
+        fields: Object.keys(envelope).sort(),
+        runId: envelope.runId,
+      });
+      process.stdout.write(JSON.stringify({
+        status: "completed",
+        runId: envelope.runId,
+        repository: "https://github.com/zaycruz/bimo.git",
+        targetBranch: "main",
+        baseSha: process.env.BIMO_TEST_POD_BASE,
+        candidateSha: process.env.BIMO_TEST_POD_CANDIDATE,
+        headBranch: "bimo/" + envelope.runId,
+        publication: {
+          number: 43,
+          url: "https://github.com/zaycruz/bimo/pull/43",
+          draft: true,
+          created: false,
+          headBranch: "bimo/" + envelope.runId,
+          headSha: process.env.BIMO_TEST_POD_CANDIDATE,
+          targetBranch: "main",
+          baseSha: process.env.BIMO_TEST_POD_BASE,
+        },
+      }) + "\\n");
     } else if (process.env.BIMO_TEST_CONTROLLER === "organize-success"
       && internalCommand === "internal-organize") {
       const template = process.env.BIMO_TEST_ORGANIZER_TEMPLATE;
@@ -271,7 +316,7 @@ if (runtimeCommand[0] === "true" || runtimeCommand[0] === "test") {
       process.stdout.write(JSON.stringify({
         template: envelope.template,
         deployment: envelope.deployment,
-        runId: "test-run",
+        runId: envelope.runId ?? "test-run",
         url: envelope.publicUrl,
       }) + "\\n");
     }
@@ -312,6 +357,7 @@ else {
       }),
       BIMO_TEST_REMOTE_PLATFORM: remotePlatform,
       BIMO_TEST_CONTROLLER: controller,
+      BIMO_TEST_POD_BASE: POD_BASE_SHA,
       BIMO_TEST_POD_CANDIDATE: POD_CANDIDATE_SHA,
       BIMO_TEST_ORGANIZER_TEMPLATE: "react-app",
       BIMO_TEST_ORGANIZER_DIGEST: (await loadWorkflow("react-app", {
@@ -516,12 +562,11 @@ test("deploy defaults to local Docker without SSH or image transfer", async t =>
   const result = await invoke(args, { env: tools.env });
 
   assert.equal(result.code, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), {
-    template: "react-app",
-    deployment: "fleet-demo",
-    runId: "local-test-run",
-    url: "http://example.invalid:8080",
-  });
+  const response = JSON.parse(result.stdout);
+  assert.equal(response.template, "react-app");
+  assert.equal(response.deployment, "fleet-demo");
+  assert.match(response.runId, /^\d{14}-[0-9a-f]{8}$/);
+  assert.equal(response.url, "http://example.invalid:8080");
 
   const entries = await readCommandLog(tools.logFile);
   assert.equal(entries.some(entry => entry.tool === "ssh"), false);
@@ -543,6 +588,7 @@ test("deploy defaults to local Docker without SSH or image transfer", async t =>
   assert.equal(controller[controller.indexOf("internal-run") - 1], LOCAL_IMAGE_ID);
   const envelope = entries.find(entry => entry.tool === "local-controller-envelope");
   assert.equal(envelope.image, LOCAL_IMAGE_ID);
+  assert.equal(envelope.runId, response.runId);
 });
 
 test("explicit SSH target builds for the target daemon architecture", async t => {
@@ -871,6 +917,7 @@ test("internal-run rejects an invalid or mismatched template digest before Docke
     image: LOCAL_IMAGE_ID,
     port: 8080,
     publicUrl: "http://example.invalid:8080",
+    runId: "workflow-run-1",
   };
   const mismatch = await invoke([
     "internal-run",
@@ -1591,4 +1638,310 @@ test("runs, status, logs --follow, and doctor reject invalid options before Dock
     assert.match(result.stderr, pattern);
   }
   assert.deepEqual(await readCommandLog(tools.logFile), []);
+});
+
+test("failures print a structured JSON receipt on stdout when --json is requested", async () => {
+  const failure = await invoke(["deploy", "react-app", "--deployment", "Fleet_Demo", "--json"]);
+  assert.equal(failure.code, 1);
+  const receipt = JSON.parse(failure.stdout);
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.error.command, "deploy");
+  assert.match(receipt.error.message, /--deployment must use lowercase letters/);
+  assert.match(failure.stderr, /^bimo: --deployment must use lowercase letters/);
+
+  const plain = await invoke(["deploy", "react-app", "--deployment", "Fleet_Demo"]);
+  assert.equal(plain.code, 1);
+  assert.equal(plain.stdout, "");
+  assert.match(plain.stderr, /^bimo: --deployment must use lowercase letters/);
+});
+
+test("run heartbeat emits bounded phase lines until stopped", async () => {
+  const lines = [];
+  const heartbeat = startRunHeartbeat({
+    runId: "run-1",
+    intervalMs: 5,
+    write: line => lines.push(line),
+  });
+  heartbeat.setPhase("preparing image");
+  heartbeat.setPhase("unsafephase");
+  await new Promise(resolve => setTimeout(resolve, 30));
+  heartbeat.stop();
+  const ticks = lines.length;
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(lines.length, ticks);
+  assert.ok(ticks >= 1);
+  for (const line of lines) {
+    assert.match(line, /^run run-1: still working \(preparing image, \d+s elapsed\)\n$/);
+  }
+});
+
+test("run progress streams bounded event lines and tolerates a missing run", async () => {
+  const runId = "run-1";
+  const eventA = JSON.stringify({
+    version: 1, sequence: 1, timestamp: "2024-01-01T00:00:00.000Z", runId, type: "run.started",
+  });
+  const eventB = JSON.stringify({
+    version: 1, sequence: 2, timestamp: "2024-01-01T00:01:00.000Z", runId,
+    type: "gate.finished", status: "passed",
+  });
+  const chunk = `${eventA}\n${eventB}\n`;
+  const offset = Buffer.byteLength(chunk);
+  const reads = [];
+  const phases = [];
+  const lines = [];
+  const abort = new AbortController();
+  let calls = 0;
+  const readChunk = async ({ runId: current, after }) => {
+    calls += 1;
+    reads.push(after);
+    if (calls === 1) throw new Error("unknown run: run-1");
+    if (calls >= 4) abort.abort();
+    return { runId: current, offset, size: offset, chunk: calls === 2 ? chunk : "" };
+  };
+  await streamRunProgress({
+    readChunk,
+    runId,
+    signal: abort.signal,
+    pollMs: 1,
+    write: line => lines.push(line),
+    onEvent: event => phases.push(event.type),
+  });
+  assert.deepEqual(reads.slice(0, 3), [0, 0, offset]);
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0], "run run-1: 2024-01-01T00:00:00.000Z run.started\n");
+  assert.equal(lines[1], "run run-1: 2024-01-01T00:01:00.000Z gate.finished passed\n");
+  assert.ok(lines.every(line => line.length <= 321));
+  assert.deepEqual(phases, ["run.started", "gate.finished"]);
+});
+
+test("organize prints the run ID on stderr before long work in human mode", async t => {
+  const tools = await fakeDeployTools(t, { controller: "organize-success" });
+  const args = organizeArgs("Build a small status page.", 1).filter(value => value !== "--json");
+  const result = await invoke(args, { env: tools.env });
+  assert.equal(result.code, 0, result.stderr);
+  const stderrLines = result.stderr.trimEnd().split("\n");
+  assert.match(stderrLines[0], /^run: \d{14}-[0-9a-f]{8}$/);
+  assert.ok(stderrLines.every(line => line.length <= 320));
+  assert.ok(result.stdout.includes(`run: ${stderrLines[0].slice(5)}`));
+});
+
+test("cancel and publish reject invalid options before Docker", async t => {
+  const tools = await fakeDeployTools(t);
+  for (const [args, pattern] of [
+    [["cancel"], /--deployment is invalid/],
+    [["cancel", "--deployment", "fleet-demo", "--run", "$(id)"], /--run is invalid/],
+    [["cancel", "--deployment", "fleet-demo", "--unknown", "x"], /unknown option: --unknown/],
+    [["publish", "--deployment", "Fleet_Demo", "--github-secret-ref", "op://a/b/c"], /--deployment is invalid/],
+    [["publish", "--deployment", "fleet-demo", "--run", "bad;id", "--github-secret-ref", "op://a/b/c"], /--run is invalid/],
+    [["publish", "--deployment", "fleet-demo"], /--github-secret-ref is required/],
+  ]) {
+    const result = await invoke(args, { env: tools.env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, pattern);
+  }
+  assert.deepEqual(await readCommandLog(tools.logFile), []);
+});
+
+test("cancel sends SIGTERM to the running controller or publisher on the target", async t => {
+  const tools = await fakeDeployTools(t);
+  const cancelArgs = [
+    "cancel", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test", "--json",
+  ];
+  const result = await invoke(cancelArgs, {
+    env: { ...tools.env, BIMO_TEST_KILL: "bimo-fleet-demo-controller" },
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    deployment: "fleet-demo",
+    run: null,
+    signalled: ["bimo-fleet-demo-controller"],
+  });
+  const kills = (await readCommandLog(tools.logFile))
+    .filter(entry => entry.tool === "docker-kill")
+    .map(entry => entry.name);
+  assert.deepEqual(kills, ["bimo-fleet-demo-controller", "bimo-fleet-demo-publisher"]);
+  const commands = (await readCommandLog(tools.logFile))
+    .filter(entry => entry.tool === "ssh")
+    .map(entry => entry.command);
+  const kill = commands.find(command => command[1] === "kill");
+  assert.deepEqual(kill.slice(0, 4), ["docker", "kill", "--signal", "SIGTERM"]);
+
+  const idle = await invoke(cancelArgs, { env: tools.env });
+  assert.equal(idle.code, 1);
+  assert.match(idle.stderr, /no running controller or publisher for deployment fleet-demo/);
+  const receipt = JSON.parse(idle.stdout);
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.error.command, "cancel");
+});
+
+test("cancel --run refuses a terminal run and signals a live one", async t => {
+  const tools = await fakeDeployTools(t);
+  const statusPayload = state => `${JSON.stringify({
+    deployment: "fleet-demo", runId: "run-1", state, phase: null,
+    startedAt: "2024-01-01T00:00:00.000Z", finishedAt: null, attempts: 1, lastEvent: null,
+  })}\n`;
+  const cancelArgs = [
+    "cancel", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--run", "run-1", "--image", "bimo-workflow:test", "--json",
+  ];
+  const terminal = await invoke(cancelArgs, {
+    env: { ...tools.env, BIMO_TEST_STATUS_OUTPUT: statusPayload("completed") },
+  });
+  assert.equal(terminal.code, 1);
+  assert.match(terminal.stderr, /run run-1 is completed; nothing to cancel/);
+  assert.equal((await readCommandLog(tools.logFile)).some(entry => entry.tool === "docker-kill"), false);
+
+  const live = await invoke(cancelArgs, {
+    env: {
+      ...tools.env,
+      BIMO_TEST_STATUS_OUTPUT: statusPayload("running"),
+      BIMO_TEST_KILL: "bimo-fleet-demo-publisher",
+    },
+  });
+  assert.equal(live.code, 0, live.stderr);
+  assert.deepEqual(JSON.parse(live.stdout), {
+    deployment: "fleet-demo",
+    run: "run-1",
+    signalled: ["bimo-fleet-demo-publisher"],
+  });
+});
+
+test("publish resumes an idempotent publication through the isolated publisher container", async t => {
+  const tools = await fakeDeployTools(t, { controller: "publish-resume-success" });
+  const runId = "20240101000000-abcd1234";
+  const result = await invoke([
+    "publish", "--deployment", "pod-demo", "--run", runId,
+    "--host", "example.invalid",
+    "--github-secret-ref", "op://Test/Bimo publisher/github",
+    "--image", "bimo-workflow:test",
+    "--json",
+  ], { env: tools.env });
+  assert.equal(result.code, 0, result.stderr);
+  const response = JSON.parse(result.stdout);
+  assert.equal(response.status, "completed");
+  assert.equal(response.runId, runId);
+  assert.equal(response.headBranch, `bimo/${runId}`);
+  assert.equal(response.publication.url, "https://github.com/zaycruz/bimo/pull/43");
+  assert.equal(response.publication.draft, true);
+
+  const entries = await readCommandLog(tools.logFile);
+  const remoteCommands = entries.filter(entry => entry.tool === "ssh").map(entry => entry.command);
+  const publisher = remoteCommands.find(command => command.includes("internal-publish-resume"));
+  assert.ok(publisher, "resume publisher was not launched");
+  assert.equal(publisher[publisher.indexOf("--name") + 1], "bimo-pod-demo-publisher");
+  const hostRoot = "/var/lib/bimo/deployments/pod-demo";
+  assert.ok(publisher.includes(`${hostRoot}/runs:/state:rw`));
+  assert.ok(publisher.includes(`${hostRoot}/source:/source:rw`));
+  assert.equal(publisher.some(value => value.includes("docker.sock")), false);
+  assert.equal(publisher.some(value => value.includes("worktrees") || value.includes("snapshots")), false);
+
+  const envelope = entries.find(entry => entry.tool === "publish-resume-envelope");
+  assert.deepEqual(envelope.fields, ["runId", "token", "version"]);
+  assert.equal(envelope.runId, runId);
+  assert.equal(JSON.stringify(entries).includes(`github_pat_${"g".repeat(64)}`), false);
+});
+
+async function fakePublicationStore(t, { completed = false, interrupted = false, ready = true } = {}) {
+  const directory = await mkdtemp(path.join(tmpdir(), "bimo-resume-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const runId = "20240101000000-abcd1234";
+  const publication = {
+    number: 46,
+    url: "https://github.com/zaycruz/bimo/pull/46",
+    headBranch: `bimo/${runId}`,
+    headSha: POD_CANDIDATE_SHA,
+    targetBranch: "main",
+    baseSha: POD_BASE_SHA,
+    draft: true,
+    created: true,
+  };
+  const binding = {
+    repository: "https://github.com/zaycruz/bimo.git",
+    targetBranch: "main",
+    baseSha: POD_BASE_SHA,
+    candidateSha: POD_CANDIDATE_SHA,
+    headBranch: `bimo/${runId}`,
+  };
+  const store = await createPodRunStore({
+    stateRoot: directory,
+    runId,
+    assignment: { task: "Build the bounded change." },
+  });
+  if (ready) await store.appendEvent("publication.ready", binding);
+  if (completed || interrupted) {
+    await store.appendEvent("publication.finished", { ...binding, publication });
+  }
+  if (completed) await store.finish("completed", { phase: "published", ...binding, publication });
+  return { directory, runId, publication };
+}
+
+function resumeEnvelope(runId) {
+  return JSON.stringify({ version: 1, runId, token: `github_pat_${"g".repeat(64)}` });
+}
+
+test("internal-publish-resume replays a completed publication with zero new side effects", async t => {
+  const { directory, runId, publication } = await fakePublicationStore(t, { completed: true });
+  const result = await invoke(["internal-publish-resume", "--state-root", directory], {
+    input: resumeEnvelope(runId),
+  });
+  assert.equal(result.code, 0, result.stderr);
+  const receipt = JSON.parse(result.stdout);
+  assert.equal(receipt.status, "completed");
+  assert.equal(receipt.runId, runId);
+  assert.equal(receipt.publication.number, publication.number);
+  assert.equal(receipt.publication.url, publication.url);
+  const events = (await readFile(path.join(directory, runId, "events.jsonl"), "utf8"))
+    .trim().split("\n");
+  assert.equal(events.length, 3);
+});
+
+test("internal-publish-resume finishes an interrupted publication without Git or API work", async t => {
+  const { directory, runId, publication } = await fakePublicationStore(t, { interrupted: true });
+  const result = await invoke(["internal-publish-resume", "--state-root", directory], {
+    input: resumeEnvelope(runId),
+  });
+  assert.equal(result.code, 0, result.stderr);
+  const receipt = JSON.parse(result.stdout);
+  assert.equal(receipt.status, "completed");
+  assert.equal(receipt.publication.number, publication.number);
+  const events = (await readFile(path.join(directory, runId, "events.jsonl"), "utf8"))
+    .trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.type), [
+    "publication.ready", "publication.finished", "run.finished",
+  ]);
+  const record = JSON.parse(await readFile(path.join(directory, runId, "run.json"), "utf8"));
+  assert.equal(record.status, "completed");
+  assert.equal(record.phase, "published");
+});
+
+test("internal-publish-resume fails closed without durable publication evidence", async t => {
+  const { directory, runId } = await fakePublicationStore(t, { ready: false });
+  const result = await invoke(["internal-publish-resume", "--state-root", directory], {
+    input: resumeEnvelope(runId),
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /run has no unique publication\.ready record/);
+
+  for (const [input, pattern] of [
+    [{ version: 1, runId, token: "not-a-token" }, /publisher resume envelope is invalid/],
+    [{ version: 1, runId, token: `github_pat_${"g".repeat(64)}`, extra: true }, /invalid shape/],
+  ]) {
+    const rejected = await invoke(["internal-publish-resume", "--state-root", directory], {
+      input: JSON.stringify(input),
+    });
+    assert.equal(rejected.code, 1);
+    assert.match(rejected.stderr, pattern);
+  }
+});
+
+test("help covers the cancel and publish commands", async () => {
+  for (const command of ["cancel", "publish"]) {
+    const result = await invoke(["help", command]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`^bimo ${command} --deployment NAME`));
+  }
+  const usageText = await invoke(["help"]);
+  assert.match(usageText.stdout, /^ {2}bimo cancel --deployment NAME/m);
+  assert.match(usageText.stdout, /^ {2}bimo publish --deployment NAME/m);
 });

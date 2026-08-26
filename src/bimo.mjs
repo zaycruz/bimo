@@ -31,7 +31,7 @@ import {
 import { runOrganizerController } from "./organizer-controller.mjs";
 import { loadPodTemplate } from "./pod-contract.mjs";
 import { runEngineeringPod } from "./pod-controller.mjs";
-import { createPodRunStore, prunePodRuns } from "./pod-store.mjs";
+import { createPodRunStore, openPodRunStore, prunePodRuns } from "./pod-store.mjs";
 import { publishRun } from "./publish-run.mjs";
 import { loadWorkflow, runWorkflow } from "./workflow.mjs";
 
@@ -73,6 +73,8 @@ const DEPLOYMENT_LAYOUTS = {
 const RUN_LIST_LIMIT = 50;
 const RUN_SCAN_LIMIT = 1_000;
 const FOLLOW_POLL_MS = 2_000;
+const PROGRESS_HEARTBEAT_MS = 30_000;
+const PROGRESS_LINE_MAX = 320;
 const TAIL_CHUNK_BYTES = 64 * 1024 + 1;
 const DOCTOR_MIN_FREE_BLOCKS = 1_048_576;
 const RUN_STATES = new Set(["running", "completed", "failed", "cancelled"]);
@@ -832,12 +834,37 @@ async function deploy(template, options) {
   if (!task.trim() || Buffer.byteLength(task) > 64 * 1024) fail("task must contain 1 to 65536 bytes");
   if (!options["secret-ref"]) fail("--secret-ref is required");
 
-  const { remoteImage, transferTag } = await prepareImage(deploymentTarget, image);
+  const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
+  const progress = options.json ? null : new AbortController();
+  if (progress) process.stderr.write(`run: ${runId}\n`);
+  const heartbeat = progress ? startRunHeartbeat({ runId }) : null;
+  let follower = null;
+  let transferTag = null;
   try {
+    heartbeat?.setPhase("preparing image");
+    const prepared = await prepareImage(deploymentTarget, image);
+    const remoteImage = prepared.remoteImage;
+    transferTag = prepared.transferTag;
     const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+    if (progress) {
+      heartbeat.setPhase("running controller");
+      const readChunk = async ({ runId: current, after, signal }) => {
+        const update = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, remoteImage.imageId, [
+          "internal-tail", "--run", current, "--after", String(after),
+        ]), { timeoutMs: 30_000, maxOutputBytes: 256 * 1024, signal });
+        return parseTailUpdate(update.stdout);
+      };
+      follower = streamRunProgress({
+        readChunk,
+        runId,
+        signal: progress.signal,
+        onEvent: event => {
+          if (typeof event?.type === "string") heartbeat.setPhase(event.type);
+        },
+      }).catch(() => {});
+    }
     if (pod) {
       await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "pod");
-      const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
       let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
       const computeEnvelope = JSON.stringify({
         version: 1,
@@ -898,6 +925,7 @@ async function deploy(template, options) {
         token: githubToken,
       });
       githubToken = "";
+      heartbeat?.setPhase("publishing");
       const publisher = await targetExecute(deploymentTarget, [
         "docker", "run", "--rm", "-i",
         "--name", `bimo-${options.deployment}-publisher`,
@@ -939,6 +967,7 @@ async function deploy(template, options) {
         image: remoteImage.imageId,
         port,
         publicUrl: publicUrl.toString().replace(/\/$/, ""),
+        runId,
       });
       const controllerName = `bimo-${options.deployment}-controller`;
       const result = await targetExecute(deploymentTarget, [
@@ -969,6 +998,9 @@ async function deploy(template, options) {
       else process.stdout.write(`deployed ${response.template} as ${response.deployment}\nrun: ${response.runId}\nurl: ${response.url}\n`);
     }
   } finally {
+    progress?.abort();
+    if (follower) await follower;
+    heartbeat?.stop();
     await cleanupTransferredImage(deploymentTarget, transferTag);
   }
 }
@@ -995,11 +1027,36 @@ async function organizeRemote(options) {
   const catalog = await loadOrganizerCatalog();
   validateOrganizerInput({ prompt, agents, catalog });
 
-  const { remoteImage, transferTag } = await prepareImage(deploymentTarget, image, { retag: false });
+  const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
+  const progress = options.json ? null : new AbortController();
+  if (progress) process.stderr.write(`run: ${runId}\n`);
+  const heartbeat = progress ? startRunHeartbeat({ runId }) : null;
+  let follower = null;
+  let transferTag = null;
   try {
+    heartbeat?.setPhase("preparing image");
+    const prepared = await prepareImage(deploymentTarget, image, { retag: false });
+    const remoteImage = prepared.remoteImage;
+    transferTag = prepared.transferTag;
     const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+    if (progress) {
+      heartbeat.setPhase("running controller");
+      const readChunk = async ({ runId: current, after, signal }) => {
+        const update = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, remoteImage.imageId, [
+          "internal-tail", "--run", current, "--after", String(after),
+        ]), { timeoutMs: 30_000, maxOutputBytes: 256 * 1024, signal });
+        return parseTailUpdate(update.stdout);
+      };
+      follower = streamRunProgress({
+        readChunk,
+        runId,
+        signal: progress.signal,
+        onEvent: event => {
+          if (typeof event?.type === "string") heartbeat.setPhase(event.type);
+        },
+      }).catch(() => {});
+    }
     await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "organizer");
-    const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
     let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
     const envelope = JSON.stringify({
       version: 1,
@@ -1051,6 +1108,9 @@ async function organizeRemote(options) {
       "",
     ].join("\n"));
   } finally {
+    progress?.abort();
+    if (follower) await follower;
+    heartbeat?.stop();
     await cleanupTransferredImage(deploymentTarget, transferTag);
   }
 }
@@ -1192,7 +1252,7 @@ async function internalRun(options) {
   const raw = await readStdin(128 * 1024);
   let envelope;
   try { envelope = JSON.parse(raw); } catch { fail("invalid controller envelope"); }
-  const expected = ["version", "template", "templateDigest", "deployment", "task", "key", "model", "image", "port", "publicUrl"].sort();
+  const expected = ["version", "template", "templateDigest", "deployment", "task", "key", "model", "image", "port", "publicUrl", "runId"].sort();
   if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
       || Object.keys(envelope).sort().some((key, index) => key !== expected[index])
       || Object.keys(envelope).length !== expected.length) {
@@ -1200,7 +1260,8 @@ async function internalRun(options) {
   }
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "") || !NAME.test(envelope.template ?? "")
       || !controllerHostRootIsValid(options["host-root"], envelope.deployment, options["local-home"])
-      || !TEMPLATE_DIGEST.test(envelope.templateDigest ?? "") || !SHA256.test(envelope.image ?? "")) {
+      || !TEMPLATE_DIGEST.test(envelope.templateDigest ?? "") || !SHA256.test(envelope.image ?? "")
+      || !RUN_ID.test(envelope.runId ?? "")) {
     fail("controller envelope is invalid");
   }
   const loaded = await loadWorkflow(envelope.template, { templateRoot });
@@ -1216,7 +1277,7 @@ async function internalRun(options) {
     publicUrl: envelope.publicUrl,
   });
   envelope.key = null;
-  const result = await runController({ loaded, envelope, runtime });
+  const result = await runController({ loaded, envelope, runtime, runId: envelope.runId });
   process.stdout.write(`${JSON.stringify({ ...result, template: envelope.template, deployment: envelope.deployment })}\n`);
 }
 
@@ -1419,6 +1480,131 @@ async function internalPublish(options) {
     deadlineAt: Date.now() + PUBLISH_TIMEOUT_MS,
   }, { gitRunner: runPublisherGit });
   process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+async function internalPublishResume(options) {
+  exactOptions(options, ["state-root"]);
+  const stateRoot = internalStateRoot(options);
+  const envelope = await readJsonEnvelope(16 * 1024, ["version", "runId", "token"], "publisher resume");
+  if (envelope.version !== 1 || !RUN_ID.test(envelope.runId ?? "") || !GITHUB_TOKEN.test(envelope.token ?? "")) {
+    fail("publisher resume envelope is invalid");
+  }
+  let runId = envelope.runId;
+  if (runId === "latest") {
+    runId = (await readFile(path.join(stateRoot, "latest"), "utf8").catch(() => "")).trim();
+    if (!RUN_ID.test(runId)) fail("no latest run is recorded");
+  }
+  const store = await openPodRunStore({ stateRoot, runId });
+  const ready = store.events.filter(event => event.type === "publication.ready");
+  if (ready.length !== 1) fail("run has no unique publication.ready record");
+  const { repository, targetBranch, baseSha, candidateSha, headBranch } = ready[0];
+  if (repository !== POD_REPOSITORY || targetBranch !== POD_TARGET_BRANCH
+      || !GIT_SHA.test(baseSha ?? "") || !GIT_SHA.test(candidateSha ?? "")
+      || headBranch !== `bimo/${runId}`) {
+    fail("publication.ready record is invalid");
+  }
+  const token = envelope.token;
+  envelope.token = null;
+  const result = await publishRun({
+    runId,
+    stateRoot,
+    sourceGitDir: "/source/repository.git",
+    repository,
+    targetBranch,
+    baseSha,
+    candidateSha,
+    headBranch,
+    token,
+    deadlineAt: Date.now() + PUBLISH_TIMEOUT_MS,
+  }, { gitRunner: runPublisherGit });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+function interruptibleSleep(ms, signal) {
+  return new Promise(resolve => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener("abort", finish, { once: true });
+  });
+}
+
+export function startRunHeartbeat({
+  runId,
+  intervalMs = PROGRESS_HEARTBEAT_MS,
+  now = () => Date.now(),
+  write = line => process.stderr.write(line),
+} = {}) {
+  if (!RUN_ID.test(runId ?? "")) fail("run ID is invalid");
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) fail("heartbeat interval is invalid");
+  const startedAt = now();
+  let phase = "starting";
+  const timer = setInterval(() => {
+    const elapsed = Math.max(0, Math.round((now() - startedAt) / 1_000));
+    write(`run ${runId}: still working (${phase}, ${elapsed}s elapsed)\n`);
+  }, intervalMs);
+  timer.unref?.();
+  return Object.freeze({
+    setPhase(next) {
+      if (typeof next === "string" && next.length >= 1 && next.length <= 64
+          && !/[\u0000-\u001f\u007f]/u.test(next)) {
+        phase = next;
+      }
+    },
+    stop() {
+      clearInterval(timer);
+    },
+  });
+}
+
+export async function streamRunProgress({
+  readChunk,
+  runId,
+  signal,
+  pollMs = FOLLOW_POLL_MS,
+  write = line => process.stderr.write(line),
+  onEvent,
+} = {}) {
+  if (typeof readChunk !== "function") fail("progress reader is invalid");
+  if (!RUN_ID.test(runId ?? "")) fail("run ID is invalid");
+  if (!Number.isSafeInteger(pollMs) || pollMs < 1) fail("progress poll interval is invalid");
+  let offset = 0;
+  let resolved = runId;
+  while (!signal?.aborted) {
+    try {
+      const update = await readChunk({ runId: resolved, after: offset, signal });
+      if (!isPlainObject(update) || !RUN_ID.test(update.runId ?? "")
+          || !Number.isSafeInteger(update.offset) || typeof update.chunk !== "string") {
+        fail("progress update is invalid");
+      }
+      resolved = update.runId;
+      offset = update.offset;
+      if (update.chunk) {
+        for (const line of update.chunk.trimEnd().split("\n")) {
+          write(`${`run ${runId}: ${formatFollowEvent(line)}`.slice(0, PROGRESS_LINE_MAX)}\n`);
+          if (onEvent) {
+            try {
+              onEvent(JSON.parse(line));
+            } catch {
+              // Progress rendering must not fail the run.
+            }
+          }
+        }
+      }
+    } catch (error) {
+      if (signal?.aborted) break;
+      if (error instanceof Error && error.message === "progress update is invalid") throw error;
+      // The run directory may not exist yet; keep polling.
+    }
+    await interruptibleSleep(pollMs, signal);
+  }
 }
 
 async function remoteLogs(options) {
@@ -1766,6 +1952,120 @@ async function remoteStatus(options) {
   process.stdout.write(result.stdout);
 }
 
+async function remoteCancel(options) {
+  exactOptions(options, ["deployment", "target", "proxmox", "host", "vmid", "run", "image", "json"]);
+  if (!NAME.test(options.deployment ?? "")) fail("--deployment is invalid");
+  const runId = options.run ?? null;
+  if (runId !== null && !RUN_ID.test(runId)) fail("--run is invalid");
+  const deploymentTarget = resolveDeploymentTarget(options);
+  if (deploymentTarget.kind === "local") await requireLocalDocker();
+  const image = options.image ?? DEFAULT_IMAGE;
+  if (!IMAGE.test(image)) fail("--image is invalid");
+  const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  if (runId !== null) {
+    const statusResult = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, image, [
+      "internal-status",
+      "--deployment", options.deployment,
+      "--run", runId,
+      "--json",
+    ]), { maxOutputBytes: 64 * 1024 });
+    const status = parseLastJson(statusResult.stdout, "run status");
+    if (!isPlainObject(status) || typeof status.state !== "string") fail("run status is invalid");
+    if (status.state !== "running") fail(`run ${runId} is ${status.state}; nothing to cancel`);
+  }
+  const signalled = [];
+  for (const name of [
+    `bimo-${options.deployment}-controller`,
+    `bimo-${options.deployment}-publisher`,
+  ]) {
+    const sent = await targetExecute(deploymentTarget, [
+      "docker", "kill", "--signal", "SIGTERM", name,
+    ], { timeoutMs: 30_000, maxOutputBytes: 16 * 1024 }).then(() => true, () => false);
+    if (sent) signalled.push(name);
+  }
+  if (signalled.length === 0) {
+    fail(`no running controller or publisher for deployment ${options.deployment}`);
+  }
+  const receipt = { deployment: options.deployment, run: runId, signalled };
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(receipt)}\n`);
+    return;
+  }
+  for (const name of signalled) {
+    process.stdout.write(`sent SIGTERM to ${name}; the run will finish as failed or cancelled\n`);
+  }
+}
+
+function validateResumedPublication(value) {
+  exactObject(value, [
+    "status", "runId", "repository", "targetBranch", "baseSha", "candidateSha",
+    "headBranch", "publication",
+  ], "pod publisher");
+  if (value.status !== "completed" || !RUN_ID.test(value.runId ?? "")
+      || value.repository !== POD_REPOSITORY || value.targetBranch !== POD_TARGET_BRANCH
+      || !GIT_SHA.test(value.baseSha ?? "") || !GIT_SHA.test(value.candidateSha ?? "")
+      || value.headBranch !== `bimo/${value.runId}`) {
+    fail("pod publisher returned an invalid completion receipt");
+  }
+  const publication = value.publication;
+  if (!isPlainObject(publication)
+      || Object.keys(publication).some(key => ![
+        "baseSha", "created", "draft", "headBranch", "headSha", "number", "reconciled",
+        "targetBranch", "url",
+      ].includes(key))
+      || !Number.isSafeInteger(publication.number) || publication.number < 1
+      || publication.draft !== true || typeof publication.created !== "boolean"
+      || publication.baseSha !== value.baseSha || publication.headSha !== value.candidateSha
+      || publication.headBranch !== value.headBranch || publication.targetBranch !== POD_TARGET_BRANCH
+      || !new RegExp(`^https://github\\.com/zaycruz/bimo/pull/${publication.number}$`).test(publication.url ?? "")) {
+    fail("pod publisher returned an invalid draft pull request receipt");
+  }
+  return value;
+}
+
+async function remotePublish(options) {
+  exactOptions(options, [
+    "deployment", "target", "proxmox", "host", "vmid", "run",
+    "github-secret-ref", "account", "image", "json",
+  ]);
+  if (!NAME.test(options.deployment ?? "")) fail("--deployment is invalid");
+  const runId = options.run ?? "latest";
+  if (runId !== "latest" && !RUN_ID.test(runId)) fail("--run is invalid");
+  if (!options["github-secret-ref"]) fail("--github-secret-ref is required");
+  const deploymentTarget = resolveDeploymentTarget(options);
+  if (deploymentTarget.kind === "local") await requireLocalDocker();
+  const image = options.image ?? DEFAULT_IMAGE;
+  if (!IMAGE.test(image)) fail("--image is invalid");
+  const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  let githubToken = await resolveGitHubSecret(options["github-secret-ref"], options.account);
+  const envelope = JSON.stringify({ version: 1, runId, token: githubToken });
+  githubToken = "";
+  const publisher = await targetExecute(deploymentTarget, [
+    "docker", "run", "--rm", "-i",
+    "--name", `bimo-${options.deployment}-publisher`,
+    "--user", "0:0",
+    "--read-only",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    "--pids-limit", "128",
+    "--memory", "512m",
+    "--cpus", "0.5",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32m",
+    "--tmpfs", "/run/bimo-publish:rw,nosuid,nodev,noexec,size=16m,mode=0700",
+    "--volume", `${hostRoot}/runs:/state:rw`,
+    "--volume", `${hostRoot}/source:/source:rw`,
+    image,
+    "internal-publish-resume",
+  ], {
+    input: envelope,
+    timeoutMs: PUBLISH_TIMEOUT_MS + 60_000,
+    maxOutputBytes: 512 * 1024,
+  });
+  const response = validateResumedPublication(parseLastJson(publisher.stdout, "pod publisher"));
+  if (options.json) process.stdout.write(`${JSON.stringify(response)}\n`);
+  else process.stdout.write(`published ${response.runId}\nPR: ${response.publication.url} (draft)\n`);
+}
+
 function formatFollowEvent(line) {
   let event;
   try {
@@ -2050,6 +2350,8 @@ const COMMAND_HELP = {
   status: "bimo status --deployment NAME [target flags] [--run ID] [--json]\n  Print the latest run state and last event for a deployment.",
   logs: "bimo logs --deployment NAME [target flags] [--run ID] [--json] [--follow]\n  Print a run log; --follow streams new events until interrupted.",
   doctor: "bimo doctor [--deployment NAME] [target flags] [--secret-ref op://VAULT/ITEM/FIELD] [--json]\n  Run deployment preflight checks and report pass, fail, or skip per check.",
+  cancel: "bimo cancel --deployment NAME [target flags] [--run ID] [--json]\n  Send SIGTERM to the deployment's running controller or publisher container on the target; the in-container controller cancels active work and finishes the run durably.",
+  publish: "bimo publish --deployment NAME --github-secret-ref op://VAULT/ITEM/FIELD [target flags] [--run ID] [--json]\n  Resume an interrupted pod publication from the durable publication.ready record; an already completed publication replays its receipt with zero new side effects.",
 };
 
 function usage() {
@@ -2065,11 +2367,13 @@ function usage() {
   bimo runs --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--json]
   bimo status --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json]
   bimo doctor [--deployment NAME] [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--secret-ref op://VAULT/ITEM/FIELD] [--json]
+  bimo cancel --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json]
+  bimo publish --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --github-secret-ref op://VAULT/ITEM/FIELD [--run ID] [--json]
   bimo help [COMMAND]
 `;
 }
 
-export async function main(argv = process.argv.slice(2)) {
+async function runCommand(argv) {
   let [command, ...rest] = argv;
   if (command === "-p" || command === "--prompt") {
     command = "organize";
@@ -2168,6 +2472,18 @@ export async function main(argv = process.argv.slice(2)) {
     await doctor(options);
     return;
   }
+  if (command === "cancel") {
+    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    if (positional.length) fail("cancel accepts no positional arguments");
+    await remoteCancel(options);
+    return;
+  }
+  if (command === "publish") {
+    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    if (positional.length) fail("publish accepts no positional arguments");
+    await remotePublish(options);
+    return;
+  }
   if (command === "internal-run") {
     const { positional, options } = parseOptions(rest);
     if (positional.length) fail("internal-run accepts no positional arguments");
@@ -2198,6 +2514,12 @@ export async function main(argv = process.argv.slice(2)) {
     await internalPublish(options);
     return;
   }
+  if (command === "internal-publish-resume") {
+    const { positional, options } = parseOptions(rest);
+    if (positional.length) fail("internal-publish-resume accepts no positional arguments");
+    await internalPublishResume(options);
+    return;
+  }
   if (command === "internal-logs") {
     await internalLogs(rest);
     return;
@@ -2215,4 +2537,26 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   fail(`unknown command: ${command}`);
+}
+
+function errorReceiptMessage(error) {
+  return (error instanceof Error && typeof error.message === "string" ? error.message : String(error))
+    .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+    .trim()
+    .slice(0, 500) || "command failed";
+}
+
+export async function main(argv = process.argv.slice(2)) {
+  try {
+    await runCommand(argv);
+  } catch (error) {
+    if (argv.includes("--json")) {
+      const command = argv[0] === "-p" || argv[0] === "--prompt" ? "organize" : argv[0] ?? null;
+      process.stdout.write(`${JSON.stringify({
+        ok: false,
+        error: { command, message: errorReceiptMessage(error) },
+      })}\n`);
+    }
+    throw error;
+  }
 }
