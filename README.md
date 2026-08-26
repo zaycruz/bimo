@@ -308,6 +308,27 @@ bimo help doctor
 ones until interrupted. `bimo help COMMAND` (or `bimo COMMAND --help`) prints a
 command-specific synopsis; bare `bimo help` keeps the full usage.
 
+### Progress, cancel, and resume
+
+Long `organize` and `deploy` runs print the run ID to stderr as soon as it
+exists, then stream bounded progress there — run events as they land in the
+durable event log, plus a heartbeat every 30 seconds during quiet phases.
+With `--json`, stderr stays clean and stdout carries only the final receipt;
+failures then also print a single-line `{"ok":false,"error":{...}}` receipt on
+stdout while the human message stays on stderr.
+
+`cancel` sends SIGTERM to the deployment's running controller (or publisher)
+container on the target; the in-container controller cancels active work and
+finishes the run durably. `publish` resumes an interrupted pod publication
+from the durable `publication.ready` record — replaying an already completed
+publication returns its receipt with zero new side effects.
+
+```bash
+bimo cancel --deployment fleet-demo --host deploy@docker-host.example
+bimo publish --deployment pod-demo --host deploy@docker-host.example \
+  --github-secret-ref 'op://VAULT/ITEM/FIELD'
+```
+
 ### Deploy locally
 
 With Docker available, no target flags are required. On this Mac, for example,
