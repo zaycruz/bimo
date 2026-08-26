@@ -369,7 +369,6 @@ async function settleWithinDeadline(runner, command, args, options) {
     expired = true;
     controller.abort();
   }, deadlineAt - Date.now());
-  timer.unref?.();
   try {
     const result = await runner(command, args, { ...options, signal: controller.signal });
     if (expired || Date.now() >= deadlineAt) fail("Git operation deadline exceeded");
