@@ -280,6 +280,27 @@ configured per command; their `on-demand` status means Bimo has not contacted a
 specific host yet. Local mode uses the active Unix-socket Docker context and
 rejects ambient `DOCKER_HOST` overrides.
 
+### Inspect runs and diagnose
+
+`runs`, `status`, and `logs` read the deployment's durable state root through a
+read-only, network-disabled container on the target. `doctor` runs locally and
+checks Docker, target reachability, state-root writability, disk headroom, and
+credential resolvability, reporting pass, fail, or skip per check and exiting
+non-zero on any failure. Every command accepts the same target flags as deploy.
+
+```bash
+bimo runs --deployment fleet-demo --proxmox root@pve-05 --vmid 113
+bimo status --deployment fleet-demo --host deploy@docker-host.example --json
+bimo logs --deployment fleet-demo --follow
+bimo doctor --deployment fleet-demo --host deploy@docker-host.example \
+  --secret-ref 'op://VAULT/ITEM/FIELD'
+bimo help doctor
+```
+
+`logs --follow` replays the run's events from the start and then polls for new
+ones until interrupted. `bimo help COMMAND` (or `bimo COMMAND --help`) prints a
+command-specific synopsis; bare `bimo help` keeps the full usage.
+
 ### Deploy locally
 
 With Docker available, no target flags are required. On this Mac, for example,

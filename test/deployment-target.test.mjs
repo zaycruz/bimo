@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   commandForTarget,
   deploymentRootForTarget,
+  deploymentsRootForTarget,
   isDeploymentHostRoot,
   resolveDeploymentTarget,
 } from "../src/deployment-target.mjs";
@@ -125,4 +126,21 @@ test("controller host roots accept only canonical remote or local deployment roo
     }),
     false,
   );
+});
+
+test("deploymentsRootForTarget returns the shared deployments root per adapter", () => {
+  const home = os.homedir();
+  assert.equal(
+    deploymentsRootForTarget(resolveDeploymentTarget({}, { home })),
+    path.join(home, ".local", "share", "bimo", "deployments"),
+  );
+  assert.equal(
+    deploymentsRootForTarget(resolveDeploymentTarget({ host: "builder.example" })),
+    "/var/lib/bimo/deployments",
+  );
+  assert.equal(
+    deploymentsRootForTarget(resolveDeploymentTarget({ proxmox: "root@pve-05", vmid: "212" })),
+    "/var/lib/bimo/deployments",
+  );
+  assert.throws(() => deploymentsRootForTarget({ kind: "other" }), /invalid deployment target root/);
 });

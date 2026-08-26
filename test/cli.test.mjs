@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -149,11 +149,24 @@ const fs = require("node:fs");
 const { createHash } = require("node:crypto");
 const args = process.argv.slice(2);
 const command = args.slice(5);
-const dockerIndex = command.indexOf("docker");
-const runtimeCommand = dockerIndex === -1 ? command : command.slice(dockerIndex);
+const separator = command.indexOf("--");
+const runtimeCommand = separator === -1 ? command : command.slice(separator + 1);
 const log = value => fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify(value) + "\\n");
 log({ tool: "ssh", args, command });
-if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "version") {
+if (runtimeCommand[0] === "true" || runtimeCommand[0] === "test") {
+  process.exit(0);
+} else if (runtimeCommand[0] === "df") {
+  process.stdout.write("Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk1 488245288 10000000 470000000 3% /\\n");
+} else if (runtimeCommand[0] === "pct") {
+  process.stdout.write(process.env.BIMO_TEST_PCT_STATUS ?? "status: running\\n");
+} else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "run"
+    && (runtimeCommand.includes("internal-runs") || runtimeCommand.includes("internal-status")
+      || runtimeCommand.includes("internal-tail"))) {
+  const payload = runtimeCommand.includes("internal-runs") ? process.env.BIMO_TEST_RUNS_OUTPUT
+    : runtimeCommand.includes("internal-status") ? process.env.BIMO_TEST_STATUS_OUTPUT
+    : process.env.BIMO_TEST_TAIL_OUTPUT;
+  process.stdout.write(payload ?? "");
+} else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "version") {
   process.stdout.write(process.env.BIMO_TEST_REMOTE_PLATFORM + "\\n");
 } else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "load") {
   process.stdin.resume();
@@ -268,9 +281,12 @@ if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "version") {
   const op = `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify({ tool: "op", reference: args[1] }) + "\\n");
-if (args[1].endsWith("/github")) process.stdout.write("github_pat_${"g".repeat(64)}\\n");
-else process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
+if (args[0] === "--version") process.stdout.write("2.30.0\\n");
+else {
+  fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify({ tool: "op", reference: args[1] }) + "\\n");
+  if (args[1].endsWith("/github")) process.stdout.write("github_pat_${"g".repeat(64)}\\n");
+  else process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
+}
 `;
   await Promise.all([
     writeFile(path.join(directory, "docker"), docker, { mode: 0o755 }),
@@ -1219,4 +1235,360 @@ test("pod controller composition starts without app bootstrap and verifies only 
   assert.deepEqual(Object.keys(verification.candidateSnapshot).sort(), ["id", "receipt", "sha"]);
   assert.deepEqual(Object.keys(verification.baseSnapshot).sort(), ["id", "receipt", "sha"]);
   assert.equal(calls.at(-1)[0], "close");
+});
+
+async function fakeStateRoot(t) {
+  const directory = await mkdtemp(path.join(tmpdir(), "bimo-state-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const workflowRun = "20240101000000-aaaa1111";
+  const podRun = "20240202000000-bbbb2222";
+  await mkdir(path.join(directory, workflowRun));
+  await mkdir(path.join(directory, podRun));
+  await writeFile(path.join(directory, workflowRun, "events.jsonl"), [
+    JSON.stringify({
+      version: 1, sequence: 1, timestamp: "2024-01-01T00:00:00.000Z", runId: workflowRun, type: "run.started",
+    }),
+    JSON.stringify({
+      version: 1, sequence: 2, timestamp: "2024-01-01T00:01:00.000Z", runId: workflowRun,
+      type: "role.started", role: "engineering", step: 1, attempt: 1,
+    }),
+    JSON.stringify({
+      version: 1, sequence: 3, timestamp: "2024-01-01T00:02:00.000Z", runId: workflowRun,
+      type: "run.finished", status: "completed", steps: 1,
+    }),
+  ].join("\n") + "\n");
+  await writeFile(path.join(directory, podRun, "run.json"), `${JSON.stringify({
+    version: 1,
+    runId: podRun,
+    assignment: {},
+    status: "running",
+    phase: "planned",
+    currentAttempt: 2,
+    startedAt: "2024-02-02T00:00:00.000Z",
+    finishedAt: null,
+  }, null, 2)}\n`);
+  await writeFile(path.join(directory, podRun, "events.jsonl"), "");
+  await writeFile(path.join(directory, "latest"), `${workflowRun}\n`);
+  return { directory, workflowRun, podRun };
+}
+
+test("internal-runs summarizes recorded runs newest first in JSON and text", async t => {
+  const { directory, workflowRun, podRun } = await fakeStateRoot(t);
+  const result = await invoke(["internal-runs", "--state-root", directory, "--deployment", "demo", "--json"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    deployment: "demo",
+    runs: [
+      {
+        id: podRun,
+        state: "running",
+        phase: "planned",
+        startedAt: "2024-02-02T00:00:00.000Z",
+        finishedAt: null,
+        attempts: 2,
+      },
+      {
+        id: workflowRun,
+        state: "completed",
+        phase: null,
+        startedAt: "2024-01-01T00:00:00.000Z",
+        finishedAt: "2024-01-01T00:02:00.000Z",
+        attempts: 1,
+      },
+    ],
+  });
+
+  const text = await invoke(["internal-runs", "--state-root", directory, "--deployment", "demo"]);
+  assert.equal(text.code, 0, text.stderr);
+  assert.equal(text.stdout, [
+    `${podRun}\trunning\t2024-02-02T00:00:00.000Z\t-\t2`,
+    `${workflowRun}\tcompleted\t2024-01-01T00:00:00.000Z\t2024-01-01T00:02:00.000Z\t1`,
+    "",
+  ].join("\n"));
+});
+
+test("internal-runs isolates corrupt runs instead of hiding healthy ones", async t => {
+  const { directory, workflowRun } = await fakeStateRoot(t);
+  const corrupt = "20240303000000-cccc3333";
+  await mkdir(path.join(directory, corrupt));
+  await writeFile(path.join(directory, corrupt, "events.jsonl"), "not json\n");
+  const result = await invoke(["internal-runs", "--state-root", directory, "--deployment", "demo", "--json"]);
+  assert.equal(result.code, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.runs.length, 3);
+  const corrupted = payload.runs.find(run => run.id === corrupt);
+  assert.equal(corrupted.state, "unknown");
+  assert.ok(payload.runs.some(run => run.id === workflowRun && run.state === "completed"));
+});
+
+test("internal-status reports the latest run state and last event", async t => {
+  const { directory, workflowRun } = await fakeStateRoot(t);
+  const result = await invoke(["internal-status", "--state-root", directory, "--deployment", "demo", "--json"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    deployment: "demo",
+    runId: workflowRun,
+    state: "completed",
+    phase: null,
+    startedAt: "2024-01-01T00:00:00.000Z",
+    finishedAt: "2024-01-01T00:02:00.000Z",
+    attempts: 1,
+    lastEvent: {
+      sequence: 3,
+      timestamp: "2024-01-01T00:02:00.000Z",
+      type: "run.finished",
+      status: "completed",
+    },
+  });
+
+  const text = await invoke(["internal-status", "--state-root", directory, "--deployment", "demo"]);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /state: completed/);
+  assert.match(text.stdout, /last event: run\.finished at 2024-01-01T00:02:00\.000Z/);
+
+  const empty = await mkdtemp(path.join(tmpdir(), "bimo-state-empty-"));
+  t.after(() => rm(empty, { recursive: true, force: true }));
+  const none = await invoke(["internal-status", "--state-root", empty, "--deployment", "demo", "--json"]);
+  assert.equal(none.code, 0, none.stderr);
+  assert.equal(JSON.parse(none.stdout).state, "none");
+});
+
+test("internal-tail streams complete event lines from a byte offset", async t => {
+  const { directory, workflowRun } = await fakeStateRoot(t);
+  const first = await invoke(["internal-tail", "--state-root", directory, "--run", "latest", "--after", "0"]);
+  assert.equal(first.code, 0, first.stderr);
+  const update = JSON.parse(first.stdout);
+  assert.equal(update.runId, workflowRun);
+  assert.equal(update.offset, update.size);
+  assert.equal(update.chunk.trimEnd().split("\n").length, 3);
+
+  const eventsPath = path.join(directory, workflowRun, "events.jsonl");
+  const extra = JSON.stringify({
+    version: 1, sequence: 4, timestamp: "2024-01-01T00:03:00.000Z", runId: workflowRun,
+    type: "role.failed", role: "engineering", reason: "boom",
+  }) + "\n";
+  await appendFile(eventsPath, extra);
+  const second = await invoke([
+    "internal-tail", "--state-root", directory, "--run", workflowRun, "--after", String(update.offset),
+  ]);
+  assert.equal(second.code, 0, second.stderr);
+  const follow = JSON.parse(second.stdout);
+  assert.equal(follow.chunk, extra);
+  assert.equal(follow.offset, update.offset + Buffer.byteLength(extra));
+
+  const clamped = await invoke([
+    "internal-tail", "--state-root", directory, "--run", workflowRun, "--after", "999999999",
+  ]);
+  assert.equal(clamped.code, 0, clamped.stderr);
+  const reset = JSON.parse(clamped.stdout);
+  assert.equal(reset.offset, reset.size);
+  assert.ok(reset.chunk.startsWith('{"version":1,"sequence":1'));
+
+  const invalid = await invoke([
+    "internal-tail", "--state-root", directory, "--run", workflowRun, "--after", "-1",
+  ]);
+  assert.equal(invalid.code, 1);
+  assert.match(invalid.stderr, /--after is invalid/);
+});
+
+test("runs and status read the state root through the sandboxed read container", async t => {
+  const tools = await fakeDeployTools(t);
+  const runsPayload = `${JSON.stringify({ deployment: "fleet-demo", runs: [] })}\n`;
+  const runs = await invoke([
+    "runs", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test", "--json",
+  ], { env: { ...tools.env, BIMO_TEST_RUNS_OUTPUT: runsPayload } });
+  assert.equal(runs.code, 0, runs.stderr);
+  assert.equal(runs.stdout, runsPayload);
+
+  const statusPayload = `${JSON.stringify({
+    deployment: "fleet-demo", runId: null, state: "none", phase: null,
+    startedAt: null, finishedAt: null, attempts: 0, lastEvent: null,
+  })}\n`;
+  const status = await invoke([
+    "status", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test", "--json",
+  ], { env: { ...tools.env, BIMO_TEST_STATUS_OUTPUT: statusPayload } });
+  assert.equal(status.code, 0, status.stderr);
+  assert.equal(status.stdout, statusPayload);
+
+  const commands = (await readCommandLog(tools.logFile))
+    .filter(entry => entry.tool === "ssh")
+    .map(entry => entry.command);
+  const runsCommand = commands.find(command => command.includes("internal-runs"));
+  const statusCommand = commands.find(command => command.includes("internal-status"));
+  assert.ok(runsCommand);
+  assert.ok(statusCommand);
+  for (const command of [runsCommand, statusCommand]) {
+    assert.ok(command.includes("/var/lib/bimo/deployments/fleet-demo/runs:/state:ro"));
+    assert.ok(command.includes("--network"));
+    assert.ok(command.includes("--read-only"));
+  }
+  assert.deepEqual(runsCommand.slice(-3), ["--deployment", "fleet-demo", "--json"]);
+  assert.deepEqual(statusCommand.slice(-5), ["--deployment", "fleet-demo", "--run", "latest", "--json"]);
+});
+
+test("logs --follow streams new events and exits cleanly on SIGINT", async t => {
+  const tools = await fakeDeployTools(t);
+  const chunk = `${JSON.stringify({
+    version: 1, sequence: 1, timestamp: "2024-01-01T00:00:00.000Z", runId: "run-1", type: "run.started",
+  })}\n${JSON.stringify({
+    version: 1, sequence: 2, timestamp: "2024-01-01T00:01:00.000Z", runId: "run-1",
+    type: "run.finished", status: "completed",
+  })}\n`;
+  const payload = `${JSON.stringify({
+    runId: "run-1", offset: Buffer.byteLength(chunk), size: Buffer.byteLength(chunk), chunk,
+  })}\n`;
+  const child = spawn(process.execPath, [
+    cli, "logs", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test", "--follow",
+  ], {
+    cwd: root,
+    env: { ...tools.env, BIMO_TEST_TAIL_OUTPUT: payload },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdout = [];
+  const stderr = [];
+  let interrupted = false;
+  const killer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  child.stdout.on("data", data => {
+    stdout.push(data);
+    if (!interrupted) {
+      interrupted = true;
+      child.kill("SIGINT");
+    }
+  });
+  child.stderr.on("data", data => stderr.push(data));
+  const code = await new Promise(resolve => child.on("close", resolve));
+  clearTimeout(killer);
+  assert.equal(code, 0);
+  const output = Buffer.concat(stdout).toString("utf8");
+  assert.ok(output.includes("2024-01-01T00:00:00.000Z run.started"));
+  assert.ok(output.includes("2024-01-01T00:01:00.000Z run.finished completed"));
+  assert.equal(Buffer.concat(stderr).toString("utf8"), "");
+
+  const entries = await readCommandLog(tools.logFile);
+  const tail = entries.find(entry => entry.tool === "ssh" && entry.command.includes("internal-tail"));
+  assert.ok(tail);
+  assert.deepEqual(tail.command.slice(-4), ["--run", "latest", "--after", "0"]);
+});
+
+test("doctor runs local preflight checks and skips credentials without --secret-ref", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke(["doctor", "--json"], { env: tools.env });
+  assert.equal(result.code, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.ok, true);
+  assert.equal(report.target, "local");
+  assert.deepEqual(report.checks.map(check => [check.name, check.status]), [
+    ["docker", "pass"],
+    ["state-root", "pass"],
+    ["disk", "pass"],
+    ["secret-ref", "skip"],
+  ]);
+  assert.match(report.checks[0].reason, /linux\/arm64/);
+});
+
+test("doctor exits 1 and reports the failing check when the daemon is unusable", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke(["doctor", "--json"], {
+    env: { ...tools.env, BIMO_TEST_DOCKER_ENDPOINT: "tcp://docker.example:2376" },
+  });
+  assert.equal(result.code, 1);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.ok, false);
+  assert.equal(report.checks[0].name, "docker");
+  assert.equal(report.checks[0].status, "fail");
+  assert.match(report.checks[0].reason, /Unix socket/);
+});
+
+test("doctor checks ssh targets and credential readability without printing secrets", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke([
+    "doctor", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--secret-ref", "op://Test/Bimo/openrouter", "--json",
+  ], { env: tools.env });
+  assert.equal(result.code, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.checks.map(check => [check.name, check.status]), [
+    ["ssh", "pass"],
+    ["docker", "pass"],
+    ["state-root", "pass"],
+    ["disk", "pass"],
+    ["op-cli", "pass"],
+    ["secret-ref", "pass"],
+  ]);
+  const secret = `sk-or-v1-${"k".repeat(32)}`;
+  assert.equal(result.stdout.includes(secret), false);
+  assert.equal(JSON.stringify(await readCommandLog(tools.logFile)).includes(secret), false);
+});
+
+test("doctor checks proxmox reachability, guest status, and in-guest docker", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke([
+    "doctor", "--target", "proxmox-lxc", "--proxmox", "root@pve-05", "--vmid", "212", "--json",
+  ], { env: tools.env });
+  assert.equal(result.code, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.checks.map(check => check.name), [
+    "ssh", "pct", "docker", "state-root", "disk", "secret-ref",
+  ]);
+  const commands = (await readCommandLog(tools.logFile))
+    .filter(entry => entry.tool === "ssh")
+    .map(entry => entry.command);
+  assert.ok(commands.some(command => command.join(" ") === "pct status 212"));
+  assert.ok(commands.some(command => command.slice(0, 5).join(" ") === "pct exec 212 -- docker"));
+
+  const stopped = await invoke([
+    "doctor", "--target", "proxmox-lxc", "--proxmox", "root@pve-05", "--vmid", "212", "--json",
+  ], { env: { ...tools.env, BIMO_TEST_PCT_STATUS: "status: stopped\n" } });
+  assert.equal(stopped.code, 1);
+  const stoppedReport = JSON.parse(stopped.stdout);
+  assert.equal(stoppedReport.ok, false);
+  assert.deepEqual(
+    stoppedReport.checks.find(check => check.name === "pct").status,
+    "fail",
+  );
+});
+
+test("help prints per-command synopses while --help keeps the full usage", async () => {
+  const full = await invoke(["--help"]);
+  const bare = await invoke(["help"]);
+  assert.equal(bare.code, 0);
+  assert.equal(bare.stdout, full.stdout);
+
+  const logsHelp = await invoke(["help", "logs"]);
+  assert.equal(logsHelp.code, 0, logsHelp.stderr);
+  assert.match(logsHelp.stdout, /^bimo logs --deployment NAME/);
+  const flagHelp = await invoke(["logs", "--help"]);
+  assert.equal(flagHelp.code, 0, flagHelp.stderr);
+  assert.equal(flagHelp.stdout, logsHelp.stdout);
+  for (const command of ["runs", "status", "doctor", "deploy", "organize", "list", "targets", "validate"]) {
+    const result = await invoke(["help", command]);
+    assert.equal(result.code, 0, `${command}: ${result.stderr}`);
+    assert.match(result.stdout, new RegExp(`^bimo ${command} `));
+  }
+
+  const bogus = await invoke(["help", "bogus"]);
+  assert.equal(bogus.code, 1);
+  assert.match(bogus.stderr, /unknown command: bogus/);
+});
+
+test("runs, status, logs --follow, and doctor reject invalid options before Docker", async t => {
+  const tools = await fakeDeployTools(t);
+  for (const [args, pattern] of [
+    [["runs"], /--deployment is invalid/],
+    [["runs", "--deployment", "Fleet_Demo"], /--deployment is invalid/],
+    [["status", "--deployment", "fleet-demo", "--run", "$(id)"], /--run is invalid/],
+    [["logs", "--deployment", "fleet-demo", "--follow", "--run", "latest;id"], /--run is invalid/],
+    [["doctor", "--secret-ref", "not-a-secret"], /--secret-ref must be a 1Password op:\/\/ reference/],
+    [["runs", "--deployment", "fleet-demo", "--unknown", "value"], /unknown option: --unknown/],
+  ]) {
+    const result = await invoke(args, { env: tools.env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, pattern);
+  }
+  assert.deepEqual(await readCommandLog(tools.logFile), []);
 });

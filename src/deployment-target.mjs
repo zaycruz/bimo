@@ -112,6 +112,12 @@ export function deploymentRootForTarget(target, deployment) {
   return path.join(validateLocalHome(target.home ?? os.homedir()), ...LOCAL_ROOT_PARTS, deployment);
 }
 
+export function deploymentsRootForTarget(target) {
+  if (!target || !TARGET_KINDS.includes(target.kind)) fail("invalid deployment target root");
+  if (target.kind !== "local") return REMOTE_ROOT;
+  return path.join(validateLocalHome(target.home ?? os.homedir()), ...LOCAL_ROOT_PARTS);
+}
+
 export function isDeploymentHostRoot(hostRoot, deployment, { localHome } = {}) {
   if (typeof hostRoot !== "string" || hostRoot.length > 4_096
       || !NAME.test(deployment ?? "") || !path.isAbsolute(hostRoot)

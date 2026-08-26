@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
+  access,
   lstat,
   mkdir,
   open,
@@ -16,6 +17,7 @@ import {
   builtInTargetCatalog,
   commandForTarget,
   deploymentRootForTarget,
+  deploymentsRootForTarget,
   isDeploymentHostRoot,
   resolveDeploymentTarget,
 } from "./deployment-target.mjs";
@@ -68,6 +70,12 @@ const DEPLOYMENT_LAYOUTS = {
   organizer: ["runs", "worktrees"],
   pod: ["runs", "source", "worktrees", "snapshots"],
 };
+const RUN_LIST_LIMIT = 50;
+const RUN_SCAN_LIMIT = 1_000;
+const FOLLOW_POLL_MS = 2_000;
+const TAIL_CHUNK_BYTES = 64 * 1024 + 1;
+const DOCTOR_MIN_FREE_BLOCKS = 1_048_576;
+const RUN_STATES = new Set(["running", "completed", "failed", "cancelled"]);
 
 function fail(message) {
   throw new Error(message);
@@ -129,6 +137,7 @@ function execute(command, args, {
   timeoutMs = 20 * 60 * 1_000,
   maxOutputBytes = 5 * 1024 * 1024,
   env,
+  signal,
 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -140,12 +149,20 @@ function execute(command, args, {
     const stderr = [];
     let bytes = 0;
     let timedOut = false;
+    let aborted = false;
     let stdinFailed = false;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
       setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
     }, timeoutMs);
+    const abort = () => {
+      aborted = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+    };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
     const collect = target => chunk => {
       bytes += chunk.length;
       if (bytes <= maxOutputBytes) target.push(chunk);
@@ -155,16 +172,19 @@ function execute(command, args, {
     child.stderr.on("data", collect(stderr));
     child.on("error", error => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       reject(error);
     });
     child.on("close", code => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       const result = {
         code,
         stdout: Buffer.concat(stdout).toString("utf8"),
         stderr: Buffer.concat(stderr).toString("utf8"),
       };
-      if (timedOut) reject(new Error(`${command} timed out`));
+      if (aborted) reject(new Error(`${command} aborted`));
+      else if (timedOut) reject(new Error(`${command} timed out`));
       else if (stdinFailed) reject(new Error(`${command} closed before consuming its bounded input`));
       else if (bytes > maxOutputBytes) reject(new Error(`${command} output exceeded ${maxOutputBytes} bytes`));
       else if (code !== 0) reject(new Error(`${command} exited ${code}: ${result.stderr.trim().slice(0, 1_000)}`));
@@ -1402,7 +1422,7 @@ async function internalPublish(options) {
 }
 
 async function remoteLogs(options) {
-  exactOptions(options, ["deployment", "target", "proxmox", "host", "vmid", "run", "image", "json"]);
+  exactOptions(options, ["deployment", "target", "proxmox", "host", "vmid", "run", "image", "json", "follow"]);
   if (!NAME.test(options.deployment ?? "")) fail("--deployment is invalid");
   const runId = options.run ?? "latest";
   if (runId !== "latest" && !RUN_ID.test(runId)) fail("--run is invalid");
@@ -1411,6 +1431,10 @@ async function remoteLogs(options) {
   const image = options.image ?? DEFAULT_IMAGE;
   if (!IMAGE.test(image)) fail("--image is invalid");
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  if (options.follow) {
+    await followLogs(deploymentTarget, { hostRoot, image, runId, json: Boolean(options.json) });
+    return;
+  }
   const result = await targetExecute(deploymentTarget, [
     "docker", "run", "--rm", "--read-only", "--network", "none",
     "--user", "0:0",
@@ -1444,6 +1468,590 @@ async function internalLogs(argv) {
   process.stdout.write(await readFile(targetPath, "utf8"));
 }
 
+function internalStateRoot(options) {
+  const root = options["state-root"] ?? "/state";
+  if (typeof root !== "string" || root.length > 4_096 || !path.isAbsolute(root)
+      || path.normalize(root) !== root || /[\u0000\r\n]/u.test(root)) {
+    fail("--state-root is invalid");
+  }
+  return root;
+}
+
+function storedTimestamp(value) {
+  if (typeof value !== "string") return null;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value ? value : null;
+}
+
+function parseEventLines(raw) {
+  let events;
+  try {
+    events = raw.split("\n").map(line => JSON.parse(line));
+  } catch {
+    fail("run event record is invalid");
+  }
+  if (events.some(event => !isPlainObject(event))) fail("run event record is invalid");
+  return events;
+}
+
+async function readRunEvents(runDir, { wholeFile }) {
+  const eventsPath = path.join(runDir, "events.jsonl");
+  const stat = await lstat(eventsPath).catch(() => null);
+  if (!stat) return [];
+  if (!stat.isFile() || stat.isSymbolicLink()) fail("run event record is invalid");
+  if (wholeFile) {
+    if (stat.size > 2 * 1024 * 1024) fail("run event record is invalid");
+    const raw = await readFile(eventsPath, "utf8");
+    return raw.trim() ? parseEventLines(raw.trimEnd()) : [];
+  }
+  const window = Math.min(stat.size, 128 * 1024);
+  if (!window) return [];
+  const handle = await open(eventsPath, "r");
+  try {
+    const buffer = Buffer.alloc(window);
+    await handle.read(buffer, 0, window, stat.size - window);
+    const text = buffer.toString("utf8").trimEnd();
+    const line = text ? text.split("\n").at(-1) : "";
+    return line ? parseEventLines(line) : [];
+  } finally {
+    await handle.close();
+  }
+}
+
+function summarizeEvent(event) {
+  if (!event) return null;
+  const summary = {};
+  if (Number.isSafeInteger(event.sequence)) summary.sequence = event.sequence;
+  const timestamp = storedTimestamp(event.timestamp);
+  if (timestamp) summary.timestamp = timestamp;
+  if (typeof event.type === "string" && /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*$/.test(event.type)) {
+    summary.type = event.type;
+  }
+  for (const field of ["status", "reason", "role", "outcome", "template", "url", "phase"]) {
+    if (typeof event[field] === "string") {
+      summary[field] = event[field].replace(/[\u0000-\u001f\u007f]+/gu, " ").slice(0, 200);
+    }
+  }
+  return summary;
+}
+
+async function summarizeRun(stateRoot, runId, { withLastEvent = false } = {}) {
+  const runDir = path.join(stateRoot, runId);
+  const dirStat = await lstat(runDir);
+  if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) fail("run directory is invalid");
+
+  let record = null;
+  const recordPath = path.join(runDir, "run.json");
+  const recordStat = await lstat(recordPath).catch(() => null);
+  if (recordStat) {
+    if (!recordStat.isFile() || recordStat.isSymbolicLink() || recordStat.size > 64 * 1024) {
+      fail("run record is invalid");
+    }
+    try {
+      record = JSON.parse(await readFile(recordPath, "utf8"));
+    } catch {
+      fail("run record is invalid");
+    }
+    if (!isPlainObject(record)) fail("run record is invalid");
+  }
+
+  let state = typeof record?.status === "string" && RUN_STATES.has(record.status) ? record.status : null;
+  let startedAt = storedTimestamp(record?.startedAt);
+  let finishedAt = storedTimestamp(record?.finishedAt);
+  let attempts = null;
+  if (Number.isSafeInteger(record?.currentAttempt) && record.currentAttempt >= 0) {
+    attempts = record.currentAttempt;
+  }
+  const phase = typeof record?.phase === "string" && record.phase.length <= 64 ? record.phase : null;
+
+  let events = [];
+  if (!state) events = await readRunEvents(runDir, { wholeFile: true });
+  else if (withLastEvent) events = await readRunEvents(runDir, { wholeFile: false });
+
+  if (!state) {
+    const terminal = events.at(-1);
+    if (terminal?.type === "run.finished" && RUN_STATES.has(terminal.status) && terminal.status !== "running") {
+      state = terminal.status;
+    } else if (terminal?.type === "run.failed") state = "failed";
+    else if (terminal?.type === "run.completed") state = "completed";
+    else state = "running";
+    startedAt ??= storedTimestamp(events[0]?.timestamp);
+    if (state !== "running") finishedAt ??= storedTimestamp(terminal?.timestamp);
+    attempts ??= events.reduce(
+      (maximum, event) => (Number.isSafeInteger(event.attempt) ? Math.max(maximum, event.attempt) : maximum),
+      0,
+    );
+  }
+  if (attempts === null) attempts = events.length ? 1 : 0;
+
+  return {
+    id: runId,
+    state,
+    phase,
+    startedAt,
+    finishedAt,
+    attempts,
+    ...(withLastEvent ? { lastEvent: summarizeEvent(events.at(-1) ?? null) } : {}),
+  };
+}
+
+async function internalRuns(argv) {
+  const { positional, options } = parseOptions(argv, { booleans: ["json"] });
+  if (positional.length) fail("internal-runs accepts no positional arguments");
+  exactOptions(options, ["deployment", "state-root", "json"]);
+  if (!NAME.test(options.deployment ?? "")) fail("--deployment is invalid");
+  const stateRoot = internalStateRoot(options);
+  const entries = await readdir(stateRoot, { withFileTypes: true });
+  const runIds = entries
+    .filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && RUN_ID.test(entry.name))
+    .map(entry => entry.name);
+  if (runIds.length > RUN_SCAN_LIMIT) fail("run state exceeds the scan limit");
+  runIds.sort((left, right) => right.localeCompare(left));
+  const runs = [];
+  for (const runId of runIds.slice(0, RUN_LIST_LIMIT)) {
+    try {
+      runs.push(await summarizeRun(stateRoot, runId));
+    } catch {
+      runs.push({ id: runId, state: "unknown", phase: null, startedAt: null, finishedAt: null, attempts: 0 });
+    }
+  }
+  runs.sort((left, right) => (
+    (right.startedAt ?? "").localeCompare(left.startedAt ?? "") || right.id.localeCompare(left.id)
+  ));
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify({ deployment: options.deployment, runs })}\n`);
+    return;
+  }
+  for (const run of runs) {
+    process.stdout.write([
+      run.id,
+      run.state,
+      run.startedAt ?? "-",
+      run.finishedAt ?? "-",
+      String(run.attempts),
+    ].join("\t") + "\n");
+  }
+}
+
+async function internalStatus(argv) {
+  const { positional, options } = parseOptions(argv, { booleans: ["json"] });
+  if (positional.length) fail("internal-status accepts no positional arguments");
+  exactOptions(options, ["deployment", "run", "state-root", "json"]);
+  if (!NAME.test(options.deployment ?? "")) fail("--deployment is invalid");
+  const stateRoot = internalStateRoot(options);
+  let runId = options.run ?? "latest";
+  if (runId === "latest") runId = (await readFile(path.join(stateRoot, "latest"), "utf8").catch(() => "")).trim();
+  let status;
+  if (!runId) {
+    status = {
+      runId: null, state: "none", phase: null, startedAt: null, finishedAt: null, attempts: 0, lastEvent: null,
+    };
+  } else {
+    if (!RUN_ID.test(runId)) fail("invalid run ID");
+    const dirStat = await lstat(path.join(stateRoot, runId)).catch(() => null);
+    if (!dirStat?.isDirectory() || dirStat.isSymbolicLink()) fail(`unknown run: ${runId}`);
+    let summary;
+    try {
+      summary = await summarizeRun(stateRoot, runId, { withLastEvent: true });
+    } catch {
+      summary = {
+        id: runId, state: "unknown", phase: null, startedAt: null, finishedAt: null, attempts: 0, lastEvent: null,
+      };
+    }
+    const { id, ...rest } = summary;
+    status = { runId: id, ...rest };
+  }
+  const payload = { deployment: options.deployment, ...status };
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(payload)}\n`);
+    return;
+  }
+  const lines = [
+    `deployment: ${payload.deployment}`,
+    `run: ${payload.runId ?? "-"}`,
+    `state: ${payload.state}`,
+  ];
+  if (payload.phase) lines.push(`phase: ${payload.phase}`);
+  lines.push(`started: ${payload.startedAt ?? "-"}`);
+  lines.push(`finished: ${payload.finishedAt ?? "-"}`);
+  lines.push(`attempts: ${payload.attempts}`);
+  if (payload.lastEvent) {
+    lines.push(`last event: ${payload.lastEvent.type ?? "event"} at ${payload.lastEvent.timestamp ?? "-"}`);
+  }
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
+async function internalTail(argv) {
+  const { positional, options } = parseOptions(argv);
+  if (positional.length) fail("internal-tail accepts no positional arguments");
+  exactOptions(options, ["run", "after", "state-root"]);
+  const stateRoot = internalStateRoot(options);
+  let runId = options.run ?? "latest";
+  if (runId === "latest") runId = (await readFile(path.join(stateRoot, "latest"), "utf8")).trim();
+  if (!RUN_ID.test(runId)) fail("invalid run ID");
+  if (!/^\d{1,15}$/.test(options.after ?? "0")) fail("--after is invalid");
+  let offset = Number(options.after ?? "0");
+  const eventsPath = path.join(stateRoot, runId, "events.jsonl");
+  const stat = await lstat(eventsPath).catch(() => null);
+  if (!stat?.isFile() || stat.isSymbolicLink()) fail(`unknown run: ${runId}`);
+  const size = stat.size;
+  if (offset > size) offset = 0;
+  const window = Math.min(TAIL_CHUNK_BYTES, size - offset);
+  let chunk = "";
+  let next = offset;
+  if (window > 0) {
+    const handle = await open(eventsPath, "r");
+    try {
+      const buffer = Buffer.alloc(window);
+      await handle.read(buffer, 0, window, offset);
+      const newline = buffer.lastIndexOf(0x0a);
+      if (newline >= 0) {
+        chunk = buffer.subarray(0, newline + 1).toString("utf8");
+        next = offset + newline + 1;
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  process.stdout.write(`${JSON.stringify({ runId, offset: next, size, chunk })}\n`);
+}
+
+function stateReadArgs(hostRoot, image, internalArgs) {
+  return [
+    "docker", "run", "--rm", "--read-only", "--network", "none",
+    "--user", "0:0",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    "--pids-limit", "64",
+    "--memory", "128m",
+    "--cpus", "0.25",
+    "--volume", `${hostRoot}/runs:/state:ro`,
+    image,
+    ...internalArgs,
+  ];
+}
+
+async function remoteRuns(options) {
+  exactOptions(options, ["deployment", "target", "proxmox", "host", "vmid", "image", "json"]);
+  if (!NAME.test(options.deployment ?? "")) fail("--deployment is invalid");
+  const deploymentTarget = resolveDeploymentTarget(options);
+  if (deploymentTarget.kind === "local") await requireLocalDocker();
+  const image = options.image ?? DEFAULT_IMAGE;
+  if (!IMAGE.test(image)) fail("--image is invalid");
+  const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  const result = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, image, [
+    "internal-runs",
+    "--deployment", options.deployment,
+    ...(options.json ? ["--json"] : []),
+  ]), { maxOutputBytes: 2 * 1024 * 1024 });
+  process.stdout.write(result.stdout);
+}
+
+async function remoteStatus(options) {
+  exactOptions(options, ["deployment", "target", "proxmox", "host", "vmid", "run", "image", "json"]);
+  if (!NAME.test(options.deployment ?? "")) fail("--deployment is invalid");
+  const runId = options.run ?? "latest";
+  if (runId !== "latest" && !RUN_ID.test(runId)) fail("--run is invalid");
+  const deploymentTarget = resolveDeploymentTarget(options);
+  if (deploymentTarget.kind === "local") await requireLocalDocker();
+  const image = options.image ?? DEFAULT_IMAGE;
+  if (!IMAGE.test(image)) fail("--image is invalid");
+  const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  const result = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, image, [
+    "internal-status",
+    "--deployment", options.deployment,
+    "--run", runId,
+    ...(options.json ? ["--json"] : []),
+  ]), { maxOutputBytes: 64 * 1024 });
+  process.stdout.write(result.stdout);
+}
+
+function formatFollowEvent(line) {
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return line;
+  }
+  if (!isPlainObject(event)) return line;
+  const detail = event.status ?? event.reason
+    ?? (typeof event.role === "string"
+      ? [event.role, event.outcome].filter(value => typeof value === "string").join(" ")
+      : null)
+    ?? event.template ?? event.url ?? "";
+  const timestamp = typeof event.timestamp === "string" ? event.timestamp : "-";
+  const type = typeof event.type === "string" ? event.type : "event";
+  return `${timestamp} ${type}${detail ? ` ${String(detail).slice(0, 200)}` : ""}`;
+}
+
+function parseTailUpdate(stdout) {
+  let value;
+  try {
+    value = JSON.parse(stdout.trim().split("\n").at(-1));
+  } catch {
+    fail("follow update is invalid");
+  }
+  if (!isPlainObject(value) || !RUN_ID.test(value.runId ?? "")
+      || !Number.isSafeInteger(value.offset) || !Number.isSafeInteger(value.size)
+      || value.offset < 0 || value.offset > value.size
+      || typeof value.chunk !== "string" || Buffer.byteLength(value.chunk) > TAIL_CHUNK_BYTES) {
+    fail("follow update is invalid");
+  }
+  return value;
+}
+
+async function followLogs(deploymentTarget, { hostRoot, image, runId, json }) {
+  const abort = new AbortController();
+  let wake = null;
+  const stop = () => {
+    abort.abort();
+    wake?.();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  let offset = 0;
+  let currentRunId = null;
+  try {
+    while (!abort.signal.aborted) {
+      let update;
+      try {
+        const result = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, image, [
+          "internal-tail",
+          "--run", currentRunId ?? runId,
+          "--after", String(offset),
+        ]), {
+          timeoutMs: 30_000,
+          maxOutputBytes: 256 * 1024,
+          signal: abort.signal,
+        });
+        update = parseTailUpdate(result.stdout);
+      } catch (error) {
+        if (abort.signal.aborted) break;
+        throw error;
+      }
+      currentRunId = update.runId;
+      offset = update.offset;
+      if (update.chunk) {
+        if (json) process.stdout.write(update.chunk);
+        else {
+          for (const line of update.chunk.trimEnd().split("\n")) {
+            process.stdout.write(`${formatFollowEvent(line)}\n`);
+          }
+        }
+      }
+      if (update.size > update.offset) continue;
+      await new Promise(resolve => {
+        const timer = setTimeout(() => {
+          wake = null;
+          resolve();
+        }, FOLLOW_POLL_MS);
+        wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+    }
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+  }
+}
+
+function doctorReason(error) {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+    .trim()
+    .slice(0, 200) || "check failed";
+}
+
+async function nearestExistingDirectory(targetPath) {
+  let current = targetPath;
+  for (let depth = 0; depth < 64; depth += 1) {
+    const stat = await lstat(current).catch(() => null);
+    if (stat?.isDirectory() && !stat.isSymbolicLink()) return current;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  fail("no existing directory on the state path");
+}
+
+function parseDfAvailable(stdout) {
+  const line = stdout.trim().split("\n").at(-1) ?? "";
+  const match = line.match(/(\d+)\s+\d+%\s+/);
+  if (!match) fail("df output is unparseable");
+  return Number(match[1]);
+}
+
+function doctorDiskReason(available) {
+  const mib = Math.floor(available / 1024);
+  if (available < DOCTOR_MIN_FREE_BLOCKS) fail(`only ${mib} MiB free`);
+  return `${mib} MiB free`;
+}
+
+async function doctorRemoteProbe(target, probe) {
+  return targetExecute(target, probe, { timeoutMs: 15_000, maxOutputBytes: 4 * 1024 })
+    .then(() => true, () => false);
+}
+
+async function doctorRemoteStateRoot(target, root) {
+  if (await doctorRemoteProbe(target, ["test", "-d", root])) {
+    if (!(await doctorRemoteProbe(target, ["test", "-w", root]))) fail("state root is not writable");
+    return `writable (${root})`;
+  }
+  const parent = path.posix.dirname(root);
+  if (await doctorRemoteProbe(target, ["test", "-d", parent, "-a", "-w", parent])) {
+    return `missing; parent is writable (${parent})`;
+  }
+  fail("state root is missing and its parent is not writable");
+}
+
+async function doctorRemoteDisk(target, root) {
+  let candidate = root;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (await doctorRemoteProbe(target, ["test", "-d", candidate])) {
+      const result = await targetExecute(target, ["df", "-Pk", candidate], {
+        timeoutMs: 15_000,
+        maxOutputBytes: 16 * 1024,
+      });
+      return doctorDiskReason(parseDfAvailable(result.stdout));
+    }
+    const parent = path.posix.dirname(candidate);
+    if (parent === candidate) break;
+    candidate = parent;
+  }
+  fail("no existing directory on the remote state path");
+}
+
+async function doctor(options) {
+  exactOptions(options, [
+    "deployment", "target", "proxmox", "host", "vmid", "secret-ref", "account", "json",
+  ]);
+  if (options.deployment !== undefined && !NAME.test(options.deployment)) fail("--deployment is invalid");
+  if (options["secret-ref"] !== undefined && !SECRET_REF.test(options["secret-ref"])) {
+    fail("--secret-ref must be a 1Password op:// reference");
+  }
+  const target = resolveDeploymentTarget(options);
+  const checks = [];
+  const check = async (name, run) => {
+    try {
+      checks.push(Object.freeze({ name, status: "pass", reason: await run() }));
+    } catch (error) {
+      checks.push(Object.freeze({ name, status: "fail", reason: doctorReason(error) }));
+    }
+  };
+
+  if (target.kind === "local") {
+    await check("docker", async () => {
+      const status = await inspectLocalDocker();
+      if (status.availability !== "ready") fail(status.reason);
+      return `ready (${status.platform})`;
+    });
+    const root = options.deployment
+      ? deploymentRootForTarget(target, options.deployment)
+      : deploymentsRootForTarget(target);
+    await check("state-root", async () => {
+      const existing = await nearestExistingDirectory(root);
+      await access(existing, fsConstants.W_OK);
+      return `writable (${existing})`;
+    });
+    await check("disk", async () => {
+      const existing = await nearestExistingDirectory(root);
+      const result = await execute("df", ["-Pk", existing], {
+        timeoutMs: 15_000,
+        maxOutputBytes: 16 * 1024,
+      });
+      return doctorDiskReason(parseDfAvailable(result.stdout));
+    });
+  } else {
+    const sshTarget = target.kind === "ssh"
+      ? target
+      : Object.freeze({ kind: "ssh", runtime: "docker", sshTarget: target.sshTarget });
+    await check("ssh", async () => {
+      await targetExecute(sshTarget, ["true"], { timeoutMs: 15_000, maxOutputBytes: 4 * 1024 });
+      return "reachable (batch mode)";
+    });
+    if (target.kind === "proxmox-lxc") {
+      await check("pct", async () => {
+        const result = await targetExecute(sshTarget, ["pct", "status", target.vmid], {
+          timeoutMs: 15_000,
+          maxOutputBytes: 4 * 1024,
+        });
+        const status = result.stdout.trim();
+        if (!/^status: running$/u.test(status)) fail(`guest ${target.vmid} is not running`);
+        return `guest ${target.vmid} is running`;
+      });
+    }
+    await check("docker", async () => {
+      const result = await targetExecute(target, [
+        "docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}",
+      ], { timeoutMs: 15_000, maxOutputBytes: 4 * 1024 });
+      const platform = result.stdout.trim();
+      if (!/^linux\/(?:amd64|arm64)$/u.test(platform)) {
+        fail("remote Docker platform must be linux/amd64 or linux/arm64");
+      }
+      return `ready (${platform})`;
+    });
+    const root = options.deployment
+      ? deploymentRootForTarget(target, options.deployment)
+      : deploymentsRootForTarget(target);
+    await check("state-root", () => doctorRemoteStateRoot(target, root));
+    await check("disk", () => doctorRemoteDisk(target, root));
+  }
+
+  if (options["secret-ref"]) {
+    let opAvailable = false;
+    await check("op-cli", async () => {
+      const result = await execute("op", ["--version"], {
+        timeoutMs: 15_000,
+        maxOutputBytes: 4 * 1024,
+      });
+      const version = result.stdout.trim();
+      if (!/^\d+\.\d+[\d.]*$/u.test(version)) fail("op CLI returned an unexpected version");
+      opAvailable = true;
+      return `op ${version}`;
+    });
+    if (opAvailable) {
+      await check("secret-ref", async () => {
+        const args = ["read", options["secret-ref"]];
+        if (options.account) args.push("--account", options.account);
+        const result = await execute("op", args, {
+          timeoutMs: 15_000,
+          maxOutputBytes: 4 * 1024,
+        }).catch(() => fail("reference is not readable"));
+        if (!result.stdout.trim()) fail("reference resolved to an empty value");
+        return "reference is readable";
+      });
+    } else {
+      checks.push(Object.freeze({ name: "secret-ref", status: "skip", reason: "op CLI is unavailable" }));
+    }
+  } else {
+    checks.push(Object.freeze({ name: "secret-ref", status: "skip", reason: "no --secret-ref supplied" }));
+  }
+
+  const ok = checks.every(entry => entry.status !== "fail");
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify({ ok, target: target.kind, checks })}\n`);
+  } else {
+    for (const entry of checks) {
+      process.stdout.write(`${entry.status.toUpperCase()} ${entry.name}: ${entry.reason}\n`);
+    }
+  }
+  if (!ok) process.exitCode = 1;
+}
+
+const COMMAND_HELP = {
+  list: "bimo list [--json]\n  List the installed workflow and pod templates.",
+  targets: "bimo targets [--json]\n  Probe the local Docker daemon and list the built-in deployment targets.",
+  validate: "bimo validate TEMPLATE [--json]\n  Validate one installed template and print its digest.",
+  organize: "bimo organize -p PROMPT [-n 1|2|3] --deployment NAME [target flags] --secret-ref op://VAULT/ITEM/FIELD [--json]\n  Plan a deployment with bounded organizer agents without deploying.",
+  deploy: "bimo deploy TEMPLATE --deployment NAME [target flags] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD [--json]\n  Deploy a template as a bounded Docker fleet.",
+  runs: "bimo runs --deployment NAME [target flags] [--json]\n  List recorded runs for a deployment from its durable state root.",
+  status: "bimo status --deployment NAME [target flags] [--run ID] [--json]\n  Print the latest run state and last event for a deployment.",
+  logs: "bimo logs --deployment NAME [target flags] [--run ID] [--json] [--follow]\n  Print a run log; --follow streams new events until interrupted.",
+  doctor: "bimo doctor [--deployment NAME] [target flags] [--secret-ref op://VAULT/ITEM/FIELD] [--json]\n  Run deployment preflight checks and report pass, fail, or skip per check.",
+};
+
 function usage() {
   return `usage:
   bimo list [--json]
@@ -1453,7 +2061,11 @@ function usage() {
   bimo -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
   bimo deploy TEMPLATE --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
   bimo deploy parallel-engineering-pod --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --repository ${POD_REPOSITORY} --base-sha SHA --target-branch main [--json]
-  bimo logs --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json]
+  bimo logs --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json] [--follow]
+  bimo runs --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--json]
+  bimo status --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json]
+  bimo doctor [--deployment NAME] [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--secret-ref op://VAULT/ITEM/FIELD] [--json]
+  bimo help [COMMAND]
 `;
 }
 
@@ -1469,12 +2081,22 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (command === "help" || command === "--help" || command === "-h") {
+    const topic = command === "help" ? rest[0] : undefined;
+    if (topic !== undefined) {
+      if (rest.length !== 1 || !Object.hasOwn(COMMAND_HELP, topic)) fail(`unknown command: ${topic}`);
+      process.stdout.write(`${COMMAND_HELP[topic]}\n`);
+      return;
+    }
     process.stdout.write(usage());
     return;
   }
   if (command === "--version") {
     const manifest = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
     process.stdout.write(`${manifest.version}\n`);
+    return;
+  }
+  if (rest.includes("--help") && Object.hasOwn(COMMAND_HELP, command)) {
+    process.stdout.write(`${COMMAND_HELP[command]}\n`);
     return;
   }
   if (command === "list") {
@@ -1523,9 +2145,27 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (command === "logs") {
-    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    const { positional, options } = parseOptions(rest, { booleans: ["json", "follow"] });
     if (positional.length) fail("logs accepts no positional arguments");
     await remoteLogs(options);
+    return;
+  }
+  if (command === "runs") {
+    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    if (positional.length) fail("runs accepts no positional arguments");
+    await remoteRuns(options);
+    return;
+  }
+  if (command === "status") {
+    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    if (positional.length) fail("status accepts no positional arguments");
+    await remoteStatus(options);
+    return;
+  }
+  if (command === "doctor") {
+    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    if (positional.length) fail("doctor accepts no positional arguments");
+    await doctor(options);
     return;
   }
   if (command === "internal-run") {
@@ -1560,6 +2200,18 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (command === "internal-logs") {
     await internalLogs(rest);
+    return;
+  }
+  if (command === "internal-runs") {
+    await internalRuns(rest);
+    return;
+  }
+  if (command === "internal-status") {
+    await internalStatus(rest);
+    return;
+  }
+  if (command === "internal-tail") {
+    await internalTail(rest);
     return;
   }
   fail(`unknown command: ${command}`);
