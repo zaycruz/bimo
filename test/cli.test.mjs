@@ -358,6 +358,26 @@ test("the installed CLI validates the packaged fixed engineering pod", async () 
   assert.match(result.digest, /^[a-f0-9]{64}$/);
 });
 
+test("the package ships its runnable how-to and example prompts", async () => {
+  const packed = await execute("npm", ["pack", "--json", "--dry-run"], {
+    cwd: root,
+    maxBuffer: 1024 * 1024,
+  });
+  const [manifest] = JSON.parse(packed.stdout);
+  const files = new Set(manifest.files.map(file => file.path));
+  for (const expected of [
+    "README.md",
+    "docs/organize.md",
+    "examples/fleet-demo.md",
+    "examples/solo-demo.md",
+    "examples/prompts/small-app.md",
+    "examples/prompts/parallel-engineering-pod.md",
+    "examples/pod-assignment.md",
+  ]) {
+    assert.ok(files.has(expected), `package is missing ${expected}`);
+  }
+});
+
 test("organize transfers content-verified image without retagging and runs one exact sandboxed controller", async t => {
   const prompt = "Build a small status page with a readable health indicator.";
   const tools = await fakeDeployTools(t, { controller: "organize-success" });

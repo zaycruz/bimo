@@ -237,23 +237,28 @@ Controller-owned verification is the separate fixed step described above.
 
 ## Install from GitHub
 
-Monolith is not published to the npm registry. Download the v0.3 release
+Monolith is not published to the npm registry. Download the v0.3.1 release
 tarball and checksum, verify the exact file, then install it locally:
 
 ```bash
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/monolith-v2/releases/download/v0.3.0/monolith-workflow-0.3.0.tgz
+  https://github.com/zaycruz/monolith-v2/releases/download/v0.3.1/monolith-workflow-0.3.1.tgz
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/monolith-v2/releases/download/v0.3.0/monolith-workflow-0.3.0.tgz.sha256
-shasum --algorithm 256 --check monolith-workflow-0.3.0.tgz.sha256
-npm install --global ./monolith-workflow-0.3.0.tgz
+  https://github.com/zaycruz/monolith-v2/releases/download/v0.3.1/monolith-workflow-0.3.1.tgz.sha256
+shasum --algorithm 256 --check monolith-workflow-0.3.1.tgz.sha256
+npm install --global ./monolith-workflow-0.3.1.tgz
 monolith list --json
 monolith validate parallel-engineering-pod
+MONOLITH_PACKAGE_ROOT="$(npm root --global)/monolith-workflow"
+test -f "$MONOLITH_PACKAGE_ROOT/docs/organize.md"
+test -f "$MONOLITH_PACKAGE_ROOT/examples/pod-assignment.md"
 ```
 
-The operator machine needs Node.js 22+, Docker, SSH, and the 1Password CLI. The
-target must be an amd64 Linux Docker host reachable through an already trusted,
-strict-host-key-checked SSH connection.
+The operator machine needs Node.js 22+, Docker, SSH, the 1Password CLI, and
+`jq` for the plan-display examples. The target must be an amd64 Linux Docker
+host reachable through an already trusted, strict-host-key-checked SSH
+connection. `MONOLITH_PACKAGE_ROOT` makes every example below runnable from any
+working directory after the global install.
 
 This repository and package are `UNLICENSED`. Public source visibility does not
 grant an open-source license or general permission to use, copy, modify, or
@@ -281,7 +286,11 @@ Any invalid receipt, timeout, digest mismatch, or missing quorum fails without
 deploying anything.
 
 ```bash
-PLAN="$(monolith -p "$(<examples/prompts/small-app.md)" \
+MONOLITH_PACKAGE_ROOT="${MONOLITH_PACKAGE_ROOT:-$(npm root --global)/monolith-workflow}"
+SMALL_APP_PROMPT="$MONOLITH_PACKAGE_ROOT/examples/prompts/small-app.md"
+SMALL_APP_ASSIGNMENT="$(<"$SMALL_APP_PROMPT")"
+
+PLAN="$(monolith -p "$SMALL_APP_ASSIGNMENT" \
   -n 3 \
   --deployment organize-demo \
   --proxmox pve-05 \
@@ -313,14 +322,27 @@ selected LXC through `pct exec`. The verified demo target is the dedicated,
 unprivileged Docker LXC `113` on `pve-05`:
 
 ```bash
+MONOLITH_PACKAGE_ROOT="${MONOLITH_PACKAGE_ROOT:-$(npm root --global)/monolith-workflow}"
+POD_TASK_FILE="$MONOLITH_PACKAGE_ROOT/examples/pod-assignment.md"
+POD_ASSIGNMENT="$(<"$POD_TASK_FILE")"
 REPOSITORY='https://github.com/zaycruz/monolith-v2.git'
 BASE_SHA="$(git ls-remote --refs "$REPOSITORY" refs/heads/main | cut -f1)"
+
+POD_PLAN="$(monolith -p "$POD_ASSIGNMENT" \
+  -n 3 \
+  --deployment pod-plan-demo \
+  --proxmox root@pve-05 \
+  --vmid 113 \
+  --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
+  --json)"
+
+printf '%s\n' "$POD_PLAN" | jq .
 
 monolith deploy parallel-engineering-pod \
   --deployment pod-demo \
   --proxmox root@pve-05 \
   --vmid 113 \
-  --task-file examples/pod-assignment.md \
+  --task-file "$POD_TASK_FILE" \
   --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
   --github-secret-ref 'op://VAULT/ITEM/GITHUB_TOKEN' \
   --repository "$REPOSITORY" \
@@ -348,13 +370,16 @@ monolith logs \
 Deploy the sequential three-role workflow independently:
 
 ```bash
+MONOLITH_PACKAGE_ROOT="${MONOLITH_PACKAGE_ROOT:-$(npm root --global)/monolith-workflow}"
+LXC_ADDRESS='10.200.160.143' # Replace this when targeting another LXC.
+
 monolith deploy react-app \
   --deployment fleet-demo \
   --proxmox root@pve-05 \
   --vmid 113 \
-  --task-file examples/fleet-demo.md \
+  --task-file "$MONOLITH_PACKAGE_ROOT/examples/fleet-demo.md" \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
-  --public-url 'http://<LXC_ADDRESS>:8080'
+  --public-url "http://${LXC_ADDRESS}:8080"
 ```
 
 Deploy the sequential one-role template independently:
@@ -364,9 +389,9 @@ monolith deploy react-solo \
   --deployment solo-demo \
   --proxmox root@pve-05 \
   --vmid 113 \
-  --task-file examples/solo-demo.md \
+  --task-file "$MONOLITH_PACKAGE_ROOT/examples/solo-demo.md" \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
-  --public-url 'http://<LXC_ADDRESS>:8081' \
+  --public-url "http://${LXC_ADDRESS}:8081" \
   --port 8081
 ```
 
@@ -392,10 +417,12 @@ Use `--host` instead of `--proxmox` and `--vmid` when Docker runs directly on
 the SSH target:
 
 ```bash
+MONOLITH_PACKAGE_ROOT="${MONOLITH_PACKAGE_ROOT:-$(npm root --global)/monolith-workflow}"
+
 monolith deploy react-app \
   --deployment fleet-demo \
   --host deploy@docker-host.example \
-  --task-file examples/fleet-demo.md \
+  --task-file "$MONOLITH_PACKAGE_ROOT/examples/fleet-demo.md" \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
   --public-url 'http://docker-host.example:8080'
 
@@ -415,7 +442,7 @@ sequential deploys also accept `--port`. `logs` accepts `--run`, `--image`, and
 `--json`.
 
 Defaults are port `8080`, model `openrouter/deepseek/deepseek-v4-flash`, and
-image tag `monolith-workflow:0.3.0`. `--account` selects a 1Password account;
+image tag `monolith-workflow:0.3.1`. `--account` selects a 1Password account;
 `--json` requests machine-readable output.
 
 Quote each `op://` reference as one shell argument. Vault, item, and field names
@@ -542,7 +569,7 @@ Never put a credential in a task, prompt, workflow file, repository file,
 
 ## v0.3 release evidence
 
-Local verification on 2026-08-26: **201/201 automated tests passed**. The final
+Local verification on 2026-08-26: **202/202 automated tests passed**. The final
 `linux/amd64` image also executed its baked Git askpass helper while the private
 credential tmpfs remained `noexec`; the helper was root-owned and mode `0555`.
 
