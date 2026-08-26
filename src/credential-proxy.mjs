@@ -668,6 +668,7 @@ async function main() {
       "lifetime-seconds": { type: "string" },
       "listen-scope": { type: "string" },
       "max-body-bytes": { type: "string" },
+      "max-concurrency": { type: "string" },
       "max-requests": { type: "string" },
       model: { type: "string" },
       port: { type: "string" },
@@ -695,6 +696,10 @@ async function main() {
     values["max-requests"] ?? String(DEFAULT_MAX_REQUESTS),
     "max requests",
   );
+  const maxConcurrency = parsePositiveIntegerOption(
+    values["max-concurrency"] ?? String(DEFAULT_MAX_CONCURRENCY),
+    "max concurrency",
+  );
   const timeoutSeconds = parsePositiveIntegerOption(
     values["timeout-seconds"] ?? String(DEFAULT_TIMEOUT_MS / 1_000),
     "timeout seconds",
@@ -715,6 +720,7 @@ async function main() {
       model,
       maxRequestBodyBytes,
       maxRequests,
+      maxConcurrency,
       timeoutMs,
       listenScope,
     });

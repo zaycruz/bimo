@@ -154,6 +154,8 @@ test("CLI reads the credential from stdin and emits no secret-bearing output", a
       MODEL,
       "--max-requests",
       "100",
+      "--max-concurrency",
+      "3",
       "--max-body-bytes",
       "2097152",
       "--timeout-seconds",
