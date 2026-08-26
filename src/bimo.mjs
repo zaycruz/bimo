@@ -784,7 +784,8 @@ async function deploy(template, options) {
     "deployment", "target", "proxmox", "host", "vmid", "task-file", "task-stdin",
     "secret-ref", "account", "public-url", "port", "model", "image", "json",
   ]);
-  if (!NAME.test(options.deployment ?? "")) fail("--deployment must use lowercase letters, numbers, and dashes");
+  if (!options.deployment) fail("--deployment is required");
+  if (!NAME.test(options.deployment)) fail("--deployment must use lowercase letters, numbers, and dashes");
   const deploymentTarget = resolveDeploymentTarget(options);
   const image = options.image ?? DEFAULT_IMAGE;
   if (!IMAGE.test(image)) fail("--image is invalid");
@@ -957,7 +958,8 @@ async function organizeRemote(options) {
     "prompt", "agents", "deployment", "target", "proxmox", "host", "vmid",
     "secret-ref", "account", "model", "image", "json",
   ]);
-  if (!NAME.test(options.deployment ?? "")) {
+  if (!options.deployment) fail("--deployment is required");
+  if (!NAME.test(options.deployment)) {
     fail("--deployment must use lowercase letters, numbers, and dashes");
   }
   const deploymentTarget = resolveDeploymentTarget(options);
@@ -1461,8 +1463,18 @@ export async function main(argv = process.argv.slice(2)) {
     command = "organize";
     rest = argv;
   }
-  if (!command || command === "help" || command === "--help") {
+  if (!command) {
     process.stdout.write(usage());
+    process.exitCode = 1;
+    return;
+  }
+  if (command === "help" || command === "--help" || command === "-h") {
+    process.stdout.write(usage());
+    return;
+  }
+  if (command === "--version") {
+    const manifest = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
+    process.stdout.write(`${manifest.version}\n`);
     return;
   }
   if (command === "list") {
