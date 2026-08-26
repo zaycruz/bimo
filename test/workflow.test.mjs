@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -71,6 +71,70 @@ test("the packaged React workflow is data-only and bounded", async () => {
   const reservedSmoke = structuredClone(loaded.workflow);
   reservedSmoke.output.smoke.path = "/healthz";
   assert.throws(() => validateWorkflow(reservedSmoke), /reserved for server health/);
+});
+
+test("template loading fails closed at the template-root filesystem boundary", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-template-"));
+  const templateRoot = path.join(temporary, "templates");
+  const outside = path.join(temporary, "outside.md");
+  await writeFile(outside, "instructions that live outside the template");
+
+  async function writeTemplate(name, { manifestName = name, promptPath = "roles/engineering.md", prompt = "Do the bounded role." } = {}) {
+    const directory = path.join(templateRoot, name);
+    await mkdir(path.join(directory, "roles"), { recursive: true });
+    const manifest = {
+      version: 1,
+      name: manifestName,
+      start: "engineering",
+      maxSteps: 4,
+      timeouts: { stepSeconds: 60, workflowSeconds: 600 },
+      roles: {
+        engineering: { prompt: promptPath, write: true, on: { completed: "done" } },
+      },
+      output: {
+        directory: "dist",
+        maxFiles: 10,
+        maxBytes: 65_536,
+        smoke: { path: "/", status: 200, contains: "READY" },
+      },
+    };
+    await writeFile(path.join(directory, "workflow.json"), JSON.stringify(manifest));
+    await writeFile(path.join(directory, "roles", "engineering.md"), prompt);
+    return directory;
+  }
+
+  await writeTemplate("sample");
+  const loaded = await loadWorkflow("sample", { templateRoot });
+  assert.match(loaded.templateDigest, /^[a-f0-9]{64}$/);
+
+  // The directory name and the manifest name must agree.
+  await writeTemplate("renamed", { manifestName: "sample" });
+  await assert.rejects(loadWorkflow("renamed", { templateRoot }), /does not match workflow name/);
+
+  // A symlinked template directory is not a template.
+  await symlink(path.join(templateRoot, "sample"), path.join(templateRoot, "linked"));
+  await assert.rejects(loadWorkflow("linked", { templateRoot }), /unknown template/);
+
+  // A prompt path that escapes the template is rejected before any file is read.
+  await writeTemplate("escaping", { promptPath: "../outside.md" });
+  await assert.rejects(loadWorkflow("escaping", { templateRoot }), /relative workspace path/);
+
+  // A prompt that is a symlink to an outside file is not a regular file.
+  const linkedPrompt = await writeTemplate("linked-prompt");
+  await rm(path.join(linkedPrompt, "roles", "engineering.md"));
+  await symlink(outside, path.join(linkedPrompt, "roles", "engineering.md"));
+  await assert.rejects(loadWorkflow("linked-prompt", { templateRoot }), /prompt must be a regular file/);
+
+  // The manifest is size-capped before parsing.
+  const oversized = await writeTemplate("oversized");
+  await writeFile(path.join(oversized, "workflow.json"), `{${" ".repeat(65 * 1024)}`);
+  await assert.rejects(loadWorkflow("oversized", { templateRoot }), /exceeds 64 KiB/);
+
+  // The digest binds every prompt byte: one changed byte changes the digest.
+  const tampered = path.join(templateRoot, "sample", "roles", "engineering.md");
+  await writeFile(tampered, "Do the bounded role, differently.");
+  const reloaded = await loadWorkflow("sample", { templateRoot });
+  assert.notEqual(reloaded.templateDigest, loaded.templateDigest);
 });
 
 test("strict receipts reject extra fields and unsafe paths", () => {

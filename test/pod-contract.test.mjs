@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -193,6 +195,69 @@ test("template-owned write roots are canonical, disjoint, and exclude control pa
   const caseOverlap = podTemplate();
   caseOverlap.writers["engineering-b"].allowedWriteRoots = ["SRC"];
   assert.throws(() => validatePodTemplate(caseOverlap), /write roots overlap/);
+});
+
+test("pod template loading fails closed at the template-root filesystem boundary", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-pod-template-"));
+  const templateRoot = path.join(temporary, "templates");
+  const outside = path.join(temporary, "outside.md");
+  await writeFile(outside, "instructions that live outside the template");
+
+  async function writePod(name, { manifestName = name } = {}) {
+    const directory = path.join(templateRoot, name);
+    await mkdir(path.join(directory, "roles"), { recursive: true });
+    const manifest = podTemplate();
+    manifest.name = manifestName;
+    await writeFile(path.join(directory, "pod.json"), JSON.stringify(manifest));
+    const prompts = {
+      "engineering.md": "Engineer inside the assigned write root.",
+      "qa-tests.md": "Write tests only.",
+      "planner.md": "Plan the attempt.",
+      "checker.md": "Check the exact diff.",
+      "qa.md": "Review read-only.",
+      "testing.md": "Run the fixed profile.",
+    };
+    for (const [file, content] of Object.entries(prompts)) {
+      await writeFile(path.join(directory, "roles", file), content);
+    }
+    return directory;
+  }
+
+  await writePod("parallel-engineering-pod");
+  const loaded = await loadPodTemplate("parallel-engineering-pod", { templateRoot });
+  assert.match(loaded.templateDigest, /^[a-f0-9]{64}$/);
+
+  // The directory name and the manifest name must agree.
+  await writePod("renamed-pod", { manifestName: "other-pod" });
+  await assert.rejects(loadPodTemplate("renamed-pod", { templateRoot }), /does not match pod template name/);
+
+  // A symlinked template directory is not a template.
+  await symlink(
+    path.join(templateRoot, "parallel-engineering-pod"),
+    path.join(templateRoot, "linked-pod"),
+  );
+  await assert.rejects(loadPodTemplate("linked-pod", { templateRoot }), /unknown pod template/);
+
+  // A prompt that is a symlink to an outside file is not a regular file.
+  const linkedPrompt = await writePod("linked-prompt-pod");
+  await rm(path.join(linkedPrompt, "roles", "planner.md"));
+  await symlink(outside, path.join(linkedPrompt, "roles", "planner.md"));
+  await assert.rejects(
+    loadPodTemplate("linked-prompt-pod", { templateRoot }),
+    /must be a regular file/,
+  );
+
+  // The manifest is size-capped before parsing.
+  const oversized = await writePod("oversized-pod");
+  await writeFile(path.join(oversized, "pod.json"), `{${" ".repeat(65 * 1024)}`);
+  await assert.rejects(loadPodTemplate("oversized-pod", { templateRoot }), /exceeds 64 KiB/);
+
+  // The digest binds every prompt byte: one changed byte changes the digest.
+  const tampered = await writePod("tampered-pod");
+  const before = await loadPodTemplate("tampered-pod", { templateRoot });
+  await writeFile(path.join(tampered, "roles", "planner.md"), "Plan the attempt, differently.");
+  const after = await loadPodTemplate("tampered-pod", { templateRoot });
+  assert.notEqual(after.templateDigest, before.templateDigest);
 });
 
 test("the packaged pod loads all fixed prompts with a stable digest", async () => {
