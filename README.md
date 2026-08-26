@@ -241,7 +241,12 @@ curl --fail --location --remote-name \
   https://github.com/zaycruz/bimo/releases/download/v0.5.0/bimo-workflow-0.5.0.tgz
 curl --fail --location --remote-name \
   https://github.com/zaycruz/bimo/releases/download/v0.5.0/bimo-workflow-0.5.0.tgz.sha256
+
+# macOS
 shasum --algorithm 256 --check bimo-workflow-0.5.0.tgz.sha256
+# Linux
+sha256sum --check bimo-workflow-0.5.0.tgz.sha256
+
 npm install --global ./bimo-workflow-0.5.0.tgz
 bimo list --json
 bimo validate parallel-engineering-pod
@@ -250,11 +255,13 @@ test -f "$BIMO_PACKAGE_ROOT/docs/organize.md"
 test -f "$BIMO_PACKAGE_ROOT/examples/pod-assignment.md"
 ```
 
-The operator machine needs Node.js 22+, Docker, SSH, the 1Password CLI, and
-`jq` for the plan-display examples. The target must be an amd64 Linux Docker
-host reachable through an already trusted, strict-host-key-checked SSH
-connection. `BIMO_PACKAGE_ROOT` makes every example below runnable from any
-working directory after the global install.
+The tarball is platform-independent Node.js, so the same download serves
+macOS and Linux on any architecture. The operator machine needs Node.js 22+,
+Docker, SSH, the 1Password CLI, and `jq` for the plan-display examples. The
+target must be an amd64 or arm64 Linux Docker host reachable through an
+already trusted, strict-host-key-checked SSH connection. `BIMO_PACKAGE_ROOT`
+makes every example below runnable from any working directory after the
+global install.
 
 ## License
 
