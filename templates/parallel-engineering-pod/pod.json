@@ -31,5 +31,5 @@
     "qa": "roles/qa.md",
     "testing": "roles/testing.md"
   },
-  "verificationProfile": "monolith-repo-v1"
+  "verificationProfile": "bimo-repo-v1"
 }

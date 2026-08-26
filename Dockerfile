@@ -30,13 +30,13 @@ COPY --chown=root:root templates ./templates
 COPY --chown=root:root etc/organizer ./etc/organizer
 COPY --chown=root:root --chmod=0444 etc/opencode/opencode.json /etc/opencode/opencode.json
 
-COPY --chown=root:root starters/react/package.json starters/react/package-lock.json /opt/monolith-react/
-RUN cd /opt/monolith-react \
+COPY --chown=root:root starters/react/package.json starters/react/package-lock.json /opt/bimo-react/
+RUN cd /opt/bimo-react \
     && npm ci --include=dev --ignore-scripts --no-audit --no-fund \
     && npm cache clean --force
 
-RUN chmod 0555 /app/bin/monolith /app/bin/monolith-git-askpass /etc/opencode \
+RUN chmod 0555 /app/bin/bimo /app/bin/bimo-git-askpass /etc/opencode \
     && chown -R root:root /app /etc/opencode
 
 USER node
-ENTRYPOINT ["/app/bin/monolith"]
+ENTRYPOINT ["/app/bin/bimo"]

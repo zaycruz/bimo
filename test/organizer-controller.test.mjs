@@ -48,7 +48,7 @@ function receipt(template = "react-app", reason = "The installed template matche
 }
 
 async function fixture(t, runId) {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-organizer-controller-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-organizer-controller-"));
   const stateRoot = path.join(temporary, "state");
   const worktreesRoot = path.join(temporary, "worktrees");
   await Promise.all([

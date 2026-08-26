@@ -123,9 +123,9 @@ export function createOpenCodeDiagnostics() {
 
 function runOpenCode({ model, timeoutSeconds, role }) {
   return new Promise((resolve, reject) => {
-    const gateway = process.env.MONOLITH_GATEWAY_URL;
+    const gateway = process.env.BIMO_GATEWAY_URL;
     if (!gateway || !/^http:\/\/[a-z0-9.-]+:\d{2,5}\/api\/v1$/.test(gateway)) {
-      reject(new Error("MONOLITH_GATEWAY_URL is invalid"));
+      reject(new Error("BIMO_GATEWAY_URL is invalid"));
       return;
     }
     const child = spawn("opencode", [
@@ -137,8 +137,8 @@ function runOpenCode({ model, timeoutSeconds, role }) {
       "--dir", "/workspace",
       "--model", model,
       "--file", INSTRUCTIONS_PATH,
-      "--title", `monolith-${role}`,
-      "Follow the attached Monolith instructions exactly.",
+      "--title", `bimo-${role}`,
+      "Follow the attached Bimo instructions exactly.",
     ], {
       detached: true,
       env: {
@@ -147,7 +147,7 @@ function runOpenCode({ model, timeoutSeconds, role }) {
         TMPDIR: "/tmp",
         LANG: "C.UTF-8",
         CI: "1",
-        MONOLITH_GATEWAY_URL: gateway,
+        BIMO_GATEWAY_URL: gateway,
         OPENCODE_CONFIG: "/etc/opencode/opencode.json",
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -215,12 +215,12 @@ async function main() {
 const invokedPath = process.argv[1]
   ? pathToFileURL(path.resolve(process.argv[1])).href
   : null;
-const invokedFromMonolith = process.argv[1]
-  ? path.basename(process.argv[1]) === "monolith"
+const invokedFromBimo = process.argv[1]
+  ? path.basename(process.argv[1]) === "bimo"
   : false;
-if (invokedPath === import.meta.url || invokedFromMonolith) {
+if (invokedPath === import.meta.url || invokedFromBimo) {
   main().catch(error => {
-    process.stderr.write(`monolith-agent: ${error.message}\n`);
+    process.stderr.write(`bimo-agent: ${error.message}\n`);
     process.exitCode = 1;
   });
 }

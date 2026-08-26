@@ -16,7 +16,7 @@ try {
   const { port } = server.address();
   const response = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(response.status, 200);
-  assert.match(await response.text(), /MONOLITH_DEMO_READY/);
+  assert.match(await response.text(), /BIMO_DEMO_READY/);
 } finally {
   await new Promise(resolve => server.close(resolve));
 }

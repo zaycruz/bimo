@@ -12,7 +12,7 @@ Engineering to fix instead of fixing them yourself.
   security, accessibility, responsive-layout, and maintainability problems.
 - Confirm there are no embedded credentials, analytics, external services, or
   remote assets.
-- Confirm `MONOLITH_DEMO_READY` is visible in the React page and present in the
+- Confirm `BIMO_DEMO_READY` is visible in the React page and present in the
   source `index.html`.
 - Confirm the package scripts use read-only tests and a read-only smoke check.
 
@@ -24,7 +24,7 @@ test -f package-lock.json
 test -f dist/index.html
 npm test
 npm run smoke
-grep -R -q 'MONOLITH_DEMO_READY' dist
+grep -R -q 'BIMO_DEMO_READY' dist
 ```
 
 Return `passed` only if every command passes and the review finds no material

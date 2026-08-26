@@ -9,8 +9,8 @@
   "provider": {
     "openrouter": {
       "options": {
-        "apiKey": "monolith-runtime-proxy",
-        "baseURL": "{env:MONOLITH_GATEWAY_URL}"
+        "apiKey": "bimo-runtime-proxy",
+        "baseURL": "{env:BIMO_GATEWAY_URL}"
       }
     }
   },

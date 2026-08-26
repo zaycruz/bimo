@@ -334,7 +334,7 @@ function requestHeaders(token, hasBody) {
   return {
     accept: "application/vnd.github+json",
     authorization: `Bearer ${token}`,
-    "user-agent": "monolith-v2",
+    "user-agent": "bimo",
     "x-github-api-version": GITHUB_API_VERSION,
     ...(hasBody ? { "content-type": "application/json" } : {}),
   };

@@ -49,7 +49,7 @@ function podTemplate() {
       qa: "roles/qa.md",
       testing: "roles/testing.md",
     },
-    verificationProfile: "monolith-repo-v1",
+    verificationProfile: "bimo-repo-v1",
   };
 }
 
@@ -240,7 +240,7 @@ test("packaged prompts state the strict handoff fields and deterministic authori
   assert.doesNotMatch(loaded.prompts.checker, /"files"\s*:/);
   assert.match(loaded.prompts.qa, /"candidateSha"/);
   assert.doesNotMatch(loaded.prompts.qa, /"files"\s*:/);
-  assert.match(loaded.prompts.testing, /monolith-repo-v1/);
+  assert.match(loaded.prompts.testing, /bimo-repo-v1/);
   assert.match(loaded.prompts.testing, /semantic.*advisory/i);
   assert.doesNotMatch(loaded.prompts.testing, /"files"\s*:/);
 });

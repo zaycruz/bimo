@@ -622,7 +622,7 @@ export async function runEngineeringPod({
     const commits = WRITER_SLOTS.map(slot => accepted.get(slot));
 
     remainingMs(attemptState.deadlineAt);
-    const branch = `monolith/${runId}`;
+    const branch = `bimo/${runId}`;
     const integrated = await source.integrate({
       attempt: attemptState.attempt,
       baseSha: attemptState.baseSha,
@@ -754,7 +754,7 @@ export async function runEngineeringPod({
       why: "The exact tested candidate is ready for isolated publication.",
       evidence: [
         `candidate:${candidateSha}`,
-        `branch:monolith/${runId}`,
+        `branch:bimo/${runId}`,
       ],
     });
     return { candidateSha, branch, workspaceRoot: candidateView.root };

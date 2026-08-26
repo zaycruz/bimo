@@ -35,7 +35,7 @@ const INPUT_FIELDS = Object.freeze([
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const SOURCE_CLEANUP_TIMEOUT_MS = 5_000;
-const ASKPASS_PROGRAM = path.resolve(import.meta.dirname, "..", "bin", "monolith-git-askpass");
+const ASKPASS_PROGRAM = path.resolve(import.meta.dirname, "..", "bin", "bimo-git-askpass");
 
 function fail(message) {
   throw new Error(message);
@@ -239,7 +239,7 @@ async function createAskpass(askpassRoot, token) {
       ...baseGitEnvironment(home),
       GIT_ASKPASS: ASKPASS_PROGRAM,
       GIT_ASKPASS_REQUIRE: "force",
-      MONOLITH_GIT_TOKEN_FILE: tokenFile,
+      BIMO_GIT_TOKEN_FILE: tokenFile,
     },
     async cleanup() {
       if (cleaned) return;
@@ -334,7 +334,7 @@ async function publishRunInternal(input, {
   createGitHubPublisher = defaultCreateGitHubPublisher,
   openRunStore = openPodRunStore,
   fetchImpl = globalThis.fetch,
-  askpassRoot = "/run/monolith-publish",
+  askpassRoot = "/run/bimo-publish",
   removeSourceGitDir = rm,
 } = {}) {
   const validated = strictInput(input);
@@ -468,8 +468,8 @@ async function publishRunInternal(input, {
     headBranch: validated.headBranch,
     headSha: validated.candidateSha,
     baseSha: validated.baseSha,
-    title: `Monolith run ${validated.runId}`,
-    body: `Automated draft pull request for Monolith run ${validated.runId}.`,
+    title: `Bimo run ${validated.runId}`,
+    body: `Automated draft pull request for Bimo run ${validated.runId}.`,
     deadlineAt: validated.deadlineAt,
     draft: true,
   }), validated);

@@ -17,13 +17,13 @@ is displayed for context but never executed or reused as deployment input.
 Use one selector for the smallest, deterministic path:
 
 ```sh
-monolith organize -p "Build a small React app that displays a task list." -n 1 --deployment organize-demo --proxmox pve-05 --vmid 113 --secret-ref op://VAULT/ITEM/FIELD --json
+bimo organize -p "Build a small React app that displays a task list." -n 1 --deployment organize-demo --proxmox pve-05 --vmid 113 --secret-ref op://VAULT/ITEM/FIELD --json
 ```
 
 The root shorthand accepts the same prompt without the subcommand:
 
 ```sh
-monolith -p "Build a small React app that displays a task list." -n 1 --deployment organize-demo --proxmox pve-05 --vmid 113 --secret-ref op://VAULT/ITEM/FIELD --json
+bimo -p "Build a small React app that displays a task list." -n 1 --deployment organize-demo --proxmox pve-05 --vmid 113 --secret-ref op://VAULT/ITEM/FIELD --json
 ```
 
 These values show the complete command shape. Replace the `op://` placeholder

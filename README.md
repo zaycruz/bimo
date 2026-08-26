@@ -1,13 +1,9 @@
-# Monolith v0.3
+# Bimo v0.4
 
-Monolith deploys predefined agent work to one Docker host. v0.3 preserves the
-bounded sequential workflows, adds one fixed parallel engineering pod, and can
-ask up to three isolated organizer agents to select the installed template that
-best fits a prompt.
-
-**[Open the live agent-built demo](https://thisismonolith.pages.dev/).** It is
-the unchanged static artifact from the final `react-app` run on `pve-05`, not a
-hosted Monolith control plane.
+Bimo deploys predefined agent work to one Docker host. v0.4 includes bounded
+sequential workflows, one fixed parallel engineering pod, and up to three
+isolated organizer agents that select the installed template best suited to a
+prompt.
 
 ```text
 template = workflow.json + one Markdown prompt per role
@@ -49,7 +45,7 @@ Planner
   -> engineering-a [src] ───────> checker ─┐
   -> engineering-b [starters] ──> checker ─┼─> fixed-order integration
   -> qa-tests [test] ────────────> checker ─┘
-  -> QA -> Testing -> monolith-repo-v1 -> source scan
+  -> QA -> Testing -> bimo-repo-v1 -> source scan
   -> isolated publisher -> draft pull request
 ```
 
@@ -89,11 +85,11 @@ This is the complete pod manifest:
     "qa": "roles/qa.md",
     "testing": "roles/testing.md"
   },
-  "verificationProfile": "monolith-repo-v1"
+  "verificationProfile": "bimo-repo-v1"
 }
 ```
 
-JSON is intentional. Node parses it natively with `JSON.parse`, then Monolith
+JSON is intentional. Node parses it natively with `JSON.parse`, then Bimo
 applies an exact, data-only schema. That adds no YAML/TOML parser and avoids
 YAML aliases, tags, and implicit-type ambiguity. The manifest cannot add nodes,
 commands, images, providers, repositories, or environment variables.
@@ -109,12 +105,12 @@ Every writer commit gets its own read-only checker. Any writer, checker,
 integration, QA, Testing, or verification failure discards the attempt and
 replans all three writers from the same immutable base, up to `maxAttempts`.
 The Planner, checker, QA, and Testing receipts are advisory model judgments.
-The separate `monolith-repo-v1` profile and source scan are controller-owned
+The separate `bimo-repo-v1` profile and source scan are controller-owned
 gates bound to the exact integrated commit.
 
 After those gates pass, compute stops. A separate publisher receives the GitHub
 credential, rechecks the allowlisted base and candidate SHAs, pushes the fixed
-`monolith/<run-id>` branch, and opens a draft pull request. It has no Docker
+`bimo/<run-id>` branch, and opens a draft pull request. It has no Docker
 socket, agent worktrees, snapshots, or OpenRouter key. It never merges.
 
 ## The sequential workflow template contract
@@ -179,7 +175,7 @@ This is the complete bundled `react-app` manifest:
     "smoke": {
       "path": "/",
       "status": 200,
-      "contains": "MONOLITH_DEMO_READY"
+      "contains": "BIMO_DEMO_READY"
     }
   }
 }
@@ -237,27 +233,27 @@ Controller-owned verification is the separate fixed step described above.
 
 ## Install from GitHub
 
-Monolith is not published to the npm registry. Download the v0.3.1 release
+Bimo is not published to the npm registry. Download the v0.4.0 release
 tarball and checksum, verify the exact file, then install it locally:
 
 ```bash
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/monolith-v2/releases/download/v0.3.1/monolith-workflow-0.3.1.tgz
+  https://github.com/zaycruz/bimo/releases/download/v0.4.0/bimo-workflow-0.4.0.tgz
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/monolith-v2/releases/download/v0.3.1/monolith-workflow-0.3.1.tgz.sha256
-shasum --algorithm 256 --check monolith-workflow-0.3.1.tgz.sha256
-npm install --global ./monolith-workflow-0.3.1.tgz
-monolith list --json
-monolith validate parallel-engineering-pod
-MONOLITH_PACKAGE_ROOT="$(npm root --global)/monolith-workflow"
-test -f "$MONOLITH_PACKAGE_ROOT/docs/organize.md"
-test -f "$MONOLITH_PACKAGE_ROOT/examples/pod-assignment.md"
+  https://github.com/zaycruz/bimo/releases/download/v0.4.0/bimo-workflow-0.4.0.tgz.sha256
+shasum --algorithm 256 --check bimo-workflow-0.4.0.tgz.sha256
+npm install --global ./bimo-workflow-0.4.0.tgz
+bimo list --json
+bimo validate parallel-engineering-pod
+BIMO_PACKAGE_ROOT="$(npm root --global)/bimo-workflow"
+test -f "$BIMO_PACKAGE_ROOT/docs/organize.md"
+test -f "$BIMO_PACKAGE_ROOT/examples/pod-assignment.md"
 ```
 
 The operator machine needs Node.js 22+, Docker, SSH, the 1Password CLI, and
 `jq` for the plan-display examples. The target must be an amd64 Linux Docker
 host reachable through an already trusted, strict-host-key-checked SSH
-connection. `MONOLITH_PACKAGE_ROOT` makes every example below runnable from any
+connection. `BIMO_PACKAGE_ROOT` makes every example below runnable from any
 working directory after the global install.
 
 This repository and package are `UNLICENSED`. Public source visibility does not
@@ -269,11 +265,11 @@ redistribute the code.
 List and validate the installed templates:
 
 ```bash
-monolith list
-monolith list --json
-monolith validate react-app
-monolith validate react-solo --json
-monolith validate parallel-engineering-pod --json
+bimo list
+bimo list --json
+bimo validate react-app
+bimo validate react-solo --json
+bimo validate parallel-engineering-pod --json
 ```
 
 ### Organize a prompt with agents
@@ -286,11 +282,11 @@ Any invalid receipt, timeout, digest mismatch, or missing quorum fails without
 deploying anything.
 
 ```bash
-MONOLITH_PACKAGE_ROOT="${MONOLITH_PACKAGE_ROOT:-$(npm root --global)/monolith-workflow}"
-SMALL_APP_PROMPT="$MONOLITH_PACKAGE_ROOT/examples/prompts/small-app.md"
+BIMO_PACKAGE_ROOT="${BIMO_PACKAGE_ROOT:-$(npm root --global)/bimo-workflow}"
+SMALL_APP_PROMPT="$BIMO_PACKAGE_ROOT/examples/prompts/small-app.md"
 SMALL_APP_ASSIGNMENT="$(<"$SMALL_APP_PROMPT")"
 
-PLAN="$(monolith -p "$SMALL_APP_ASSIGNMENT" \
+PLAN="$(bimo -p "$SMALL_APP_ASSIGNMENT" \
   -n 3 \
   --deployment organize-demo \
   --proxmox pve-05 \
@@ -301,7 +297,7 @@ PLAN="$(monolith -p "$SMALL_APP_ASSIGNMENT" \
 printf '%s\n' "$PLAN" | jq .
 ```
 
-The equivalent explicit form starts with `monolith organize -p`. The output is
+The equivalent explicit form starts with `bimo organize -p`. The output is
 a plan receipt: prompt SHA-256, votes, selected template and digest, plus the
 names of the deploy options that template accepts. Organizer agents cannot
 add operational fields such as commands, targets, credentials, repositories,
@@ -322,13 +318,13 @@ selected LXC through `pct exec`. The verified demo target is the dedicated,
 unprivileged Docker LXC `113` on `pve-05`:
 
 ```bash
-MONOLITH_PACKAGE_ROOT="${MONOLITH_PACKAGE_ROOT:-$(npm root --global)/monolith-workflow}"
-POD_TASK_FILE="$MONOLITH_PACKAGE_ROOT/examples/pod-assignment.md"
+BIMO_PACKAGE_ROOT="${BIMO_PACKAGE_ROOT:-$(npm root --global)/bimo-workflow}"
+POD_TASK_FILE="$BIMO_PACKAGE_ROOT/examples/pod-assignment.md"
 POD_ASSIGNMENT="$(<"$POD_TASK_FILE")"
-REPOSITORY='https://github.com/zaycruz/monolith-v2.git'
+REPOSITORY='https://github.com/zaycruz/bimo.git'
 BASE_SHA="$(git ls-remote --refs "$REPOSITORY" refs/heads/main | cut -f1)"
 
-POD_PLAN="$(monolith -p "$POD_ASSIGNMENT" \
+POD_PLAN="$(bimo -p "$POD_ASSIGNMENT" \
   -n 3 \
   --deployment pod-plan-demo \
   --proxmox root@pve-05 \
@@ -338,7 +334,7 @@ POD_PLAN="$(monolith -p "$POD_ASSIGNMENT" \
 
 printf '%s\n' "$POD_PLAN" | jq .
 
-monolith deploy parallel-engineering-pod \
+bimo deploy parallel-engineering-pod \
   --deployment pod-demo \
   --proxmox root@pve-05 \
   --vmid 113 \
@@ -359,7 +355,7 @@ least-privilege credentials.
 Read the pod's structured events using the run ID returned by deploy:
 
 ```bash
-monolith logs \
+bimo logs \
   --deployment pod-demo \
   --proxmox root@pve-05 \
   --vmid 113 \
@@ -370,14 +366,14 @@ monolith logs \
 Deploy the sequential three-role workflow independently:
 
 ```bash
-MONOLITH_PACKAGE_ROOT="${MONOLITH_PACKAGE_ROOT:-$(npm root --global)/monolith-workflow}"
+BIMO_PACKAGE_ROOT="${BIMO_PACKAGE_ROOT:-$(npm root --global)/bimo-workflow}"
 LXC_ADDRESS='10.200.160.143' # Replace this when targeting another LXC.
 
-monolith deploy react-app \
+bimo deploy react-app \
   --deployment fleet-demo \
   --proxmox root@pve-05 \
   --vmid 113 \
-  --task-file "$MONOLITH_PACKAGE_ROOT/examples/fleet-demo.md" \
+  --task-file "$BIMO_PACKAGE_ROOT/examples/fleet-demo.md" \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
   --public-url "http://${LXC_ADDRESS}:8080"
 ```
@@ -385,11 +381,11 @@ monolith deploy react-app \
 Deploy the sequential one-role template independently:
 
 ```bash
-monolith deploy react-solo \
+bimo deploy react-solo \
   --deployment solo-demo \
   --proxmox root@pve-05 \
   --vmid 113 \
-  --task-file "$MONOLITH_PACKAGE_ROOT/examples/solo-demo.md" \
+  --task-file "$BIMO_PACKAGE_ROOT/examples/solo-demo.md" \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
   --public-url "http://${LXC_ADDRESS}:8081" \
   --port 8081
@@ -398,12 +394,12 @@ monolith deploy react-solo \
 Read the latest sequential human log or one run's JSON events:
 
 ```bash
-monolith logs \
+bimo logs \
   --deployment fleet-demo \
   --proxmox root@pve-05 \
   --vmid 113
 
-monolith logs \
+bimo logs \
   --deployment fleet-demo \
   --proxmox root@pve-05 \
   --vmid 113 \
@@ -417,16 +413,16 @@ Use `--host` instead of `--proxmox` and `--vmid` when Docker runs directly on
 the SSH target:
 
 ```bash
-MONOLITH_PACKAGE_ROOT="${MONOLITH_PACKAGE_ROOT:-$(npm root --global)/monolith-workflow}"
+BIMO_PACKAGE_ROOT="${BIMO_PACKAGE_ROOT:-$(npm root --global)/bimo-workflow}"
 
-monolith deploy react-app \
+bimo deploy react-app \
   --deployment fleet-demo \
   --host deploy@docker-host.example \
-  --task-file "$MONOLITH_PACKAGE_ROOT/examples/fleet-demo.md" \
+  --task-file "$BIMO_PACKAGE_ROOT/examples/fleet-demo.md" \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
   --public-url 'http://docker-host.example:8080'
 
-monolith logs \
+bimo logs \
   --deployment fleet-demo \
   --host deploy@docker-host.example
 ```
@@ -442,15 +438,15 @@ sequential deploys also accept `--port`. `logs` accepts `--run`, `--image`, and
 `--json`.
 
 Defaults are port `8080`, model `openrouter/deepseek/deepseek-v4-flash`, and
-image tag `monolith-workflow:0.3.1`. `--account` selects a 1Password account;
+image tag `bimo-workflow:0.4.0`. `--account` selects a 1Password account;
 `--json` requests machine-readable output.
 
 Quote each `op://` reference as one shell argument. Vault, item, and field names
-may contain literal spaces; Monolith passes the validated reference directly to
+may contain literal spaces; Bimo passes the validated reference directly to
 `op read` without invoking a shell.
 
-`--public-url` is only the address Monolith records and reports for the published
-port. Monolith does not create DNS records, TLS certificates, firewall rules,
+`--public-url` is only the address Bimo records and reports for the published
+port. Bimo does not create DNS records, TLS certificates, firewall rules,
 routes, or a reverse proxy. Supply an address that is actually reachable in
 your environment; this repository does not claim a public hosted domain.
 
@@ -459,7 +455,7 @@ your environment; this repository does not claim a public hosted domain.
 One deployment keeps its state on the target:
 
 ```text
-/var/lib/monolith/deployments/<deployment>/
+/var/lib/bimo/deployments/<deployment>/
 ├── workspace/
 └── runs/
     ├── latest
@@ -474,10 +470,10 @@ renders a human-readable `CHANGELOG.md`. Approved handoffs are included in
 successor prompts. These files are durable operator logs, not tamper-evident
 records against target-host root.
 
-Each successful verification creates a separate artifact snapshot that Monolith
+Each successful verification creates a separate artifact snapshot that Bimo
 treats as immutable: it is created once, permission-locked, and mounted by the
-retained app read-only. Monolith performs automatic rollback only when replacing
-the current app fails; v0.3 has no user-facing rollback command or remote
+retained app read-only. Bimo performs automatic rollback only when replacing
+the current app fails; v0.4 has no user-facing rollback command or remote
 artifact backup.
 
 The fixed pod uses the same deployment root but keeps private run records under
@@ -488,7 +484,7 @@ and snapshots are removed when compute stops; only the exact Git source needed
 for a publication-ready run crosses into the publisher, then it is removed after
 durable completion on a best-effort basis.
 
-Before creating a pod run, Monolith retains the newest 20 validated terminal
+Before creating a pod run, Bimo retains the newest 20 validated terminal
 run records. Active, malformed, or unsafe entries are never deleted
 automatically.
 
@@ -498,7 +494,7 @@ and private temporary roots. The pod does not resume a partial Planner, writer,
 or checker attempt. Confirm no controller or publisher is active, preserve the
 run records for diagnosis, then recover only that dedicated deployment root
 before starting a new run. The internal publisher can reconcile an interrupted
-durable publication, but v0.3 has no general user-facing resume command.
+durable publication, but v0.4 has no general user-facing resume command.
 
 ## Security boundary
 
@@ -563,76 +559,14 @@ Never put a credential in a task, prompt, workflow file, repository file,
 - History and artifacts remain on one target host. There is no database, remote
   backup, or user-invoked rollback.
 - Organizer audit runs are retained on the target and are not automatically
-  pruned in v0.3.
+  pruned in v0.4.
 - Pod publication stops at an isolated, draft pull request. It does not approve,
   mark ready, merge, deploy, or delete the branch.
 
-## v0.3 release evidence
+## v0.4 verification
 
-Local verification on 2026-08-26: **202/202 automated tests passed**. The final
-`linux/amd64` image also executed its baked Git askpass helper while the private
-credential tmpfs remained `noexec`; the helper was root-owned and mode `0555`.
-
-Live organizer and deployment proof on `pve-05`, LXC `113`:
-
-- Organizer run `20260826040815-1e83d274` gave the unchanged small-app prompt
-  to three selectors; all three chose `react-solo` at digest
-  `af6c7d09debd98a4abb86170384242e76d8235f0177755b5cc4ae4b67371af98`.
-- The selected app then completed as run `20260826040943-3524acea`. Its
-  controller-owned artifact receipt was 3 files, 147,220 bytes, SHA-256
-  `4e47307d3654f9faac87f78bd11ff3a1772093f68ee00ecde703f9b177810d7c`;
-  the hardened retained container returned HTTP 200 at the recorded LXC URL.
-- Organizer run `20260826041417-b7c94c44` gave the parallel-pod prompt to three
-  selectors; all three chose `parallel-engineering-pod` at digest
-  `8ad45c2908a1c3626e5badea95f06161ca88b630ab064aa58412799b398347cd`.
-- Pod run `20260826051009-0fc6b396` passed all three writers, all three dedicated
-  checkers, QA, Testing, candidate and immutable-baseline source verification,
-  and the pre-publication scan on its first attempt. It published exact candidate
-  `8b4556fe0d725fe9e06a379e8551c6a93ab7e30a` as
-  [draft pull request #4](https://github.com/zaycruz/monolith-v2/pull/4), bound
-  to base `26864850cfd78521cfa95112513fc18a72e8bb51`; its GitHub `verify` job passed.
-- The source-verifier regression was reproduced against the exact candidate in
-  the production sandbox, then passed all **186/186** candidate tests with
-  `/tmp` still `noexec`, a separate bounded executable test-fixture tmpfs, no
-  network, no Docker socket, dropped capabilities, and a read-only source mount.
-- The final publisher image on the LXC had config digest
-  `sha256:bc35072f2efb296c7a1cdd3c6ac4e0979b4708c6b54249eb7c130a977c68b44d`.
-  After durable publication, no pod controller, role, publisher container,
-  transient network, worktree, snapshot, or private source clone remained.
-
-These receipts prove the bounded templates and isolated publication path
-described here. They do not prove arbitrary workload support, production HA,
-or Kubernetes-equivalent isolation.
-
-## v0.2 release evidence
-
-Local verification on 2026-08-25: **82/82 automated tests passed**. The suite
-includes the QA/Testing failure transitions back to Engineering, deadline and
-cancellation behavior, credential isolation, immutable artifact binding, and
-publication rollback.
-
-Live `pve-05` verification on the same date:
-
-- `react-app` run `20260825074857-82d5a68b` completed Engineering, QA, and
-  Testing in three role attempts, then passed controller-owned verification and
-  publication.
-- `react-solo` run `20260825075237-ce8b4881` completed in one Engineering
-  attempt, then passed the same controller-owned verification and publication
-  path.
-- Both runs recorded image digest
-  `sha256:28a837c94fcad9bef3b2ca05816ac1b52f0f36336356703eac161a10337b6efe`,
-  matching the final image transferred for this release.
-- Both retained apps returned HTTP 200 with `MONOLITH_DEMO_READY` when probed
-  from the Proxmox node. Only each static app remained for its deployment; role,
-  gateway, and controller containers were removed.
-- A browser replayed the `react-app` workflow twice, returned to its published
-  state both times, and produced no console or page errors.
-- The final fleet artifact was direct-uploaded unchanged to
-  [Cloudflare Pages](https://thisismonolith.pages.dev/). Its controller receipt
-  was 3 files, 151,507 bytes, SHA-256
-  `8e47126f917d033d7ca930b74f4a10b0134bd0d2cb13bd81b509bb7ef9bd862e`.
-  The public origin returned HTTP 200 and all three served files matched the
-  exported artifact byte-for-byte.
-
-These run IDs prove only the bounded workflows described here, not production
-HA, arbitrary workload support, or Kubernetes-equivalent isolation.
+The release gate runs the full Node test suite, package manifest verification,
+Docker image build, all template validations, and the bundled starter offline
+test, build, and smoke commands. The Bimo brand contract also rejects any
+legacy product identifier in the shipped package. Exact results are attached to
+the tagged release and its exact-SHA GitHub Actions run.

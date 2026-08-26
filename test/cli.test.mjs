@@ -8,13 +8,13 @@ import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
 
-import { runController, runPodController } from "../src/monolith.mjs";
+import { runController, runPodController } from "../src/bimo.mjs";
 import { loadPodTemplate } from "../src/pod-contract.mjs";
 import { loadWorkflow } from "../src/workflow.mjs";
 
 const execute = promisify(execFile);
 const root = path.resolve(import.meta.dirname, "..");
-const cli = path.join(root, "bin", "monolith");
+const cli = path.join(root, "bin", "bimo");
 
 async function run(...args) {
   const result = await execute(process.execPath, [cli, ...args], {
@@ -56,16 +56,16 @@ const REMOTE_IMAGE_ID = `sha256:${"b".repeat(64)}`;
 const POD_BASE_SHA = "1".repeat(40);
 const POD_CANDIDATE_SHA = "2".repeat(40);
 const BASE_CONFIG = {
-  Entrypoint: ["/app/bin/monolith"],
+  Entrypoint: ["/app/bin/bimo"],
   Env: ["NODE_ENV=production"],
   WorkingDir: "/app",
-  Labels: { "dev.ascii.monolith": "workflow" },
+  Labels: { "dev.ascii.bimo": "workflow" },
 };
 const REORDERED_CONFIG = {
-  Labels: { "dev.ascii.monolith": "workflow" },
+  Labels: { "dev.ascii.bimo": "workflow" },
   WorkingDir: "/app",
   Env: ["NODE_ENV=production"],
-  Entrypoint: ["/app/bin/monolith"],
+  Entrypoint: ["/app/bin/bimo"],
   Cmd: null,
   Volumes: null,
   AttachStderr: false,
@@ -97,7 +97,7 @@ async function fakeDeployTools(t, {
   remoteLayers = BASE_LAYERS,
   controller = "conflict",
 } = {}) {
-  const directory = await mkdtemp(path.join(tmpdir(), "monolith-cli-test-"));
+  const directory = await mkdtemp(path.join(tmpdir(), "bimo-cli-test-"));
   const logFile = path.join(directory, "commands.jsonl");
   const taskFile = path.join(directory, "task.txt");
   await writeFile(logFile, "");
@@ -106,8 +106,8 @@ async function fakeDeployTools(t, {
   const docker = `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-fs.appendFileSync(process.env.MONOLITH_TEST_LOG, JSON.stringify({ tool: "docker", args }) + "\\n");
-if (args[0] === "image" && args[1] === "inspect") process.stdout.write(process.env.MONOLITH_TEST_LOCAL_INSPECT + "\\n");
+fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify({ tool: "docker", args }) + "\\n");
+if (args[0] === "image" && args[1] === "inspect") process.stdout.write(process.env.BIMO_TEST_LOCAL_INSPECT + "\\n");
 else if (args[0] === "save") process.stdout.write("fake-image-archive");
 `;
   const ssh = `#!/usr/bin/env node
@@ -115,13 +115,13 @@ const fs = require("node:fs");
 const { createHash } = require("node:crypto");
 const args = process.argv.slice(2);
 const command = args.slice(5);
-const log = value => fs.appendFileSync(process.env.MONOLITH_TEST_LOG, JSON.stringify(value) + "\\n");
+const log = value => fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify(value) + "\\n");
 log({ tool: "ssh", args, command });
 if (command[0] === "docker" && command[1] === "load") {
   process.stdin.resume();
   process.stdin.on("end", () => process.stdout.write("Loaded image\\n"));
 } else if (command[0] === "docker" && command[1] === "image" && command[2] === "inspect") {
-  process.stdout.write(process.env.MONOLITH_TEST_REMOTE_INSPECT + "\\n");
+  process.stdout.write(process.env.BIMO_TEST_REMOTE_INSPECT + "\\n");
 } else if (command[0] === "docker" && command[1] === "run") {
   let raw = "";
   process.stdin.setEncoding("utf8");
@@ -136,10 +136,10 @@ if (command[0] === "docker" && command[1] === "load") {
     });
     const internalCommand = command.find(value => value === "internal-pod-run"
       || value === "internal-publish" || value === "internal-organize");
-    if (process.env.MONOLITH_TEST_CONTROLLER === "conflict") {
+    if (process.env.BIMO_TEST_CONTROLLER === "conflict") {
       process.stderr.write("Conflict: controller name is already in use\\n");
       process.exitCode = 125;
-    } else if (process.env.MONOLITH_TEST_CONTROLLER === "pod-success" && internalCommand === "internal-pod-run") {
+    } else if (process.env.BIMO_TEST_CONTROLLER === "pod-success" && internalCommand === "internal-pod-run") {
       log({
         tool: "pod-compute-envelope",
         fields: Object.keys(envelope).sort(),
@@ -152,10 +152,10 @@ if (command[0] === "docker" && command[1] === "load") {
         status: "ready",
         runId: envelope.runId,
         baseSha: envelope.baseSha,
-        candidateSha: process.env.MONOLITH_TEST_POD_CANDIDATE,
-        branch: "monolith/" + envelope.runId,
+        candidateSha: process.env.BIMO_TEST_POD_CANDIDATE,
+        branch: "bimo/" + envelope.runId,
       }) + "\\n");
-    } else if (process.env.MONOLITH_TEST_CONTROLLER === "pod-success" && internalCommand === "internal-publish") {
+    } else if (process.env.BIMO_TEST_CONTROLLER === "pod-success" && internalCommand === "internal-publish") {
       log({
         tool: "pod-publish-envelope",
         fields: Object.keys(envelope).sort(),
@@ -176,7 +176,7 @@ if (command[0] === "docker" && command[1] === "load") {
         headBranch: envelope.headBranch,
         publication: {
           number: 42,
-          url: "https://github.com/zaycruz/monolith-v2/pull/42",
+          url: "https://github.com/zaycruz/bimo/pull/42",
           draft: true,
           created: true,
           headBranch: envelope.headBranch,
@@ -185,11 +185,11 @@ if (command[0] === "docker" && command[1] === "load") {
           baseSha: envelope.baseSha,
         },
       }) + "\\n");
-    } else if (process.env.MONOLITH_TEST_CONTROLLER === "organize-success"
+    } else if (process.env.BIMO_TEST_CONTROLLER === "organize-success"
       && internalCommand === "internal-organize") {
-      const template = process.env.MONOLITH_TEST_ORGANIZER_TEMPLATE;
-      const templateDigest = process.env.MONOLITH_TEST_ORGANIZER_DIGEST;
-      const acceptedOptions = JSON.parse(process.env.MONOLITH_TEST_ORGANIZER_OPTIONS);
+      const template = process.env.BIMO_TEST_ORGANIZER_TEMPLATE;
+      const templateDigest = process.env.BIMO_TEST_ORGANIZER_DIGEST;
+      const acceptedOptions = JSON.parse(process.env.BIMO_TEST_ORGANIZER_OPTIONS);
       log({
         tool: "organizer-envelope",
         fields: Object.keys(envelope).sort(),
@@ -227,7 +227,7 @@ if (command[0] === "docker" && command[1] === "load") {
   const op = `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-fs.appendFileSync(process.env.MONOLITH_TEST_LOG, JSON.stringify({ tool: "op", reference: args[1] }) + "\\n");
+fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify({ tool: "op", reference: args[1] }) + "\\n");
 if (args[1].endsWith("/github")) process.stdout.write("github_pat_${"g".repeat(64)}\\n");
 else process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
 `;
@@ -244,16 +244,16 @@ else process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
     env: {
       ...process.env,
       PATH: `${directory}${path.delimiter}${process.env.PATH}`,
-      MONOLITH_TEST_LOG: logFile,
-      MONOLITH_TEST_LOCAL_INSPECT: imageInspect(LOCAL_IMAGE_ID),
-      MONOLITH_TEST_REMOTE_INSPECT: imageInspect(remoteImageId, { config: remoteConfig, layers: remoteLayers }),
-      MONOLITH_TEST_CONTROLLER: controller,
-      MONOLITH_TEST_POD_CANDIDATE: POD_CANDIDATE_SHA,
-      MONOLITH_TEST_ORGANIZER_TEMPLATE: "react-app",
-      MONOLITH_TEST_ORGANIZER_DIGEST: (await loadWorkflow("react-app", {
+      BIMO_TEST_LOG: logFile,
+      BIMO_TEST_LOCAL_INSPECT: imageInspect(LOCAL_IMAGE_ID),
+      BIMO_TEST_REMOTE_INSPECT: imageInspect(remoteImageId, { config: remoteConfig, layers: remoteLayers }),
+      BIMO_TEST_CONTROLLER: controller,
+      BIMO_TEST_POD_CANDIDATE: POD_CANDIDATE_SHA,
+      BIMO_TEST_ORGANIZER_TEMPLATE: "react-app",
+      BIMO_TEST_ORGANIZER_DIGEST: (await loadWorkflow("react-app", {
         templateRoot: path.join(root, "templates"),
       })).templateDigest,
-      MONOLITH_TEST_ORGANIZER_OPTIONS: JSON.stringify([
+      BIMO_TEST_ORGANIZER_OPTIONS: JSON.stringify([
         "--deployment", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
         "--secret-ref", "--public-url", "--port",
       ]),
@@ -275,9 +275,9 @@ function deployArgs(taskFile) {
     "--deployment", "fleet-demo",
     "--host", "example.invalid",
     "--task-file", taskFile,
-    "--secret-ref", "op://Test/Monolith/key",
+    "--secret-ref", "op://Test/Bimo/key",
     "--public-url", "http://example.invalid:8080",
-    "--image", "monolith-workflow:test",
+    "--image", "bimo-workflow:test",
     "--json",
   ];
 }
@@ -288,12 +288,12 @@ function podDeployArgs(taskFile) {
     "--deployment", "pod-demo",
     "--host", "example.invalid",
     "--task-file", taskFile,
-    "--secret-ref", "op://Test/Monolith/openrouter",
-    "--github-secret-ref", "op://Test/Monolith publisher/github",
-    "--repository", "https://github.com/zaycruz/monolith-v2.git",
+    "--secret-ref", "op://Test/Bimo/openrouter",
+    "--github-secret-ref", "op://Test/Bimo publisher/github",
+    "--repository", "https://github.com/zaycruz/bimo.git",
     "--base-sha", POD_BASE_SHA,
     "--target-branch", "main",
-    "--image", "monolith-workflow:test",
+    "--image", "bimo-workflow:test",
     "--json",
   ];
 }
@@ -305,8 +305,8 @@ function organizeArgs(prompt, agents) {
     ...(agents === undefined ? [] : ["--agents", String(agents)]),
     "--deployment", "organizer-demo",
     "--host", "example.invalid",
-    "--secret-ref", "op://Test/Monolith/openrouter",
-    "--image", "monolith-workflow:test",
+    "--secret-ref", "op://Test/Bimo/openrouter",
+    "--image", "bimo-workflow:test",
     "--json",
   ];
 }
@@ -392,7 +392,7 @@ test("organize transfers content-verified image without retagging and runs one e
   assert.equal(response.version, 1);
   assert.equal(response.status, "planned");
   assert.equal(response.template, "react-app");
-  assert.equal(response.templateDigest, tools.env.MONOLITH_TEST_ORGANIZER_DIGEST);
+  assert.equal(response.templateDigest, tools.env.BIMO_TEST_ORGANIZER_DIGEST);
   assert.equal(response.agents, 2);
   assert.equal(response.promptSha256, createHash("sha256").update(prompt, "utf8").digest("hex"));
   assert.equal(response.votes.length, 2);
@@ -417,17 +417,17 @@ test("organize transfers content-verified image without retagging and runs one e
   const localTag = localCommands.find(command => command[0] === "image" && command[1] === "tag");
   assert.ok(localTag);
   assert.equal(localTag[2], LOCAL_IMAGE_ID);
-  assert.match(localTag[3], /^monolith-transfer:[a-f0-9]{12}-[a-f0-9]{32}$/);
+  assert.match(localTag[3], /^bimo-transfer:[a-f0-9]{12}-[a-f0-9]{32}$/);
   const transferTag = localTag[3];
   const remoteInspect = remoteCommands.find(command => (
     command[0] === "docker" && command[1] === "image" && command[2] === "inspect"
   ));
   assert.deepEqual(remoteInspect, ["docker", "image", "inspect", transferTag]);
   const remoteRun = remoteCommands.find(command => command[0] === "docker" && command[1] === "run");
-  const hostRoot = "/var/lib/monolith/deployments/organizer-demo";
+  const hostRoot = "/var/lib/bimo/deployments/organizer-demo";
   assert.deepEqual(remoteRun, [
     "docker", "run", "--rm", "-i",
-    "--name", "monolith-organizer-demo-controller",
+    "--name", "bimo-organizer-demo-controller",
     "--user", "0:0",
     "--read-only",
     "--cap-drop", "ALL",
@@ -487,9 +487,9 @@ test("organize explicit and root prompt aliases preserve short/long option parit
   const variants = [
     organizeArgs(prompt, 2),
     ["organize", "-p", prompt, "-n", "2", "--deployment", "organizer-demo", "--host", "example.invalid",
-      "--secret-ref", "op://Test/Monolith/openrouter", "--image", "monolith-workflow:test", "--json"],
+      "--secret-ref", "op://Test/Bimo/openrouter", "--image", "bimo-workflow:test", "--json"],
     ["-p", prompt, "--agents", "2", "--deployment", "organizer-demo", "--host", "example.invalid",
-      "--secret-ref", "op://Test/Monolith/openrouter", "--image", "monolith-workflow:test", "--json"],
+      "--secret-ref", "op://Test/Bimo/openrouter", "--image", "bimo-workflow:test", "--json"],
   ];
   const responses = [];
   for (const args of variants) {
@@ -505,8 +505,8 @@ test("organize explicit and root prompt aliases preserve short/long option parit
   const literalOptionPrompt = await invoke([
     "organize", "--prompt", "-n", "--agents", "1",
     "--deployment", "organizer-demo", "--host", "example.invalid",
-    "--secret-ref", "op://Test/Monolith/openrouter",
-    "--image", "monolith-workflow:test", "--json",
+    "--secret-ref", "op://Test/Bimo/openrouter",
+    "--image", "bimo-workflow:test", "--json",
   ], { env: tools.env });
   assert.equal(literalOptionPrompt.code, 0, literalOptionPrompt.stderr);
   assert.equal(
@@ -529,7 +529,7 @@ test("organize rejects missing, empty, and unsafe prompts before Docker", async 
   const tools = await fakeDeployTools(t);
   const common = [
     "organize", "--deployment", "organizer-demo", "--host", "example.invalid",
-    "--secret-ref", "op://Test/Monolith/openrouter", "--image", "monolith-workflow:test", "--json",
+    "--secret-ref", "op://Test/Bimo/openrouter", "--image", "bimo-workflow:test", "--json",
   ];
   for (const [promptArgs, pattern] of [
     [[], /prompt must be a non-empty string/],
@@ -581,7 +581,7 @@ test("internal-organize rejects exact envelope violations before Docker", async 
   ]) {
     if (envelope.image === undefined) delete envelope.image;
     const result = await invoke([
-      "internal-organize", "--host-root", "/var/lib/monolith/deployments/organizer-demo",
+      "internal-organize", "--host-root", "/var/lib/bimo/deployments/organizer-demo",
     ], { input: JSON.stringify(envelope), env: tools.env });
     assert.equal(result.code, 1);
     assert.match(result.stderr, pattern);
@@ -627,7 +627,7 @@ test("internal-run rejects an invalid or mismatched template digest before Docke
   };
   const mismatch = await invoke([
     "internal-run",
-    "--host-root", "/var/lib/monolith/deployments/fleet-demo",
+    "--host-root", "/var/lib/bimo/deployments/fleet-demo",
   ], { input: JSON.stringify(envelope) });
   assert.equal(mismatch.code, 1);
   assert.match(mismatch.stderr, /template digest does not match/);
@@ -635,7 +635,7 @@ test("internal-run rejects an invalid or mismatched template digest before Docke
   envelope.templateDigest = "$(id)";
   const injection = await invoke([
     "internal-run",
-    "--host-root", "/var/lib/monolith/deployments/fleet-demo",
+    "--host-root", "/var/lib/bimo/deployments/fleet-demo",
   ], { input: JSON.stringify(envelope) });
   assert.equal(injection.code, 1);
   assert.match(injection.stderr, /controller envelope is invalid/);
@@ -651,14 +651,14 @@ test("internal-pod-run rejects a mismatched packaged template before Git or Dock
     key: `sk-or-v1-${"k".repeat(32)}`,
     model: "openrouter/deepseek/deepseek-v4-flash",
     image: LOCAL_IMAGE_ID,
-    repository: "https://github.com/zaycruz/monolith-v2.git",
+    repository: "https://github.com/zaycruz/bimo.git",
     baseSha: POD_BASE_SHA,
     targetBranch: "main",
     runId: "pod-run-1",
   };
   const result = await invoke([
     "internal-pod-run",
-    "--host-root", "/var/lib/monolith/deployments/pod-demo",
+    "--host-root", "/var/lib/bimo/deployments/pod-demo",
   ], { input: JSON.stringify(envelope) });
   assert.equal(result.code, 1);
   assert.match(result.stderr, /template digest does not match/);
@@ -673,7 +673,7 @@ test("internal-publish rejects publication bindings outside the fixed repository
       targetBranch: "main",
       baseSha: POD_BASE_SHA,
       candidateSha: POD_CANDIDATE_SHA,
-      headBranch: "monolith/pod-run-1",
+      headBranch: "bimo/pod-run-1",
       token: `github_pat_${"g".repeat(64)}`,
     }),
   });
@@ -682,7 +682,7 @@ test("internal-publish rejects publication bindings outside the fixed repository
 });
 
 test("deploy rejects image shell syntax before local execution", async () => {
-  for (const image of ["monolith:latest;id", "$(id)", "monolith:latest\nid"]) {
+  for (const image of ["bimo:latest;id", "$(id)", "bimo:latest\nid"]) {
     await assert.rejects(
       execute(process.execPath, [
         cli,
@@ -719,7 +719,7 @@ test("deploy rejects changed transferred image content before remote retag or se
       const localCommands = commands.filter(entry => entry.tool === "docker").map(entry => entry.args);
       const remoteCommands = commands.filter(entry => entry.tool === "ssh").map(entry => entry.command);
       const transferTag = localCommands.find(command => command[0] === "image" && command[1] === "tag")?.[3];
-      assert.match(transferTag, /^monolith-transfer:[a-f0-9]{12}-[a-f0-9]{32}$/);
+      assert.match(transferTag, /^bimo-transfer:[a-f0-9]{12}-[a-f0-9]{32}$/);
       assert.ok(remoteCommands.some(command => command[0] === "docker" && command[1] === "load"));
       assert.ok(remoteCommands.some(command => command[0] === "docker" && command[1] === "image" && command[2] === "inspect"));
       assert.equal(remoteCommands.some(command => command[0] === "docker" && command[1] === "image" && command[2] === "tag"), false);
@@ -745,7 +745,7 @@ test("deploy accepts daemon-normalized Config, anchors transfer, and fails close
   const localTag = localCommands.find(command => command[0] === "image" && command[1] === "tag");
   assert.ok(localTag);
   assert.equal(localTag[2], LOCAL_IMAGE_ID);
-  assert.match(localTag[3], /^monolith-transfer:[a-f0-9]{12}-[a-f0-9]{32}$/);
+  assert.match(localTag[3], /^bimo-transfer:[a-f0-9]{12}-[a-f0-9]{32}$/);
   const transferTag = localTag[3];
   assert.ok(localCommands.some(command => command[0] === "save" && command[1] === transferTag));
 
@@ -763,7 +763,7 @@ test("deploy accepts daemon-normalized Config, anchors transfer, and fails close
   assert.notEqual(LOCAL_IMAGE_ID, REMOTE_IMAGE_ID);
   assert.equal(controllerRun[controllerRun.indexOf("internal-run") - 1], REMOTE_IMAGE_ID);
   assert.equal(remoteCommands.some(command => (
-    command[0] === "docker" && command[1] === "rm" && command.includes("monolith-fleet-demo-controller")
+    command[0] === "docker" && command[1] === "rm" && command.includes("bimo-fleet-demo-controller")
   )), false);
   assert.ok(remoteEntries.every(entry => (
     entry.args[0] === "-o"
@@ -788,7 +788,7 @@ test("pod deploy computes without GitHub authority then publishes one exact draf
   assert.equal(response.baseSha, POD_BASE_SHA);
   assert.equal(response.candidateSha, POD_CANDIDATE_SHA);
   assert.equal(response.publication.draft, true);
-  assert.equal(response.publication.url, "https://github.com/zaycruz/monolith-v2/pull/42");
+  assert.equal(response.publication.url, "https://github.com/zaycruz/bimo/pull/42");
 
   const entries = await readCommandLog(tools.logFile);
   const remoteCommands = entries.filter(entry => entry.tool === "ssh").map(entry => entry.command);
@@ -796,14 +796,14 @@ test("pod deploy computes without GitHub authority then publishes one exact draf
   const publisher = remoteCommands.find(command => command.includes("internal-publish"));
   assert.ok(compute, "compute controller was not launched");
   assert.ok(publisher, "isolated publisher was not launched");
-  assert.equal(compute[compute.indexOf("--name") + 1], "monolith-pod-demo-controller");
+  assert.equal(compute[compute.indexOf("--name") + 1], "bimo-pod-demo-controller");
   assert.equal(compute[compute.indexOf("--cap-add") + 1], "CHOWN");
-  assert.equal(publisher[publisher.indexOf("--name") + 1], "monolith-pod-demo-publisher");
+  assert.equal(publisher[publisher.indexOf("--name") + 1], "bimo-pod-demo-publisher");
   assert.equal(remoteCommands.some(command => (
-    command[0] === "docker" && command[1] === "rm" && command.includes("monolith-pod-demo-publisher")
+    command[0] === "docker" && command[1] === "rm" && command.includes("bimo-pod-demo-publisher")
   )), false);
 
-  const hostRoot = "/var/lib/monolith/deployments/pod-demo";
+  const hostRoot = "/var/lib/bimo/deployments/pod-demo";
   assert.ok(remoteCommands.some(command => command[0] === "mkdir"
     && ["runs", "source", "worktrees", "snapshots"].every(directory => (
       command.includes(`${hostRoot}/${directory}`)
@@ -821,7 +821,7 @@ test("pod deploy computes without GitHub authority then publishes one exact draf
   assert.ok(publisher.includes(`${hostRoot}/source:/source:rw`));
   assert.equal(publisher.some(value => value.includes("docker.sock")), false);
   assert.equal(publisher.some(value => value.includes("worktrees") || value.includes("snapshots")), false);
-  assert.ok(publisher.includes("/run/monolith-publish:rw,nosuid,nodev,noexec,size=16m,mode=0700"));
+  assert.ok(publisher.includes("/run/bimo-publish:rw,nosuid,nodev,noexec,size=16m,mode=0700"));
 
   const computeEnvelope = entries.find(entry => entry.tool === "pod-compute-envelope");
   const publishEnvelope = entries.find(entry => entry.tool === "pod-publish-envelope");
@@ -833,7 +833,7 @@ test("pod deploy computes without GitHub authority then publishes one exact draf
     "baseSha", "candidateSha", "headBranch", "repository", "runId", "targetBranch", "token", "version",
   ]);
   assert.equal(computeEnvelope.runId, publishEnvelope.runId);
-  assert.equal(computeEnvelope.repository, "https://github.com/zaycruz/monolith-v2.git");
+  assert.equal(computeEnvelope.repository, "https://github.com/zaycruz/bimo.git");
   assert.equal(publishEnvelope.candidateSha, POD_CANDIDATE_SHA);
 
   const openRouterIndex = entries.findIndex(entry => entry.tool === "op" && entry.reference.endsWith("/openrouter"));
@@ -848,7 +848,7 @@ test("pod deploy computes without GitHub authority then publishes one exact draf
 });
 
 test("controller signal cancellation aborts runtime and prevents verify or publish", async t => {
-  const temporary = await mkdtemp(path.join(tmpdir(), "monolith-controller-test-"));
+  const temporary = await mkdtemp(path.join(tmpdir(), "bimo-controller-test-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const loaded = await loadWorkflow("react-solo", { templateRoot: path.join(root, "templates") });
   const signalEmitter = new EventEmitter();
@@ -941,7 +941,7 @@ test("pod controller composition starts without app bootstrap and verifies only 
     loaded,
     envelope: {
       task: "Implement the fixed pod.",
-      repository: "https://github.com/zaycruz/monolith-v2.git",
+      repository: "https://github.com/zaycruz/bimo.git",
       baseSha: "a".repeat(40),
       targetBranch: "main",
       runId: "pod-run-1",
@@ -956,7 +956,7 @@ test("pod controller composition starts without app bootstrap and verifies only 
       podInput = input;
       await input.verifyCandidate({
         expectedSha: "b".repeat(40),
-        profile: "monolith-repo-v1",
+        profile: "bimo-repo-v1",
         timeoutSeconds: 60,
         candidateSnapshot: {
           id: "candidate-1",

@@ -1,4 +1,4 @@
-Build a polished one-page React demo called “Monolith Fleet.”
+Build a polished one-page React demo called “Bimo Fleet.”
 
 Show the deployed workflow as three connected stages: Engineering, QA, and
 Testing. Make the QA and Testing failure path back to Engineering immediately

@@ -273,10 +273,10 @@ function defaultEnvironment(home) {
     GIT_ASKPASS: "/bin/false",
     SSH_ASKPASS: "/bin/false",
     GIT_OPTIONAL_LOCKS: "0",
-    GIT_AUTHOR_NAME: "Monolith Controller",
-    GIT_AUTHOR_EMAIL: "controller@thisismonolith.invalid",
-    GIT_COMMITTER_NAME: "Monolith Controller",
-    GIT_COMMITTER_EMAIL: "controller@thisismonolith.invalid",
+    GIT_AUTHOR_NAME: "Bimo Controller",
+    GIT_AUTHOR_EMAIL: "controller@bimo.invalid",
+    GIT_COMMITTER_NAME: "Bimo Controller",
+    GIT_COMMITTER_EMAIL: "controller@bimo.invalid",
   };
 }
 
@@ -505,8 +505,8 @@ export class GitRuntime {
     this.#snapshotsRoot = path.resolve(snapshotsRoot);
     this.#bareRoot = path.join(this.#gitRoot, "repository.git");
     this.#home = path.join(this.#gitRoot, ".home");
-    this.#markerPath = path.join(this.#gitRoot, ".monolith-git-runtime");
-    this.#markerValue = `monolith-git-runtime-v1:${this.#runId}:${randomBytes(32).toString("hex")}\n`;
+    this.#markerPath = path.join(this.#gitRoot, ".bimo-git-runtime");
+    this.#markerValue = `bimo-git-runtime-v1:${this.#runId}:${randomBytes(32).toString("hex")}\n`;
     const roots = [this.#gitRoot, this.#worktreesRoot, this.#snapshotsRoot];
     for (let left = 0; left < roots.length; left += 1) {
       for (let right = left + 1; right < roots.length; right += 1) {
@@ -1191,10 +1191,10 @@ export class GitRuntime {
       gitDir: record.gitDir,
       workTree: record.root,
       environment: {
-        GIT_AUTHOR_NAME: "Monolith Controller",
-        GIT_AUTHOR_EMAIL: "controller@thisismonolith.invalid",
-        GIT_COMMITTER_NAME: "Monolith Controller",
-        GIT_COMMITTER_EMAIL: "controller@thisismonolith.invalid",
+        GIT_AUTHOR_NAME: "Bimo Controller",
+        GIT_AUTHOR_EMAIL: "controller@bimo.invalid",
+        GIT_COMMITTER_NAME: "Bimo Controller",
+        GIT_COMMITTER_EMAIL: "controller@bimo.invalid",
       },
     });
     return this.#head(record, deadlineAt);
@@ -1236,7 +1236,7 @@ export class GitRuntime {
     }
     const resultSha = await this.#commitStaged(
       record,
-      `monolith(${record.slot}): ${record.workItemId}`,
+      `bimo(${record.slot}): ${record.workItemId}`,
       deadlineAt,
     );
     const parents = (await this.#git(["show", "-s", "--format=%P", resultSha], {
@@ -1402,13 +1402,13 @@ export class GitRuntime {
       await this.#applyResult(
         record,
         dependency,
-        `monolith(dependency): ${dependency.workItemId}`,
+        `bimo(dependency): ${dependency.workItemId}`,
         deadlineAt,
       );
       const baseSha = await this.#applyResult(
         record,
         requester,
-        `monolith(requester): ${requester.workItemId}`,
+        `bimo(requester): ${requester.workItemId}`,
         deadlineAt,
       );
       await this.#secureWorktree(record, deadlineAt);
@@ -1521,7 +1521,7 @@ export class GitRuntime {
       candidateSha = (await this.#git([
         "commit-tree", treeSha,
         ...integratedResultShas.flatMap(resultSha => ["-p", resultSha]),
-        "-m", `monolith integration: attempt ${attempt}`,
+        "-m", `bimo integration: attempt ${attempt}`,
       ], {
         deadlineAt,
         environment: {

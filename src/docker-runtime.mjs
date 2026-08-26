@@ -16,7 +16,7 @@ import path from "node:path";
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const MODEL = /^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/;
-const HOST_ROOT = /^\/var\/lib\/monolith\/deployments\/[a-z][a-z0-9-]{0,31}$/;
+const HOST_ROOT = /^\/var\/lib\/bimo\/deployments\/[a-z][a-z0-9-]{0,31}$/;
 const SAFE_IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$/;
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const EXECUTION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -30,15 +30,15 @@ const MAX_SNAPSHOT_DEPTH = 64;
 const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
 const COMMAND_KILL_GRACE_MS = 250;
 const artifactReceipts = new WeakMap();
-const DEPLOYMENT_LABEL = "sh.thisismonolith.deployment";
-const TRANSIENT_LABEL = "sh.thisismonolith.transient";
+const DEPLOYMENT_LABEL = "dev.ascii.bimo.deployment";
+const TRANSIENT_LABEL = "dev.ascii.bimo.transient";
 
 function fail(message) {
   throw new Error(message);
 }
 
 function containerName(deployment, suffix) {
-  return `monolith-${deployment}-${suffix}`;
+  return `bimo-${deployment}-${suffix}`;
 }
 
 function commonSandbox({ memory = "2g", cpus = "1.5", pids = "256" } = {}) {
@@ -275,7 +275,7 @@ export function agentCreateArgs({
     "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
     "--tmpfs", "/home/node:rw,nosuid,nodev,size=512m,uid=1000,gid=1000",
     "--tmpfs", "/instructions:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000",
-    "--env", "MONOLITH_GATEWAY_URL=http://gateway:8787/api/v1",
+    "--env", "BIMO_GATEWAY_URL=http://gateway:8787/api/v1",
     "--mount", bind(workspaceHost, "/workspace", workspaceMounts.rootReadOnly),
     ...(workspaceMounts.maskGit ? ["--mount", bind("/dev/null", "/workspace/.git", true)] : []),
     ...workspaceMounts.mounts.flatMap(({ source, target }) => ["--mount", bind(source, target, false)]),
@@ -361,7 +361,7 @@ export function sourceVerifierCreateArgs({
     fail("invalid source verifier identity");
   }
   if (!SAFE_IMAGE.test(image ?? "")) fail("invalid source verifier image");
-  const snapshotRoot = path.join("/var/lib/monolith/deployments", deployment, "snapshots");
+  const snapshotRoot = path.join("/var/lib/bimo/deployments", deployment, "snapshots");
   if (typeof snapshotHost !== "string" || !path.isAbsolute(snapshotHost)
       || !path.resolve(snapshotHost).startsWith(`${snapshotRoot}${path.sep}`)) {
     fail("invalid source snapshot host path");
@@ -369,7 +369,7 @@ export function sourceVerifierCreateArgs({
   if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(expectedSha ?? "")) {
     fail("invalid source verifier SHA");
   }
-  if (profile !== "monolith-repo-v1" || (suite !== "candidate" && suite !== "baseline")) {
+  if (profile !== "bimo-repo-v1" || (suite !== "candidate" && suite !== "baseline")) {
     fail("invalid source verification profile");
   }
   if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 900) {
@@ -793,12 +793,12 @@ export class DockerRuntime {
     publicUrl,
   }) {
     if (!NAME.test(deployment)) fail("invalid deployment name");
-    if (!HOST_ROOT.test(hostRoot)) fail("invalid Monolith host root");
-    if (hostRoot !== `/var/lib/monolith/deployments/${deployment}`) {
-      fail("Monolith host root must match deployment");
+    if (!HOST_ROOT.test(hostRoot)) fail("invalid Bimo host root");
+    if (hostRoot !== `/var/lib/bimo/deployments/${deployment}`) {
+      fail("Bimo host root must match deployment");
     }
-    if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) fail("invalid Monolith state root");
-    if (path.resolve(stateRoot) !== stateRoot) fail("Monolith state root must be canonical");
+    if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) fail("invalid Bimo state root");
+    if (path.resolve(stateRoot) !== stateRoot) fail("Bimo state root must be canonical");
     if (!SAFE_IMAGE.test(image)) fail("invalid image reference");
     if (!MODEL.test(model)) fail("invalid model reference");
     if (!Number.isInteger(modelConcurrency)
@@ -1126,7 +1126,7 @@ export class DockerRuntime {
     if (!stateMetadata?.isDirectory() || stateMetadata.isSymbolicLink()
         || (stateMetadata.mode & 0o777) !== 0o700
         || stateMetadata.uid !== this.controllerUid || stateMetadata.gid !== this.controllerGid) {
-      fail("Monolith state root must be a private regular directory");
+      fail("Bimo state root must be a private regular directory");
     }
     if (!runMetadata?.isDirectory() || runMetadata.isSymbolicLink()
         || (runMetadata.mode & 0o777) !== 0o700
@@ -1231,7 +1231,7 @@ export class DockerRuntime {
     if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(expectedSha ?? "")) {
       fail("invalid source verification SHA");
     }
-    if (profile !== "monolith-repo-v1") fail("invalid source verification profile");
+    if (profile !== "bimo-repo-v1") fail("invalid source verification profile");
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 2 || timeoutSeconds > 900) {
       fail("invalid source verification timeout");
     }

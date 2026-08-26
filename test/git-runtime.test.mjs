@@ -25,7 +25,7 @@ import { GitRuntime } from "../src/git-runtime.mjs";
 import { scanSourceSnapshot } from "../src/source-verify.mjs";
 
 const execFileAsync = promisify(execFile);
-const REPOSITORY = "https://github.com/zaycruz/monolith-v2.git";
+const REPOSITORY = "https://github.com/zaycruz/bimo.git";
 
 async function git(cwd, args) {
   const result = await execFileAsync("git", args, {
@@ -70,7 +70,7 @@ function gitRunnerWithHook(hook) {
 }
 
 async function repositoryFixture(t, { externalSymlink } = {}) {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-git-runtime-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-git-runtime-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const source = path.join(temporary, "source");
   const remote = path.join(temporary, "remote.git");
@@ -346,7 +346,7 @@ test("authors the checkpoint commit itself with an exact bounded diff and disabl
   assert.match(committed.resultSha, /^[a-f0-9]{40}$/);
   assert.deepEqual(committed.changedPaths, ["src/app.mjs", "src/new.txt"]);
   assert.equal(committed.diffSha256, createHash("sha256").update(committed.diff).digest("hex"));
-  assert.equal(await git(workspace.root, ["show", "-s", "--format=%an <%ae>", "HEAD"]), "Monolith Controller <controller@thisismonolith.invalid>");
+  assert.equal(await git(workspace.root, ["show", "-s", "--format=%an <%ae>", "HEAD"]), "Bimo Controller <controller@bimo.invalid>");
   await assert.rejects(lstat(hookMarker), /ENOENT/);
 
   const reread = await runtime.readCommit({
@@ -422,7 +422,7 @@ test("combines only same-attempt dependency results and integrates the fixed slo
     baseSha: fixture.baseSha,
     commits: [qaResult, dependencyResult, requesterResult],
     integrationOrder: ["engineering-a", "engineering-b", "qa-tests"],
-    branch: "monolith/run-1",
+    branch: "bimo/run-1",
     deadlineAt: futureDeadline(),
   });
   assert.match(integrated.candidateSha, /^[a-f0-9]{40}$/);
@@ -454,7 +454,7 @@ test("combines only same-attempt dependency results and integrates the fixed slo
     baseSha: fixture.baseSha,
     commits: [requesterResult, dependencyResult, qaResult],
     integrationOrder: ["engineering-a", "engineering-b", "qa-tests"],
-    branch: "monolith/run-1-repeat",
+    branch: "bimo/run-1-repeat",
     deadlineAt: futureDeadline(),
   });
   assert.equal(repeated.candidateSha, integrated.candidateSha, "integration is deterministic for exact accepted commits");
@@ -500,7 +500,7 @@ test("combines only same-attempt dependency results and integrates the fixed slo
     baseSha: fixture.baseSha,
     commits: [requesterResult, dependencyResult, qaResult],
     integrationOrder: ["engineering-b", "engineering-a", "qa-tests"],
-    branch: "monolith/run-1-wrong",
+    branch: "bimo/run-1-wrong",
     deadlineAt: futureDeadline(),
   }), /fixed integration order/);
 
@@ -511,7 +511,7 @@ test("combines only same-attempt dependency results and integrates the fixed slo
 });
 
 test("rejects a checkout symlink before permissions can touch its external target", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-git-external-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-git-external-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const external = path.join(temporary, "external.txt");
   await writeFile(external, "must remain unchanged\n", { mode: 0o600 });
@@ -555,7 +555,7 @@ test("pre-publication scan rejects likely live secrets and executable policy sur
       baseSha: fixture.baseSha,
       commits: [aResult, bResult, qaResult],
       integrationOrder: ["engineering-a", "engineering-b", "qa-tests"],
-      branch: `monolith/scan-${attempt}`,
+      branch: `bimo/scan-${attempt}`,
       deadlineAt: futureDeadline(),
     });
   };
@@ -618,7 +618,7 @@ test("pre-publication scan rejects likely live secrets and executable policy sur
     baseSha: fixture.baseSha,
     commits: [finalRequester, dependencyResult, historyQaResult],
     integrationOrder: ["engineering-a", "engineering-b", "qa-tests"],
-    branch: "monolith/scan-3",
+    branch: "bimo/scan-3",
     deadlineAt: futureDeadline(),
   });
   await assert.rejects(lstat(path.join(historyCandidate.workspaceRoot, "src", "transient-secret.txt")), /ENOENT/);
@@ -704,7 +704,7 @@ test("rejects overlapping writer roots at construction", async (t) => {
 });
 
 test("passes argv arrays and an absolute deadline to the injected command runner", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-git-runner-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-git-runner-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const calls = [];
   const runner = async (command, args, options) => {
@@ -741,7 +741,7 @@ test("passes argv arrays and an absolute deadline to the injected command runner
 });
 
 test("aborts an injected Git command at the absolute deadline and waits for settlement", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-git-deadline-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-git-deadline-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   let settled = false;
   const runner = (_command, _args, { signal }) => new Promise((_resolve, reject) => {

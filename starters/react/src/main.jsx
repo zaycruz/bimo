@@ -6,7 +6,7 @@ import "./styles.css";
 function App() {
   return (
     <main>
-      <h1>MONOLITH_DEMO_READY</h1>
+      <h1>BIMO_DEMO_READY</h1>
       <p>The Engineering agent can replace this starter with the requested interface.</p>
     </main>
   );

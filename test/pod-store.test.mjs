@@ -11,7 +11,7 @@ function permissions(stat) {
 }
 
 async function fixture(t, options = {}) {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-pod-store-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-pod-store-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const stateRoot = path.join(temporary, "runs");
   const timestamps = [
@@ -27,7 +27,7 @@ async function fixture(t, options = {}) {
     stateRoot,
     runId: "pod-run-1",
     assignment: {
-      repository: "https://github.com/zaycruz/monolith-v2.git",
+      repository: "https://github.com/zaycruz/bimo.git",
       baseSha: "a".repeat(40),
       task: "Build the requested change.",
     },
@@ -63,7 +63,7 @@ test("a pod run stores private metadata and contiguous audit events", async (t) 
     version: 1,
     runId: "pod-run-1",
     assignment: {
-      repository: "https://github.com/zaycruz/monolith-v2.git",
+      repository: "https://github.com/zaycruz/bimo.git",
       baseSha: "a".repeat(40),
       task: "Build the requested change.",
     },
@@ -248,7 +248,7 @@ test("finish atomically records one terminal summary and final audit event", asy
   const details = {
     phase: "published",
     testedSha: "d".repeat(40),
-    prReceipt: { number: 42, url: "https://github.com/zaycruz/monolith-v2/pull/42" },
+    prReceipt: { number: 42, url: "https://github.com/zaycruz/bimo/pull/42" },
   };
 
   const finished = await store.finish("completed", details);
@@ -281,7 +281,7 @@ test("finish atomically records one terminal summary and final audit event", asy
 });
 
 test("run and inbox paths are fixed to safe controller-owned locations", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-pod-store-paths-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-pod-store-paths-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const common = {
     stateRoot: path.join(temporary, "runs"),
@@ -318,7 +318,7 @@ test("run and inbox paths are fixed to safe controller-owned locations", async (
 
 test("every durable record rejects payloads larger than 64 KiB before writing", async (t) => {
   const oversized = { payload: "x".repeat(70 * 1024) };
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-pod-store-size-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-pod-store-size-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   await assert.rejects(
     createPodRunStore({
@@ -404,11 +404,11 @@ test("attempts and append-only per-owner records have fixed count limits", async
 test("publication can narrowly reopen a validated active run and continue its audit sequence", async (t) => {
   const { stateRoot, store } = await fixture(t);
   const ready = await store.appendEvent("publication.ready", {
-    repository: "https://github.com/zaycruz/monolith-v2.git",
+    repository: "https://github.com/zaycruz/bimo.git",
     targetBranch: "main",
     baseSha: "a".repeat(40),
     candidateSha: "b".repeat(40),
-    headBranch: "monolith/pod-run-1",
+    headBranch: "bimo/pod-run-1",
   });
 
   const reopened = await openPodRunStore({
@@ -440,7 +440,7 @@ test("publication can narrowly reopen a validated active run and continue its au
 });
 
 test("pruning keeps the newest terminal runs by durable finished time", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-pod-prune-order-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-pod-prune-order-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const stateRoot = path.join(temporary, "runs");
   const oldest = await storedRun(stateRoot, "old-completed", {
@@ -467,7 +467,7 @@ test("pruning keeps the newest terminal runs by durable finished time", async (t
 });
 
 test("pruning never removes a running run", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-pod-prune-running-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-pod-prune-running-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const stateRoot = path.join(temporary, "runs");
   const running = await storedRun(stateRoot, "active-run", {
@@ -489,7 +489,7 @@ test("pruning never removes a running run", async (t) => {
 });
 
 test("pruning retains invalid entries and never follows run-directory symlinks", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-pod-prune-invalid-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-pod-prune-invalid-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const stateRoot = path.join(temporary, "runs");
   const terminal = await storedRun(stateRoot, "terminal-run", {
@@ -533,7 +533,7 @@ test("pruning retains invalid entries and never follows run-directory symlinks",
 });
 
 test("pruning fails closed before deletion when the run-directory cap is exceeded", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-pod-prune-cap-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-pod-prune-cap-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const stateRoot = path.join(temporary, "runs");
   const terminal = await storedRun(stateRoot, "terminal-run", {

@@ -11,14 +11,14 @@ it and make the smallest complete implementation that satisfies the task.
 - Do not run `npm install`, change dependency versions, or add packages. Do not
   add analytics, external services, remote assets, credentials, or
   environment-specific configuration.
-- Render `MONOLITH_DEMO_READY` as visible page text and include the same value
+- Render `BIMO_DEMO_READY` as visible page text and include the same value
   in the source `index.html`, so the production page is machine-smokeable
   before and after JavaScript executes.
 - Produce the production artifact at `/workspace/dist`.
 - Provide `npm test`, `npm run build`, and `npm run smoke` scripts.
 - Implement `npm run smoke` using Node built-ins. It must serve `dist` on an
   ephemeral local port, request `/`, require HTTP 200 and
-  `MONOLITH_DEMO_READY` in the response body, then close the server. It must
+  `BIMO_DEMO_READY` in the response body, then close the server. It must
   not write to the workspace.
 - Use semantic HTML, keyboard-accessible controls, visible focus styles, and
   responsive layout. The page must not depend on a backend to render.
@@ -32,7 +32,7 @@ npm test
 npm run build
 npm run smoke
 test -f dist/index.html
-grep -R -q 'MONOLITH_DEMO_READY' dist
+grep -R -q 'BIMO_DEMO_READY' dist
 ```
 
 Do not report completion if any command fails.

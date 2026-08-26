@@ -295,7 +295,7 @@ function renderChangelog(events) {
   const started = events.find(event => event.type === "run.started");
   const terminal = [...events].reverse().find(event => event.type === "run.finished" || event.type === "run.failed");
   const lines = [
-    `# Monolith run ${started?.runId ?? "unknown"}`,
+    `# Bimo run ${started?.runId ?? "unknown"}`,
     "",
     `- Template: ${started?.template ?? "unknown"}`,
     `- Status: ${terminal?.type === "run.finished" ? "completed" : terminal?.type === "run.failed" ? "failed" : "running"}`,
@@ -388,7 +388,7 @@ function currentHistory(events) {
 
 function buildPrompt({ roleName, instructions, task, previous, events, allowed }) {
   const prompt = [
-    "# Monolith runtime contract",
+    "# Bimo runtime contract",
     `Active role: ${roleName}`,
     `Allowed outcomes: ${allowed.join(", ")}`,
     "Only /handoff/result.json controls the workflow transition.",

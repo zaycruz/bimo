@@ -5,7 +5,7 @@ import path from "node:path";
 
 const WORKSPACE = "/workspace";
 const STARTER = "/app/starters/react";
-const DEPENDENCIES = "/opt/monolith-react/node_modules";
+const DEPENDENCIES = "/opt/bimo-react/node_modules";
 const REQUIRED = ["package.json", "package-lock.json", "node_modules"];
 
 function fail(message) {
@@ -49,6 +49,6 @@ async function main() {
 }
 
 main().catch(error => {
-  process.stderr.write(`monolith-bootstrap: ${error.message}\n`);
+  process.stderr.write(`bimo-bootstrap: ${error.message}\n`);
   process.exitCode = 1;
 });

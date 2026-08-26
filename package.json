@@ -1,11 +1,11 @@
 {
-  "name": "monolith-workflow",
-  "version": "0.3.1",
+  "name": "bimo-workflow",
+  "version": "0.4.0",
   "description": "Deploy bounded, auditable agent workflows as ephemeral Docker fleets.",
   "license": "UNLICENSED",
   "type": "module",
   "bin": {
-    "monolith": "bin/monolith"
+    "bimo": "bin/bimo"
   },
   "files": [
     "bin",
@@ -27,10 +27,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zaycruz/monolith-v2.git"
+    "url": "git+https://github.com/zaycruz/bimo.git"
   },
-  "homepage": "https://github.com/zaycruz/monolith-v2#readme",
-  "bugs": "https://github.com/zaycruz/monolith-v2/issues",
+  "homepage": "https://github.com/zaycruz/bimo#readme",
+  "bugs": "https://github.com/zaycruz/bimo/issues",
   "keywords": [
     "agents",
     "docker",

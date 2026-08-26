@@ -397,7 +397,7 @@ async function forwardRequest({
             authorization: `Bearer ${credential}`,
             "content-length": body.length,
             "content-type": "application/json",
-            "user-agent": "monolith-credential-proxy/1",
+            "user-agent": "bimo-credential-proxy/1",
           },
         },
         resolve,
@@ -761,10 +761,10 @@ async function main() {
 const invokedPath = process.argv[1]
   ? pathToFileURL(path.resolve(process.argv[1])).href
   : null;
-const invokedFromMonolith = process.argv[1]
-  ? path.basename(process.argv[1]) === "monolith"
+const invokedFromBimo = process.argv[1]
+  ? path.basename(process.argv[1]) === "bimo"
   : false;
-if (invokedPath === import.meta.url || invokedFromMonolith) {
+if (invokedPath === import.meta.url || invokedFromBimo) {
   main().catch(() => {
     process.stderr.write("credential proxy failed to start\n");
     process.exitCode = 1;

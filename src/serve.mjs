@@ -117,7 +117,7 @@ async function main() {
   server.maxConnections = 128;
 
   server.listen(options.port, "0.0.0.0", () => {
-    process.stdout.write(`monolith-static listening on ${options.port}\n`);
+    process.stdout.write(`bimo-static listening on ${options.port}\n`);
   });
   const close = () => server.close(() => process.exit(0));
   process.on("SIGINT", close);
@@ -125,6 +125,6 @@ async function main() {
 }
 
 main().catch(error => {
-  process.stderr.write(`monolith-static: ${error.message}\n`);
+  process.stderr.write(`bimo-static: ${error.message}\n`);
   process.exitCode = 1;
 });

@@ -243,12 +243,12 @@ function controllerInput({
         qa: "roles/qa.md",
         testing: "roles/testing.md",
       },
-      verificationProfile: "monolith-repo-v1",
+      verificationProfile: "bimo-repo-v1",
     },
     templateDigest: "f".repeat(64),
     prompts,
     assignment: { task: "Build and prove the feature." },
-    repository: "https://github.com/zaycruz/monolith-v2.git",
+    repository: "https://github.com/zaycruz/bimo.git",
     baseRevision: "main",
     targetBranch: "main",
     runId: "pod-run-1",
@@ -484,7 +484,7 @@ test("fans out all three writers, checks exact results, and marks the tested can
       },
     },
     expectedSha: SHA.candidate,
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     timeoutSeconds: 120,
   }]);
   assert.equal(calls.find(call => call.type === "prepare").input.deadlineAt, 1_800_000_120_000);
@@ -501,11 +501,11 @@ test("fans out all three writers, checks exact results, and marks the tested can
     {
       type: "publication.ready",
       attempt: 1,
-      repository: "https://github.com/zaycruz/monolith-v2.git",
+      repository: "https://github.com/zaycruz/bimo.git",
       targetBranch: "main",
       baseSha: SHA.base,
       candidateSha: SHA.candidate,
-      headBranch: "monolith/pod-run-1",
+      headBranch: "bimo/pod-run-1",
     },
   );
   assert.deepEqual(store.records.finished, []);

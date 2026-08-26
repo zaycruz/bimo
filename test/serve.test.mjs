@@ -31,9 +31,9 @@ async function waitFor(url) {
 }
 
 test("static server serves the artifact with a non-networking browser policy", async t => {
-  const site = await mkdtemp(path.join(os.tmpdir(), "monolith-site-"));
+  const site = await mkdtemp(path.join(os.tmpdir(), "bimo-site-"));
   t.after(() => rm(site, { recursive: true, force: true }));
-  await writeFile(path.join(site, "index.html"), "MONOLITH_DEMO_READY\n");
+  await writeFile(path.join(site, "index.html"), "BIMO_DEMO_READY\n");
   await writeFile(path.join(site, ".env"), "SECRET_SHOULD_NOT_BE_SERVED\n");
   await writeFile(path.join(site, "bundle.js.map"), "SOURCE_MAP_SHOULD_NOT_BE_SERVED\n");
   const port = await freePort();
@@ -45,7 +45,7 @@ test("static server serves the artifact with a non-networking browser policy", a
   t.after(() => child.kill("SIGTERM"));
 
   const response = await waitFor(`http://127.0.0.1:${port}/`);
-  assert.equal(await response.text(), "MONOLITH_DEMO_READY\n");
+  assert.equal(await response.text(), "BIMO_DEMO_READY\n");
   const policy = response.headers.get("content-security-policy");
   assert.match(policy, /connect-src 'none'/);
   assert.match(policy, /form-action 'none'/);

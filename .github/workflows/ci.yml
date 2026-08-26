@@ -28,28 +28,28 @@ jobs:
       - run: npm test
       - name: Check JavaScript syntax
         run: |
-          for file in bin/monolith src/*.mjs test/*.mjs; do
+          for file in bin/bimo src/*.mjs test/*.mjs; do
             node --check "$file"
           done
       - run: npm pack --dry-run
-      - run: docker build --tag monolith-workflow:ci .
-      - run: docker run --rm monolith-workflow:ci list --json
-      - run: docker run --rm monolith-workflow:ci validate react-app --json
-      - run: docker run --rm monolith-workflow:ci validate react-solo --json
-      - run: docker run --rm monolith-workflow:ci validate parallel-engineering-pod --json
+      - run: docker build --tag bimo-workflow:ci .
+      - run: docker run --rm bimo-workflow:ci list --json
+      - run: docker run --rm bimo-workflow:ci validate react-app --json
+      - run: docker run --rm bimo-workflow:ci validate react-solo --json
+      - run: docker run --rm bimo-workflow:ci validate parallel-engineering-pod --json
       - name: Prove the baked React starter works offline
         run: |
-          starter_volume="monolith-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          starter_volume="bimo-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker volume create "$starter_volume"
           trap 'docker volume rm "$starter_volume"' EXIT
           docker run --rm --user 0:0 --entrypoint chown \
             --mount "type=volume,source=$starter_volume,target=/workspace" \
-            monolith-workflow:ci -R 1000:1000 /workspace
+            bimo-workflow:ci -R 1000:1000 /workspace
           docker run --rm --network none \
             --mount "type=volume,source=$starter_volume,target=/workspace" \
-            monolith-workflow:ci bootstrap
+            bimo-workflow:ci bootstrap
           for command in test build smoke; do
             docker run --rm --network none --workdir /workspace --entrypoint npm \
               --mount "type=volume,source=$starter_volume,target=/workspace" \
-              monolith-workflow:ci run "$command"
+              bimo-workflow:ci run "$command"
           done

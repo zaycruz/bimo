@@ -7,17 +7,17 @@ import test from "node:test";
 import { createPodRunStore, openPodRunStore } from "../src/pod-store.mjs";
 import { publishRun } from "../src/publish-run.mjs";
 
-const REPOSITORY = "https://github.com/zaycruz/monolith-v2.git";
+const REPOSITORY = "https://github.com/zaycruz/bimo.git";
 const TARGET_BRANCH = "main";
-const HEAD_BRANCH = "monolith/run-1";
+const HEAD_BRANCH = "bimo/run-1";
 const BASE_SHA = "a".repeat(40);
 const CANDIDATE_SHA = "b".repeat(40);
 const OTHER_SHA = "c".repeat(40);
 const TOKEN = "test-publish-token-must-stay-secret";
-const ASKPASS_PROGRAM = path.resolve(import.meta.dirname, "..", "bin", "monolith-git-askpass");
+const ASKPASS_PROGRAM = path.resolve(import.meta.dirname, "..", "bin", "bimo-git-askpass");
 
 async function fixture(t, readyOverrides = {}) {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-publish-run-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-publish-run-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const stateRoot = path.join(temporary, "state");
   const sourceGitDir = path.join(temporary, "source.git");
@@ -57,7 +57,7 @@ async function completedFixture(t) {
   const prepared = await fixture(t);
   const publication = {
     number: 46,
-    url: "https://github.com/zaycruz/monolith-v2/pull/46",
+    url: "https://github.com/zaycruz/bimo/pull/46",
     headBranch: HEAD_BRANCH,
     headSha: CANDIDATE_SHA,
     targetBranch: TARGET_BRANCH,
@@ -230,7 +230,7 @@ test("an absent remote head is pushed from the exact candidate ref without force
       };
     }
     if (gitCalls.length === 3) {
-      return { code: 0, stdout: "ok refs/heads/monolith/run-1\n", stderr: "" };
+      return { code: 0, stdout: "ok refs/heads/bimo/run-1\n", stderr: "" };
     }
     throw new Error("unexpected Git call");
   };
@@ -281,16 +281,16 @@ test("askpass credentials are private, absent from argv, zeroed, deleted, and sa
     }
 
     const scriptStat = await lstat(options.env.GIT_ASKPASS);
-    const tokenStat = await lstat(options.env.MONOLITH_GIT_TOKEN_FILE);
-    const directoryStat = await lstat(path.dirname(options.env.MONOLITH_GIT_TOKEN_FILE));
+    const tokenStat = await lstat(options.env.BIMO_GIT_TOKEN_FILE);
+    const directoryStat = await lstat(path.dirname(options.env.BIMO_GIT_TOKEN_FILE));
     assert.equal(options.env.GIT_ASKPASS, ASKPASS_PROGRAM);
     assert.equal(scriptStat.isFile(), true);
     assert.equal(scriptStat.mode & 0o111, 0o111);
     assert.equal(tokenStat.mode & 0o777, 0o600);
     assert.equal(directoryStat.mode & 0o777, 0o700);
     assert.equal((await readFile(options.env.GIT_ASKPASS, "utf8")).includes(TOKEN), false);
-    assert.equal(await readFile(options.env.MONOLITH_GIT_TOKEN_FILE, "utf8"), `${TOKEN}\n`);
-    await link(options.env.MONOLITH_GIT_TOKEN_FILE, capturedToken);
+    assert.equal(await readFile(options.env.BIMO_GIT_TOKEN_FILE, "utf8"), `${TOKEN}\n`);
+    await link(options.env.BIMO_GIT_TOKEN_FILE, capturedToken);
     throw new Error(`transport leaked ${TOKEN}`);
   };
 
@@ -339,7 +339,7 @@ test("an exact remote head creates one draft PR before recording and finishing t
   };
   const publication = {
     number: 42,
-    url: "https://github.com/zaycruz/monolith-v2/pull/42",
+    url: "https://github.com/zaycruz/bimo/pull/42",
     headBranch: HEAD_BRANCH,
     headSha: CANDIDATE_SHA,
     targetBranch: TARGET_BRANCH,
@@ -393,8 +393,8 @@ test("an exact remote head creates one draft PR before recording and finishing t
     headBranch: HEAD_BRANCH,
     headSha: CANDIDATE_SHA,
     baseSha: BASE_SHA,
-    title: "Monolith run run-1",
-    body: "Automated draft pull request for Monolith run run-1.",
+    title: "Bimo run run-1",
+    body: "Automated draft pull request for Bimo run run-1.",
     deadlineAt: input.deadlineAt,
     draft: true,
   }]);
@@ -426,7 +426,7 @@ test("source cleanup failure cannot reverse a durably completed publication", as
   let cleanupCalls = 0;
   const publication = {
     number: 45,
-    url: "https://github.com/zaycruz/monolith-v2/pull/45",
+    url: "https://github.com/zaycruz/bimo/pull/45",
     headBranch: HEAD_BRANCH,
     headSha: CANDIDATE_SHA,
     targetBranch: TARGET_BRANCH,
@@ -472,7 +472,7 @@ test("retrying an already completed publication returns its receipt with zero ne
   let apiCalls = 0;
   const publication = {
     number: 43,
-    url: "https://github.com/zaycruz/monolith-v2/pull/43",
+    url: "https://github.com/zaycruz/bimo/pull/43",
     headBranch: HEAD_BRANCH,
     headSha: CANDIDATE_SHA,
     targetBranch: TARGET_BRANCH,
@@ -558,7 +558,7 @@ test("retry after the PR receipt was appended only finishes the run without repe
   const { askpassRoot, input } = await fixture(t);
   const publication = {
     number: 44,
-    url: "https://github.com/zaycruz/monolith-v2/pull/44",
+    url: "https://github.com/zaycruz/bimo/pull/44",
     headBranch: HEAD_BRANCH,
     headSha: CANDIDATE_SHA,
     targetBranch: TARGET_BRANCH,

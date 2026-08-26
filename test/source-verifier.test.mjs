@@ -9,7 +9,7 @@ import { scanSourceSnapshot, verifySourceCandidate } from "../src/source-verify.
 const SHA = "a".repeat(40);
 
 async function temporaryWorkspace(t) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "monolith-source-verify-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "bimo-source-verify-"));
   const workspaceRoot = path.join(root, "workspace");
   await mkdir(path.join(workspaceRoot, "src"), { recursive: true });
   await mkdir(path.join(workspaceRoot, "test"));
@@ -36,7 +36,7 @@ test("verifies the exact candidate with only the fixed source gates", async t =>
     workspaceRoot,
     expectedSha: SHA,
     expectedSnapshot,
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "candidate",
     timeoutSeconds: 60,
     runCommand: successfulRunner(calls),
@@ -54,7 +54,7 @@ test("verifies the exact candidate with only the fixed source gates", async t =>
   assert.deepEqual(receipt, {
     status: "passed",
     candidateSha: SHA,
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "candidate",
     snapshot: expectedSnapshot,
     evidence: receipt.evidence,
@@ -77,7 +77,7 @@ test("fails before execution when the immutable snapshot receipt differs", async
     workspaceRoot,
     expectedSha: SHA,
     expectedSnapshot: { ...expectedSnapshot, sha256: "b".repeat(64) },
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "candidate",
     timeoutSeconds: 60,
     runCommand: successfulRunner(calls),
@@ -112,7 +112,7 @@ test("fails closed on a nonzero fixed gate without running later gates", async t
     workspaceRoot,
     expectedSha: SHA,
     expectedSnapshot,
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "candidate",
     timeoutSeconds: 60,
     runCommand: runner,
@@ -136,7 +136,7 @@ test("uses one absolute deadline and aborts an over-budget command", async t => 
     workspaceRoot,
     expectedSha: SHA,
     expectedSnapshot,
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "candidate",
     timeoutSeconds: 1,
     runCommand: runner,
@@ -154,7 +154,7 @@ test("rejects invalid input before invoking a command", async t => {
     workspaceRoot: "relative",
     expectedSha: SHA,
     expectedSnapshot: { files: 1, bytes: 1, sha256: "a".repeat(64) },
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "candidate",
     timeoutSeconds: 60,
     runCommand,
@@ -163,7 +163,7 @@ test("rejects invalid input before invoking a command", async t => {
     workspaceRoot,
     expectedSha: "main",
     expectedSnapshot: { files: 1, bytes: 1, sha256: "a".repeat(64) },
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "candidate",
     timeoutSeconds: 60,
     runCommand,
@@ -172,7 +172,7 @@ test("rejects invalid input before invoking a command", async t => {
     workspaceRoot,
     expectedSha: SHA,
     expectedSnapshot: { files: 1, bytes: 1, sha256: "a".repeat(64) },
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "candidate",
     timeoutSeconds: 901,
     runCommand,
@@ -186,7 +186,7 @@ test("runs the immutable base regression suite through the fixed profile", async
   const receipt = await verifySourceCandidate({
     workspaceRoot,
     expectedSha: SHA,
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "baseline",
     timeoutSeconds: 60,
     runCommand: successfulRunner(calls),
@@ -213,7 +213,7 @@ test("the production runner executes the fixed candidate profile with a sanitize
     workspaceRoot,
     expectedSha: SHA,
     expectedSnapshot,
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "candidate",
     timeoutSeconds: 30,
   });

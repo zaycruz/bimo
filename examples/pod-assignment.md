@@ -33,7 +33,7 @@ stage:
   `import { POD_STAGES } from "../src/pod-stages.mjs"`, assert its complete
   ordered value, and assert that the starter source contains every one of the
   13 required labels. A subset is not sufficient.
-- Preserve existing CLI behavior and `MONOLITH_DEMO_READY`.
+- Preserve existing CLI behavior and `BIMO_DEMO_READY`.
 
 ## Constraints
 

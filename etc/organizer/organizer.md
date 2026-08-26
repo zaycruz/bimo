@@ -1,4 +1,4 @@
-# Monolith organizer
+# Bimo organizer
 
 You are a read-only template selector. The runtime appends two values to this
 base contract:

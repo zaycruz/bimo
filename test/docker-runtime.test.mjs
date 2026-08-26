@@ -35,7 +35,7 @@ const workflow = {
     directory: "dist",
     maxFiles: 100,
     maxBytes: 1_000_000,
-    smoke: { path: "/", status: 200, contains: "Monolith" },
+    smoke: { path: "/", status: 200, contains: "Bimo" },
   },
 };
 
@@ -78,18 +78,18 @@ function createRuntime(overrides = {}) {
   return new DockerRuntime({
     image: IMAGE,
     deployment: "demo",
-    hostRoot: "/var/lib/monolith/deployments/demo",
+    hostRoot: "/var/lib/bimo/deployments/demo",
     key: SECRET,
     model: "openrouter/deepseek/deepseek-v4-flash",
     port: 8080,
-    publicUrl: "https://thisismonolith.sh",
+    publicUrl: "https://bimo.example",
     ...overrides,
   });
 }
 
 test("runtime host root is bound to its deployment name", () => {
   assert.throws(
-    () => createRuntime({ hostRoot: "/var/lib/monolith/deployments/another" }),
+    () => createRuntime({ hostRoot: "/var/lib/bimo/deployments/another" }),
     /host root must match deployment/,
   );
   assert.throws(
@@ -99,7 +99,7 @@ test("runtime host root is bound to its deployment name", () => {
 });
 
 test("legacy role execution rejects foreign and symlinked run directories before Docker", async t => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-run-root-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-run-root-"));
   t.after(() => cleanupTemporary(temporary));
   const stateRoot = path.join(temporary, "state");
   const outside = path.join(temporary, "outside");
@@ -160,25 +160,25 @@ test("agent containers use only the isolated agent network and external prompt m
     ...common,
     role: "qa",
     step: 2,
-    network: "monolith-demo-agents",
-    workspaceHost: "/var/lib/monolith/deployments/demo/workspace",
-    handoffHost: "/var/lib/monolith/deployments/demo/runs/run-1/attempts/qa/handoff",
-    promptHost: "/var/lib/monolith/deployments/demo/runs/run-1/attempts/qa/instructions.md",
+    network: "bimo-demo-agents",
+    workspaceHost: "/var/lib/bimo/deployments/demo/workspace",
+    handoffHost: "/var/lib/bimo/deployments/demo/runs/run-1/attempts/qa/handoff",
+    promptHost: "/var/lib/bimo/deployments/demo/runs/run-1/attempts/qa/instructions.md",
     access: "read",
     model: "openrouter/deepseek/deepseek-v4-flash",
     timeoutSeconds: 1200,
   });
   const rendered = args.join(" ");
 
-  assert.match(rendered, /--network monolith-demo-agents/);
-  assert.match(rendered, /MONOLITH_GATEWAY_URL=http:\/\/gateway:8787\/api\/v1/);
+  assert.match(rendered, /--network bimo-demo-agents/);
+  assert.match(rendered, /BIMO_GATEWAY_URL=http:\/\/gateway:8787\/api\/v1/);
   assert.match(rendered, /dst=\/workspace,readonly/);
   assert.match(rendered, /instructions\.md,dst=\/instructions\/instructions\.md,readonly/);
   assert.match(rendered, /--read-only/);
   assert.match(rendered, /--cap-drop ALL/);
   assert.match(rendered, /no-new-privileges/);
   assert.match(rendered, /--ulimit fsize=8388608:8388608/);
-  assert.doesNotMatch(rendered, /--network container:|127\.0\.0\.1:8787|\.monolith-instructions/);
+  assert.doesNotMatch(rendered, /--network container:|127\.0\.0\.1:8787|\.bimo-instructions/);
   assert.doesNotMatch(rendered, /OPENROUTER_API_KEY|sk-or-|docker\.sock|\/state|Users\/|\.ssh/);
 });
 
@@ -187,10 +187,10 @@ test("only Engineering receives a writable shared workspace", () => {
     ...common,
     role: "engineering",
     step: 1,
-    network: "monolith-demo-agents",
-    workspaceHost: "/var/lib/monolith/deployments/demo/workspace",
-    handoffHost: "/var/lib/monolith/deployments/demo/runs/run-1/attempts/engineering/handoff",
-    promptHost: "/var/lib/monolith/deployments/demo/runs/run-1/attempts/engineering/instructions.md",
+    network: "bimo-demo-agents",
+    workspaceHost: "/var/lib/bimo/deployments/demo/workspace",
+    handoffHost: "/var/lib/bimo/deployments/demo/runs/run-1/attempts/engineering/handoff",
+    promptHost: "/var/lib/bimo/deployments/demo/runs/run-1/attempts/engineering/instructions.md",
     access: "write",
     model: "openrouter/deepseek/deepseek-v4-flash",
     timeoutSeconds: 1200,
@@ -202,15 +202,15 @@ test("only Engineering receives a writable shared workspace", () => {
 test("bootstrap is fixed, offline, and receives only the writable workspace", () => {
   const args = bootstrapArgs({
     ...common,
-    workspaceHost: "/var/lib/monolith/deployments/demo/workspace",
+    workspaceHost: "/var/lib/bimo/deployments/demo/workspace",
   });
   const rendered = args.join(" ");
 
-  assert.deepEqual(args.slice(0, 4), ["run", "--rm", "--name", "monolith-demo-bootstrap"]);
-  assert.match(rendered, /--label sh\.thisismonolith\.deployment=demo/);
-  assert.match(rendered, /--label sh\.thisismonolith\.transient=true/);
+  assert.deepEqual(args.slice(0, 4), ["run", "--rm", "--name", "bimo-demo-bootstrap"]);
+  assert.match(rendered, /--label dev\.ascii\.bimo\.deployment=demo/);
+  assert.match(rendered, /--label dev\.ascii\.bimo\.transient=true/);
   assert.match(rendered, /--network none --read-only/);
-  assert.match(rendered, /src=\/var\/lib\/monolith\/deployments\/demo\/workspace,dst=\/workspace(?: |$)/);
+  assert.match(rendered, /src=\/var\/lib\/bimo\/deployments\/demo\/workspace,dst=\/workspace(?: |$)/);
   assert.deepEqual(args.slice(-2), [IMAGE, "bootstrap"]);
   assert.doesNotMatch(rendered, /gateway|registry|OPENROUTER|sk-or-/);
   assert.doesNotMatch(rendered, /dst=\/workspace,readonly/);
@@ -219,11 +219,11 @@ test("bootstrap is fixed, offline, and receives only the writable workspace", ()
 test("credential gateway is isolated-listener policy with a hard lifetime", () => {
   const args = proxyCreateArgs({
     ...common,
-    network: "monolith-demo-agents",
+    network: "bimo-demo-agents",
     model: "openrouter/deepseek/deepseek-v4-flash",
   });
   const rendered = args.join(" ");
-  assert.match(rendered, /--network monolith-demo-agents/);
+  assert.match(rendered, /--network bimo-demo-agents/);
   assert.match(rendered, /--network-alias gateway/);
   assert.match(rendered, /--listen-scope isolated-network/);
   assert.match(rendered, /--lifetime-seconds 3600/);
@@ -258,15 +258,15 @@ test("start bootstraps offline, creates two networks, and dual-homes only the pr
   const networkConnect = calls.find(args => args[0] === "network" && args[1] === "connect");
   const readinessProbe = calls.find(args => args[0] === "run" && args.includes("probe"));
   assert.deepEqual(bootstrap.slice(0, 4), [
-    "run", "--rm", "--name", "monolith-demo-bootstrap", "--network", "none",
+    "run", "--rm", "--name", "bimo-demo-bootstrap", "--network", "none",
   ].slice(0, 4));
-  assert(agentNetwork.includes("monolith-demo-agents"));
-  assert(egressNetwork.includes("monolith-demo-egress"));
-  assert.equal(proxyCreate[proxyCreate.indexOf("--network") + 1], "monolith-demo-agents");
+  assert(agentNetwork.includes("bimo-demo-agents"));
+  assert(egressNetwork.includes("bimo-demo-egress"));
+  assert.equal(proxyCreate[proxyCreate.indexOf("--network") + 1], "bimo-demo-agents");
   assert.equal(proxyCreate[proxyCreate.indexOf("--max-requests") + 1], "100");
-  assert.deepEqual(networkConnect, ["network", "connect", "monolith-demo-egress", "proxy-id"]);
+  assert.deepEqual(networkConnect, ["network", "connect", "bimo-demo-egress", "proxy-id"]);
   assert(calls.some(args => args[0] === "start-attached" && args[1] === "proxy-id"));
-  assert.equal(readinessProbe[readinessProbe.indexOf("--network") + 1], "monolith-demo-agents");
+  assert.equal(readinessProbe[readinessProbe.indexOf("--network") + 1], "bimo-demo-agents");
   assert.match(readinessProbe.join(" "), /http:\/\/gateway:8787\/healthz/);
   assert.doesNotMatch(calls.flat().join(" "), /--network container:/);
   assert.equal(runtime.key, null);
@@ -276,7 +276,7 @@ test("pod startup skips the React bootstrap but keeps the isolated credential ga
   const runtime = new DockerRuntime({
     image: IMAGE,
     deployment: "demo",
-    hostRoot: "/var/lib/monolith/deployments/demo",
+    hostRoot: "/var/lib/bimo/deployments/demo",
     key: SECRET,
     model: "openrouter/deepseek/deepseek-v4-flash",
     modelConcurrency: 3,
@@ -320,8 +320,8 @@ test("close removes both deployment networks after removing the proxy", async ()
 
   assert.deepEqual(calls, [
     ["rm", "-f", "proxy-id"],
-    ["network", "rm", "monolith-demo-agents"],
-    ["network", "rm", "monolith-demo-egress"],
+    ["network", "rm", "bimo-demo-agents"],
+    ["network", "rm", "bimo-demo-egress"],
   ]);
   assert.equal(killed, true);
   assert.equal(runtime.key, null);
@@ -339,9 +339,9 @@ test("a failed proxy start cleans both networks created by this runtime", async 
   await assert.rejects(runtime.start({ deadlineAt: futureDeadline() }), /proxy create failed/);
 
   assert.deepEqual(calls.slice(-3), [
-    ["rm", "-f", "monolith-demo-gateway"],
-    ["network", "rm", "monolith-demo-agents"],
-    ["network", "rm", "monolith-demo-egress"],
+    ["rm", "-f", "bimo-demo-gateway"],
+    ["network", "rm", "bimo-demo-agents"],
+    ["network", "rm", "bimo-demo-egress"],
   ]);
   assert.equal(runtime.agentNetworkCreated, false);
   assert.equal(runtime.egressNetworkCreated, false);
@@ -349,13 +349,13 @@ test("a failed proxy start cleans both networks created by this runtime", async 
 });
 
 test("runRole never creates or deletes a workspace instruction placeholder", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-role-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-role-"));
   t.after(() => cleanupTemporary(temporary));
   const workspace = path.join(temporary, "workspace");
   const runDir = path.join(temporary, "run-1");
   await mkdir(workspace);
   await mkdir(runDir, { mode: 0o700 });
-  const preexisting = path.join(workspace, ".monolith-instructions.md");
+  const preexisting = path.join(workspace, ".bimo-instructions.md");
   await writeFile(preexisting, "user-owned\n");
 
   const runtime = createRuntime({ stateRoot: temporary });
@@ -383,12 +383,12 @@ test("runRole never creates or deletes a workspace instruction placeholder", asy
 
   assert.equal(await readFile(preexisting, "utf8"), "user-owned\n");
   assert.match(createArgs.join(" "), /dst=\/instructions\/instructions\.md,readonly/);
-  assert.doesNotMatch(createArgs.join(" "), /\.monolith-instructions/);
-  assert(calls.some(args => args.join(" ") === "rm -f monolith-demo-qa-1"));
+  assert.doesNotMatch(createArgs.join(" "), /\.bimo-instructions/);
+  assert(calls.some(args => args.join(" ") === "rm -f bimo-demo-qa-1"));
 });
 
 test("runAgentExecution mounts one isolated pod worktree and rejects paths outside the deployment", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-pod-role-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-pod-role-"));
   t.after(() => cleanupTemporary(temporary));
   const stateRoot = path.join(temporary, "state");
   await mkdir(stateRoot, { mode: 0o700 });
@@ -404,7 +404,7 @@ test("runAgentExecution mounts one isolated pod worktree and rejects paths outsi
     return dockerResult();
   };
 
-  const workspaceHost = "/var/lib/monolith/deployments/demo/worktrees/run-1/attempt-1-engineering-a";
+  const workspaceHost = "/var/lib/bimo/deployments/demo/worktrees/run-1/attempt-1-engineering-a";
   const ownedSource = `${workspaceHost}/src/owned`;
   await assert.rejects(runtime.runAgentExecution({
     executionId: "attempt-1-engineering-a",
@@ -421,7 +421,7 @@ test("runAgentExecution mounts one isolated pod worktree and rejects paths outsi
   assert.match(createArgs.join(" "), new RegExp(`src=${workspaceHost.replaceAll("/", "\\/")},dst=\\/workspace,readonly`));
   assert.match(createArgs.join(" "), /src=\/dev\/null,dst=\/workspace\/\.git,readonly/);
   assert.match(createArgs.join(" "), new RegExp(`src=${ownedSource.replaceAll("/", "\\/")},dst=\\/workspace\\/src\\/owned(?: |$)`));
-  assert.match(createArgs.join(" "), /--name monolith-demo-attempt-1-engineering-a/);
+  assert.match(createArgs.join(" "), /--name bimo-demo-attempt-1-engineering-a/);
 
   createArgs = undefined;
   await assert.rejects(runtime.runAgentExecution({
@@ -466,10 +466,10 @@ test("source verification containers receive only immutable snapshots and no con
   const candidate = sourceVerifierCreateArgs({
     deployment: "demo",
     image: IMAGE,
-    snapshotHost: "/var/lib/monolith/deployments/demo/snapshots/run-1/candidate-1",
+    snapshotHost: "/var/lib/bimo/deployments/demo/snapshots/run-1/candidate-1",
     expectedSha: "d".repeat(40),
     expectedSnapshot: receipt,
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "candidate",
     timeoutSeconds: 300,
     nameSuffix: "source-candidate",
@@ -477,10 +477,10 @@ test("source verification containers receive only immutable snapshots and no con
   const baseline = sourceVerifierCreateArgs({
     deployment: "demo",
     image: IMAGE,
-    snapshotHost: "/var/lib/monolith/deployments/demo/snapshots/run-1/candidate-1",
-    baselineTestHost: "/var/lib/monolith/deployments/demo/snapshots/run-1/base/test",
+    snapshotHost: "/var/lib/bimo/deployments/demo/snapshots/run-1/candidate-1",
+    baselineTestHost: "/var/lib/bimo/deployments/demo/snapshots/run-1/base/test",
     expectedSha: "d".repeat(40),
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     suite: "baseline",
     timeoutSeconds: 300,
     nameSuffix: "source-baseline",
@@ -497,7 +497,7 @@ test("source verification containers receive only immutable snapshots and no con
   for (const rendered of [renderedCandidate, renderedBaseline]) {
     assert.match(rendered, /--tmpfs \/tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000/);
     assert.match(rendered, /--tmpfs \/test-tools:rw,exec,nosuid,nodev,size=32m,uid=1000,gid=1000/);
-    assert.doesNotMatch(rendered, /docker\.sock|dst=\/state|MONOLITH_GATEWAY|sk-or-v1|github_pat_/);
+    assert.doesNotMatch(rendered, /docker\.sock|dst=\/state|BIMO_GATEWAY|sk-or-v1|github_pat_/);
   }
 });
 
@@ -508,13 +508,13 @@ test("verifySource binds candidate and immutable-base evidence without mounting 
   runtime.command = async args => {
     calls.push(args);
     if (args[0] === "create") {
-      return dockerResult({ stdout: `${args.includes("monolith-demo-source-candidate") ? "candidate-id" : "baseline-id"}\n` });
+      return dockerResult({ stdout: `${args.includes("bimo-demo-source-candidate") ? "candidate-id" : "baseline-id"}\n` });
     }
     if (args[0] === "start" && args.at(-1) === "candidate-id") {
       return dockerResult({ stdout: `${JSON.stringify({
         status: "passed",
         candidateSha: "d".repeat(40),
-        profile: "monolith-repo-v1",
+        profile: "bimo-repo-v1",
         suite: "candidate",
         snapshot: candidateReceipt,
         evidence: [
@@ -527,7 +527,7 @@ test("verifySource binds candidate and immutable-base evidence without mounting 
       return dockerResult({ stdout: `${JSON.stringify({
         status: "passed",
         candidateSha: "d".repeat(40),
-        profile: "monolith-repo-v1",
+        profile: "bimo-repo-v1",
         suite: "baseline",
         evidence: [
           { authority: "trusted", command: "node --test 1 baseline files", outputSha256: "1".repeat(64) },
@@ -542,7 +542,7 @@ test("verifySource binds candidate and immutable-base evidence without mounting 
     expectedSha: "d".repeat(40),
     candidateSnapshot: { id: "candidate-1", sha: "d".repeat(40), receipt: candidateReceipt },
     baseSnapshot: { id: "base", sha: "a".repeat(40), receipt: { files: 10, bytes: 2_048, sha256: "b".repeat(64) } },
-    profile: "monolith-repo-v1",
+    profile: "bimo-repo-v1",
     timeoutSeconds: 600,
   });
 
@@ -575,8 +575,8 @@ test("a lost network-create response reconciles the attempted deterministic netw
     /transport lost after network create/,
   );
 
-  assert(calls.some(args => args.join(" ") === "network rm monolith-demo-agents"));
-  assert.equal(calls.some(args => args[0] === "network" && args[1] === "create" && args.includes("monolith-demo-egress")), false);
+  assert(calls.some(args => args.join(" ") === "network rm bimo-demo-agents"));
+  assert.equal(calls.some(args => args[0] === "network" && args[1] === "create" && args.includes("bimo-demo-egress")), false);
   assert.equal(runtime.agentNetworkCreated, false);
 });
 
@@ -605,12 +605,12 @@ test("start removes exactly labeled stale containers and networks before bootstr
   assert(removeContainers < listNetworks);
   assert(listNetworks < removeNetworks);
   assert(removeNetworks < bootstrap);
-  assert.match(calls[listContainers].join(" "), /label=sh\.thisismonolith\.deployment=demo/);
-  assert.match(calls[listContainers].join(" "), /label=sh\.thisismonolith\.transient=true/);
+  assert.match(calls[listContainers].join(" "), /label=dev\.ascii\.bimo\.deployment=demo/);
+  assert.match(calls[listContainers].join(" "), /label=dev\.ascii\.bimo\.transient=true/);
 });
 
 test("snapshotDirectory creates an independent read-only run artifact", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-snapshot-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-snapshot-"));
   t.after(() => cleanupTemporary(temporary));
   const source = path.join(temporary, "dist");
   const destination = path.join(temporary, "artifact");
@@ -639,7 +639,7 @@ test("snapshotDirectory creates an independent read-only run artifact", async (t
 });
 
 test("snapshotDirectory rejects symlinks and removes the incomplete artifact", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-symlink-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-symlink-"));
   t.after(() => cleanupTemporary(temporary));
   const source = path.join(temporary, "dist");
   const destination = path.join(temporary, "artifact");
@@ -659,13 +659,13 @@ test("snapshotDirectory rejects symlinks and removes the incomplete artifact", a
 });
 
 test("verification passes smoke policy and snapshots output before success", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-verify-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-verify-"));
   t.after(() => cleanupTemporary(temporary));
   const workspace = path.join(temporary, "workspace");
   const runDir = path.join(temporary, "run-1");
   await mkdir(path.join(workspace, "dist"), { recursive: true });
   await mkdir(runDir);
-  await writeFile(path.join(workspace, "dist", "index.html"), "Monolith\n");
+  await writeFile(path.join(workspace, "dist", "index.html"), "Bimo\n");
 
   const runtime = createRuntime();
   const calls = [];
@@ -681,7 +681,7 @@ test("verification passes smoke policy and snapshots output before success", asy
         stdout: `${JSON.stringify({
           status: "passed",
           evidence: ["tests passed"],
-          artifact: receiptFor({ "index.html": "Monolith\n" }),
+          artifact: receiptFor({ "index.html": "Bimo\n" }),
         })}\n`,
       });
     }
@@ -696,9 +696,9 @@ test("verification passes smoke policy and snapshots output before success", asy
   }), {
     status: "passed",
     evidence: ["tests passed"],
-    artifact: receiptFor({ "index.html": "Monolith\n" }),
+    artifact: receiptFor({ "index.html": "Bimo\n" }),
   });
-  assert.equal(await readFile(path.join(runDir, "artifact", "index.html"), "utf8"), "Monolith\n");
+  assert.equal(await readFile(path.join(runDir, "artifact", "index.html"), "utf8"), "Bimo\n");
   assert.equal(mode(await lstat(path.join(runDir, "artifact", "index.html"))), 0o444);
   assert.match(calls[0].args.join(" "), /--path \/ --status 200 --timeout-seconds 900/);
   assert(calls[1].options.timeoutMs <= 900_000);
@@ -708,12 +708,12 @@ test("verification passes smoke policy and snapshots output before success", asy
 test("server args publish only a run-scoped snapshot", () => {
   const finalArgs = serverCreateArgs({
     ...common,
-    outputHost: "/var/lib/monolith/deployments/demo/runs/run-1/artifact",
+    outputHost: "/var/lib/bimo/deployments/demo/runs/run-1/artifact",
     port: 8080,
   });
   const candidateArgs = serverCreateArgs({
     ...common,
-    outputHost: "/var/lib/monolith/deployments/demo/runs/run-1/artifact",
+    outputHost: "/var/lib/bimo/deployments/demo/runs/run-1/artifact",
     port: 8080,
     nameSuffix: "app-candidate-run-1",
     publish: false,
@@ -729,14 +729,14 @@ test("server args publish only a run-scoped snapshot", () => {
 });
 
 async function publicationFixture(t) {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-publish-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-publish-"));
   t.after(() => cleanupTemporary(temporary));
   const runDir = path.join(temporary, "run-1");
   await mkdir(runDir);
   const workspace = path.join(temporary, "workspace");
   const source = path.join(workspace, "dist");
   await mkdir(source, { recursive: true });
-  await writeFile(path.join(source, "index.html"), "Monolith\n");
+  await writeFile(path.join(source, "index.html"), "Bimo\n");
   const runtime = createRuntime();
   runtime.snapshotOwner = {
     uid: process.getuid?.() ?? 0,
@@ -748,7 +748,7 @@ async function publicationFixture(t) {
       return dockerResult({ stdout: `${JSON.stringify({
         status: "passed",
         evidence: ["fixture verified"],
-        artifact: receiptFor({ "index.html": "Monolith\n" }),
+        artifact: receiptFor({ "index.html": "Bimo\n" }),
       })}\n` });
     }
     return dockerResult();
@@ -769,14 +769,14 @@ test("publish health-checks the candidate before interrupting the old app", asyn
   };
 
   assert.deepEqual(await runtime.publish({ workflow, runDir, timeoutSeconds: 30 }), {
-    url: "https://thisismonolith.sh/",
+    url: "https://bimo.example/",
   });
   await runtime.close();
 
   const candidateProbe = calls.findIndex(args => args[0] === "exec" && args[1].includes("candidate"));
-  const oldRename = calls.findIndex(args => args[0] === "rename" && args[1] === "monolith-demo-app");
+  const oldRename = calls.findIndex(args => args[0] === "rename" && args[1] === "bimo-demo-app");
   const oldStop = calls.findIndex(args => args[0] === "stop" && args.at(-1).includes("backup"));
-  const finalProbe = calls.findIndex(args => args[0] === "exec" && args[1] === "monolith-demo-app");
+  const finalProbe = calls.findIndex(args => args[0] === "exec" && args[1] === "bimo-demo-app");
   const backupRemoval = calls.findIndex(args => args[0] === "rm" && args.at(-1).includes("backup"));
 
   assert(candidateProbe >= 0);
@@ -784,7 +784,7 @@ test("publish health-checks the candidate before interrupting the old app", asyn
   assert(candidateProbe < oldStop);
   assert(oldStop < finalProbe);
   assert(finalProbe < backupRemoval);
-  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1) === "monolith-demo-app"), false);
+  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1) === "bimo-demo-app"), false);
   assert.equal(calls.every(args => !args.join(" ").includes("/workspace/dist")), true);
   const createCalls = calls.filter(args => args[0] === "create");
   assert.match(createCalls[0].join(" "), /runs\/run-1\/artifact,dst=\/site,readonly/);
@@ -805,7 +805,7 @@ test("a failed candidate leaves the old app untouched", async (t) => {
 
   assert.equal(calls.some(args => args[0] === "container"), false);
   assert.equal(calls.some(args => args[0] === "rename" || args[0] === "stop"), false);
-  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1) === "monolith-demo-app"), false);
+  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1) === "bimo-demo-app"), false);
   assert.equal(calls.some(args => args[0] === "rm" && args.at(-1).includes("candidate")), true);
 });
 
@@ -815,7 +815,7 @@ test("a failed final replacement restores the previously running app", async (t)
   runtime.command = async (args) => {
     calls.push(args);
     if (args[0] === "container") return appInspect(args);
-    if (args[0] === "exec" && args[1] === "monolith-demo-app") {
+    if (args[0] === "exec" && args[1] === "bimo-demo-app") {
       throw new Error("replacement unhealthy");
     }
     return dockerResult({ stdout: args[0] === "create" ? "container-id\n" : "" });
@@ -825,12 +825,12 @@ test("a failed final replacement restores the previously running app", async (t)
 
   const candidateProbe = calls.findIndex(args => args[0] === "exec" && args[1].includes("candidate"));
   const stopOld = calls.findIndex(args => args[0] === "stop" && args.at(-1).includes("backup"));
-  const removeReplacement = calls.findIndex(args => args[0] === "rm" && args.at(-1) === "monolith-demo-app");
+  const removeReplacement = calls.findIndex(args => args[0] === "rm" && args.at(-1) === "bimo-demo-app");
   const restoreRename = calls.findIndex((args, index) => (
-    index > removeReplacement && args[0] === "rename" && args.at(-1) === "monolith-demo-app"
+    index > removeReplacement && args[0] === "rename" && args.at(-1) === "bimo-demo-app"
   ));
   const restoreStart = calls.findIndex((args, index) => (
-    index > restoreRename && args[0] === "start" && args[1] === "monolith-demo-app"
+    index > restoreRename && args[0] === "start" && args[1] === "bimo-demo-app"
   ));
 
   assert(candidateProbe < stopOld);
@@ -866,7 +866,7 @@ test("a bootstrap deadline waits for ambiguous command settlement before cleanup
   runtime.command = async args => {
     calls.push(args);
     if (args[0] === "ps" || (args[0] === "network" && args[1] === "ls")) return dockerResult();
-    if (args[0] === "run" && args.includes("monolith-demo-bootstrap")) {
+    if (args[0] === "run" && args.includes("bimo-demo-bootstrap")) {
       return new Promise(resolve => {
         setTimeout(() => {
           bootstrapExists = true;
@@ -874,7 +874,7 @@ test("a bootstrap deadline waits for ambiguous command settlement before cleanup
         }, 100);
       });
     }
-    if (args[0] === "rm" && args.at(-1) === "monolith-demo-bootstrap") {
+    if (args[0] === "rm" && args.at(-1) === "bimo-demo-bootstrap") {
       bootstrapExists = false;
     }
     return dockerResult();
@@ -882,8 +882,8 @@ test("a bootstrap deadline waits for ambiguous command settlement before cleanup
 
   await assert.rejects(runtime.start({ deadlineAt: futureDeadline(30) }), /deployment deadline exceeded/);
 
-  const bootstrap = calls.findIndex(args => args[0] === "run" && args.includes("monolith-demo-bootstrap"));
-  const cleanup = calls.findIndex(args => args.join(" ") === "rm -f monolith-demo-bootstrap");
+  const bootstrap = calls.findIndex(args => args[0] === "run" && args.includes("bimo-demo-bootstrap"));
+  const cleanup = calls.findIndex(args => args.join(" ") === "rm -f bimo-demo-bootstrap");
   assert(bootstrap >= 0 && cleanup > bootstrap);
   assert.equal(bootstrapExists, false);
   await new Promise(resolve => setTimeout(resolve, 125));
@@ -905,13 +905,13 @@ test("a Docker callback cannot report success after blocking past its deadline",
 });
 
 test("a stalled snapshot read is aborted by its deadline and the partial tree is removed", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-stalled-snapshot-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-stalled-snapshot-"));
   t.after(() => cleanupTemporary(temporary));
   const source = path.join(temporary, "dist");
   const destination = path.join(temporary, "artifact");
   const sourceFile = path.join(source, "index.html");
   await mkdir(source);
-  await writeFile(sourceFile, "Monolith\n");
+  await writeFile(sourceFile, "Bimo\n");
   const startedAt = Date.now();
 
   await assert.rejects(snapshotDirectory(
@@ -941,7 +941,7 @@ test("a stalled snapshot read is aborted by its deadline and the partial tree is
 });
 
 test("a stalled snapshot metadata callback is deadline-bounded and cleaned with trusted operations", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-stalled-metadata-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-stalled-metadata-"));
   t.after(() => cleanupTemporary(temporary));
   const source = path.join(temporary, "dist");
   const destination = path.join(temporary, "artifact");
@@ -963,7 +963,7 @@ test("a stalled snapshot metadata callback is deadline-bounded and cleaned with 
 });
 
 test("a locked nested snapshot is made writable and removed when its receipt mismatches", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-mismatch-cleanup-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-mismatch-cleanup-"));
   t.after(() => cleanupTemporary(temporary));
   const source = path.join(temporary, "dist");
   const destination = path.join(temporary, "artifact");
@@ -986,7 +986,7 @@ test("a locked nested snapshot is made writable and removed when its receipt mis
 });
 
 test("empty-directory fanout counts against the snapshot entry bound", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-entry-bound-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-entry-bound-"));
   t.after(() => cleanupTemporary(temporary));
   const source = path.join(temporary, "dist");
   const destination = path.join(temporary, "artifact");
@@ -1003,14 +1003,14 @@ test("empty-directory fanout counts against the snapshot entry bound", async (t)
 });
 
 test("verification kills its container then rejects a workspace mutation that changes the snapshot receipt", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-verify-race-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-verify-race-"));
   t.after(() => cleanupTemporary(temporary));
   const workspace = path.join(temporary, "workspace");
   const runDir = path.join(temporary, "run-1");
   const output = path.join(workspace, "dist", "index.html");
   await mkdir(path.dirname(output), { recursive: true });
   await mkdir(runDir);
-  await writeFile(output, "Monolith\n");
+  await writeFile(output, "Bimo\n");
   const runtime = createRuntime();
   runtime.snapshotOwner = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
   const calls = [];
@@ -1021,10 +1021,10 @@ test("verification kills its container then rejects a workspace mutation that ch
       return dockerResult({ stdout: `${JSON.stringify({
         status: "passed",
         evidence: ["verified original"],
-        artifact: receiptFor({ "index.html": "Monolith\n" }),
+        artifact: receiptFor({ "index.html": "Bimo\n" }),
       })}\n` });
     }
-    if (args[0] === "rm") await writeFile(output, "Mutated!\n");
+    if (args[0] === "rm") await writeFile(output, "Nope\n");
     return dockerResult();
   };
 
@@ -1059,7 +1059,7 @@ test("an ambiguous final create is reconciled before the previous app is restore
   runtime.command = async args => {
     calls.push(args);
     if (args[0] === "container") return appInspect(args);
-    if (args[0] === "create" && args[args.indexOf("--name") + 1] === "monolith-demo-app") {
+    if (args[0] === "create" && args[args.indexOf("--name") + 1] === "bimo-demo-app") {
       throw new Error("transport lost after create");
     }
     return dockerResult({ stdout: args[0] === "create" ? "candidate-id\n" : "" });
@@ -1070,16 +1070,16 @@ test("an ambiguous final create is reconciled before the previous app is restore
     /transport lost after create/,
   );
 
-  const failedCreate = calls.findIndex(args => args[0] === "create" && args.includes("monolith-demo-app"));
+  const failedCreate = calls.findIndex(args => args[0] === "create" && args.includes("bimo-demo-app"));
   const removeUnknownReplacement = calls.findIndex((args, index) => (
-    index > failedCreate && args[0] === "rm" && args.at(-1) === "monolith-demo-app"
+    index > failedCreate && args[0] === "rm" && args.at(-1) === "bimo-demo-app"
   ));
   const restoreRename = calls.findIndex((args, index) => (
-    index > removeUnknownReplacement && args[0] === "rename" && args.at(-1) === "monolith-demo-app"
+    index > removeUnknownReplacement && args[0] === "rename" && args.at(-1) === "bimo-demo-app"
   ));
   assert(failedCreate < removeUnknownReplacement);
   assert(removeUnknownReplacement < restoreRename);
-  assert(calls.some((args, index) => index > restoreRename && args[0] === "start" && args[1] === "monolith-demo-app"));
+  assert(calls.some((args, index) => index > restoreRename && args[0] === "start" && args[1] === "bimo-demo-app"));
 });
 
 test("an ambiguous old-app rename is reconciled without attempting a replacement", async (t) => {
@@ -1099,8 +1099,8 @@ test("an ambiguous old-app rename is reconciled without attempting a replacement
   await assert.rejects(runtime.publish({ workflow, runDir, timeoutSeconds: 30 }), /transport lost after rename/);
 
   assert.equal(calls.filter(args => args[0] === "create").length, 1);
-  assert(calls.some(args => args[0] === "rename" && args[1].includes("backup") && args[2] === "monolith-demo-app"));
-  assert(calls.some(args => args[0] === "start" && args[1] === "monolith-demo-app"));
+  assert(calls.some(args => args[0] === "rename" && args[1].includes("backup") && args[2] === "bimo-demo-app"));
+  assert(calls.some(args => args[0] === "start" && args[1] === "bimo-demo-app"));
 });
 
 test("backup retirement is deferred until close and cannot roll back the healthy replacement", async (t) => {
@@ -1116,12 +1116,12 @@ test("backup retirement is deferred until close and cannot roll back the healthy
   };
 
   assert.deepEqual(await runtime.publish({ workflow, runDir, timeoutSeconds: 30 }), {
-    url: "https://thisismonolith.sh/",
+    url: "https://bimo.example/",
   });
   assert.equal(calls.some(args => args[0] === "rm" && args.at(-1).includes("backup")), false);
   await runtime.close();
   assert(calls.some(args => args[0] === "rm" && args.at(-1).includes("backup")));
-  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1) === "monolith-demo-app"), false);
+  assert.equal(calls.some(args => args[0] === "rm" && args.at(-1) === "bimo-demo-app"), false);
   assert.equal(calls.filter(args => args[0] === "rename").length, 1);
 });
 
@@ -1136,7 +1136,7 @@ test("mutating a returned verification receipt cannot change the private publica
   };
 
   assert.deepEqual(await runtime.publish({ workflow, runDir, timeoutSeconds: 30 }), {
-    url: "https://thisismonolith.sh/",
+    url: "https://bimo.example/",
   });
 });
 
@@ -1145,7 +1145,7 @@ test("rollback rejects a still-running replacement instead of mistaking it for t
   const oldId = "c".repeat(64);
   const newId = "d".repeat(64);
   const containers = new Map([
-    ["monolith-demo-app", { id: oldId, running: true, healthy: true }],
+    ["bimo-demo-app", { id: oldId, running: true, healthy: true }],
   ]);
   runtime.command = async args => {
     const operation = args[0];
@@ -1205,12 +1205,12 @@ test("rollback rejects a still-running replacement instead of mistaking it for t
       && error.message.includes("previous app could not be restored"),
   );
 
-  assert.deepEqual(containers.get("monolith-demo-app"), {
+  assert.deepEqual(containers.get("bimo-demo-app"), {
     id: newId,
     running: true,
     healthy: false,
   });
-  assert.deepEqual(containers.get("monolith-demo-app-backup-run-1"), {
+  assert.deepEqual(containers.get("bimo-demo-app-backup-run-1"), {
     id: oldId,
     running: false,
     healthy: true,
@@ -1228,13 +1228,13 @@ test("fresh-deploy rollback rejects a failed app that cleanup did not remove", a
     }
     if (args[0] === "create") {
       const name = args[args.indexOf("--name") + 1];
-      if (name === "monolith-demo-app") finalExists = true;
+      if (name === "bimo-demo-app") finalExists = true;
       return dockerResult({ stdout: "container-id\n" });
     }
-    if (args[0] === "exec" && args[1] === "monolith-demo-app") {
+    if (args[0] === "exec" && args[1] === "bimo-demo-app") {
       throw new Error("replacement unhealthy");
     }
-    if (args[0] === "rm" && args.at(-1) === "monolith-demo-app") {
+    if (args[0] === "rm" && args.at(-1) === "bimo-demo-app") {
       return dockerResult();
     }
     return dockerResult();
@@ -1248,7 +1248,7 @@ test("fresh-deploy rollback rejects a failed app that cleanup did not remove", a
 });
 
 test("cancelling a stalled role removes its exact active name and blocks verification", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-cancel-role-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-cancel-role-"));
   t.after(() => cleanupTemporary(temporary));
   const workspace = path.join(temporary, "workspace");
   const runDir = path.join(temporary, "run-1");
@@ -1303,7 +1303,7 @@ test("cancelling a stalled role removes its exact active name and blocks verific
 
   assert(childSettled);
   assert(Date.now() - cancelStartedAt < 1_000);
-  assert(calls.some(args => args.join(" ") === "rm -f monolith-demo-engineering-1"));
+  assert(calls.some(args => args.join(" ") === "rm -f bimo-demo-engineering-1"));
   await new Promise(resolve => setTimeout(resolve, 175));
   assert.equal(roleContainerExists, false);
   const callsBeforeVerify = calls.length;
@@ -1333,7 +1333,7 @@ test("cancel aborts and settles the underlying spawned command", async () => {
 });
 
 test("near-deadline cancel kills a TERM-resistant child before its late mutation", async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-cancel-child-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-runtime-cancel-child-"));
   const ready = path.join(temporary, "ready");
   const lateMarker = path.join(temporary, "late-marker");
   const runtime = createRuntime();

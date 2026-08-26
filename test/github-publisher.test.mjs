@@ -10,7 +10,7 @@ const OWNER = "acme";
 const REPOSITORY_NAME = "widgets";
 const REPOSITORY = `https://github.com/${OWNER}/${REPOSITORY_NAME}`;
 const TARGET_BRANCH = "main";
-const HEAD_BRANCH = "monolith/run-123";
+const HEAD_BRANCH = "bimo/run-123";
 const HEAD_SHA = "a".repeat(40);
 const STALE_SHA = "b".repeat(40);
 const BASE_SHA = "c".repeat(40);
@@ -102,7 +102,7 @@ function publishInput(overrides = {}) {
     baseSha: BASE_SHA,
     draft: true,
     title: "Publish the generated application",
-    body: "Created by the bounded Monolith workflow.",
+    body: "Created by the bounded Bimo workflow.",
     deadlineAt: deadline(),
     ...overrides,
   };
@@ -189,8 +189,8 @@ test("rejects invalid configuration and publish input before network access", as
     { headBranch: TARGET_BRANCH },
     { headBranch: "../escape" },
     { headBranch: "HEAD" },
-    { headBranch: "monolith//run" },
-    { headBranch: "monolith/run.lock" },
+    { headBranch: "bimo//run" },
+    { headBranch: "bimo/run.lock" },
     { headSha: HEAD_SHA.toUpperCase() },
     { headSha: "abc123" },
     { baseSha: BASE_SHA.toUpperCase() },
@@ -238,11 +238,11 @@ test("binds immutable base and head refs before creating one pull request", asyn
   );
   assert.equal(
     calls[1].url,
-    `https://api.github.com/repos/${OWNER}/${REPOSITORY_NAME}/git/ref/heads/monolith%2Frun-123`,
+    `https://api.github.com/repos/${OWNER}/${REPOSITORY_NAME}/git/ref/heads/bimo%2Frun-123`,
   );
   assert.equal(
     calls[2].url,
-    `https://api.github.com/repos/${OWNER}/${REPOSITORY_NAME}/pulls?state=all&head=acme%3Amonolith%2Frun-123&per_page=100`,
+    `https://api.github.com/repos/${OWNER}/${REPOSITORY_NAME}/pulls?state=all&head=acme%3Abimo%2Frun-123&per_page=100`,
   );
   assert.equal(calls[3].options.method, "POST");
   assert.equal(
@@ -251,7 +251,7 @@ test("binds immutable base and head refs before creating one pull request", asyn
   );
   assert.deepEqual(JSON.parse(calls[3].options.body), {
     title: "Publish the generated application",
-    body: "Created by the bounded Monolith workflow.",
+    body: "Created by the bounded Bimo workflow.",
     head: HEAD_BRANCH,
     base: TARGET_BRANCH,
     draft: true,

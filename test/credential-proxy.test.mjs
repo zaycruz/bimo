@@ -15,11 +15,11 @@ import {
 const MODEL = "anthropic/claude-sonnet-5";
 const SECRET = "sk-or-v1-test-only-secret";
 const CHAT_PATH = "/api/v1/chat/completions";
-const monolithScript = path.join(
+const bimoScript = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
   "bin",
-  "monolith",
+  "bimo",
 );
 
 function deferred() {
@@ -146,7 +146,7 @@ test("CLI reads the credential from stdin and emits no secret-bearing output", a
   const child = spawn(
     process.execPath,
     [
-      monolithScript,
+      bimoScript,
       "proxy",
       "--port",
       port,
@@ -217,7 +217,7 @@ test("CLI refuses an unauthenticated non-loopback listener", async () => {
     const child = spawn(
       process.execPath,
       [
-        monolithScript,
+        bimoScript,
         "proxy",
         ...configuration.args,
         "--model",
@@ -252,7 +252,7 @@ test("CLI isolated-network mode accepts only the gateway Host", async (t) => {
   const child = spawn(
     process.execPath,
     [
-      monolithScript,
+      bimoScript,
       "proxy",
       "--listen-scope",
       "isolated-network",
@@ -315,7 +315,7 @@ test("CLI lifetime closes active and idle connections before exiting", async (t)
   const child = spawn(
     process.execPath,
     [
-      monolithScript,
+      bimoScript,
       "proxy",
       "--port",
       port,

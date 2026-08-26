@@ -15,12 +15,12 @@ test -f package-lock.json
 test -f dist/index.html
 npm test
 npm run smoke
-grep -R -q 'MONOLITH_DEMO_READY' dist
+grep -R -q 'BIMO_DEMO_READY' dist
 ```
 
 Inspect the command output. Return `passed` only when every command exits zero,
 the smoke check proves HTTP 200, and the response contains
-`MONOLITH_DEMO_READY`. Return `failed` for any failure, missing proof, flaky
+`BIMO_DEMO_READY`. Return `failed` for any failure, missing proof, flaky
 behavior, or mismatch with the requested product.
 
 ## Handoff

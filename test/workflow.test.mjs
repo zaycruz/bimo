@@ -14,7 +14,7 @@ import {
 const root = path.resolve(import.meta.dirname, "..");
 
 async function fixture() {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-workflow-"));
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-workflow-"));
   return {
     stateRoot: path.join(temporary, "runs"),
     workspace: path.join(temporary, "workspace"),

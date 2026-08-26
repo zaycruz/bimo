@@ -1,6 +1,6 @@
 .omx/
 graphify-out/
-.monolith/
+.bimo/
 node_modules/
 /target/
-/monolith-workflow-*.tgz*
+/bimo-workflow-*.tgz*

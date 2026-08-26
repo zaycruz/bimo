@@ -33,6 +33,6 @@ async function main() {
 }
 
 main().catch(error => {
-  process.stderr.write(`monolith-probe: ${error.message}\n`);
+  process.stderr.write(`bimo-probe: ${error.message}\n`);
   process.exitCode = 1;
 });

@@ -39,7 +39,7 @@
     "smoke": {
       "path": "/",
       "status": 200,
-      "contains": "MONOLITH_DEMO_READY"
+      "contains": "BIMO_DEMO_READY"
     }
   }
 }

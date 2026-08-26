@@ -78,7 +78,7 @@ const CONFORMANCE_RECEIPT_FIELDS = [
   "files",
 ];
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
-const VERIFICATION_PROFILES = new Set(["monolith-repo-v1"]);
+const VERIFICATION_PROFILES = new Set(["bimo-repo-v1"]);
 const TRACE_ID = /^[A-Z][A-Z0-9-]{0,63}$/;
 const GIT_SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const PORTABLE_COMPONENT = /^[A-Za-z0-9._-]+$/;

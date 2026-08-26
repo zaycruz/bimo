@@ -7,7 +7,7 @@ import process from "node:process";
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const KILL_GRACE_MS = 250;
-const PROFILE = "monolith-repo-v1";
+const PROFILE = "bimo-repo-v1";
 const MAX_SOURCE_FILES = 10_000;
 const MAX_SOURCE_BYTES = 100 * 1024 * 1024;
 const MAX_SOURCE_ENTRIES = 100_000;
@@ -195,8 +195,8 @@ async function sourceFilesForSyntax(root) {
     }
   };
   await visit(path.join(root, "src"), "src");
-  const bin = await lstat(path.join(root, "bin", "monolith")).catch(() => null);
-  if (bin?.isFile()) files.push("bin/monolith");
+  const bin = await lstat(path.join(root, "bin", "bimo")).catch(() => null);
+  if (bin?.isFile()) files.push("bin/bimo");
   if (!files.length || files.length > 500) fail("verification profile found an invalid source-file count");
   return files;
 }

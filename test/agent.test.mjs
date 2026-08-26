@@ -6,11 +6,11 @@ import { fileURLToPath } from "node:url";
 
 import { createOpenCodeDiagnostics } from "../src/agent.mjs";
 
-const monolithScript = path.join(
+const bimoScript = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
   "bin",
-  "monolith",
+  "bimo",
 );
 
 test("stream diagnostics handle split JSONL and never include stdout or stderr content", () => {
@@ -27,8 +27,8 @@ test("stream diagnostics handle split JSONL and never include stdout or stderr c
   assert.doesNotMatch(summary, /model text|github_pat|Bearer|sk-hidden/u);
 });
 
-test("bin monolith dispatches the agent entrypoint", async () => {
-  const child = spawn(process.execPath, [monolithScript, "agent", "--bad"], {
+test("bin bimo dispatches the agent entrypoint", async () => {
+  const child = spawn(process.execPath, [bimoScript, "agent", "--bad"], {
     env: {},
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -42,5 +42,5 @@ test("bin monolith dispatches the agent entrypoint", async () => {
 
   assert.deepEqual([code, signal], [1, null]);
   assert.equal(Buffer.concat(stdout).toString("utf8"), "");
-  assert.equal(Buffer.concat(stderr).toString("utf8"), "monolith-agent: invalid option: --bad\n");
+  assert.equal(Buffer.concat(stderr).toString("utf8"), "bimo-agent: invalid option: --bad\n");
 });

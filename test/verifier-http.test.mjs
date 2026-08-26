@@ -14,7 +14,7 @@ const verifyScript = path.resolve(import.meta.dirname, "../src/verify.mjs");
 const execute = promisify(execFile);
 
 async function fixture(t) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "monolith-verifier-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "bimo-verifier-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, "dist"));
   await writeFile(path.join(root, "package.json"), `${JSON.stringify({
@@ -124,7 +124,7 @@ test("HTTP verification timeout kills the trusted server process", async t => {
     const server = http.createServer(() => {});
     server.listen(Number(args["--port"]), "127.0.0.1", () => {
       writeFileSync(path.join(args["--root"], "server.pid"), String(process.pid));
-      process.stdout.write("monolith-static listening on " + args["--port"] + "\\n");
+      process.stdout.write("bimo-static listening on " + args["--port"] + "\\n");
     });
     process.on("SIGTERM", () => server.close(() => process.exit(0)));
   `);

@@ -183,7 +183,7 @@ function waitForServer(child, timeoutMs) {
         return;
       }
       output += chunk.toString("utf8");
-      if (output.includes("monolith-static listening on ")) finish();
+      if (output.includes("bimo-static listening on ")) finish();
     };
     const onError = error => finish(error);
     const onClose = code => finish(new Error(`trusted static server exited ${code} before listening`));
@@ -307,9 +307,9 @@ async function main() {
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
 }
 
-if (["verify.mjs", "monolith"].includes(path.basename(process.argv[1] ?? ""))) {
+if (["verify.mjs", "bimo"].includes(path.basename(process.argv[1] ?? ""))) {
   main().catch(error => {
-    process.stderr.write(`monolith-verify: ${error.message}\n`);
+    process.stderr.write(`bimo-verify: ${error.message}\n`);
     process.exitCode = 1;
   });
 }

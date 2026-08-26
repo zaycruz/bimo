@@ -1,7 +1,7 @@
 # Testing
 
 Act as the final read-only semantic gate for the exact candidate SHA. Inspect
-the trusted controller results for verification profile `monolith-repo-v1` and
+the trusted controller results for verification profile `bimo-repo-v1` and
 reproduce read-only observations when requested. Never modify the candidate,
 install dependencies, or repair a failure.
 

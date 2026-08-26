@@ -26,9 +26,9 @@ import { loadWorkflow, runWorkflow } from "./workflow.mjs";
 const packageRoot = path.resolve(import.meta.dirname, "..");
 const templateRoot = path.join(packageRoot, "templates");
 const organizerInstructionsPath = path.join(packageRoot, "etc", "organizer", "organizer.md");
-const DEFAULT_IMAGE = "monolith-workflow:0.3.1";
+const DEFAULT_IMAGE = "bimo-workflow:0.4.0";
 const DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash";
-const POD_REPOSITORY = "https://github.com/zaycruz/monolith-v2.git";
+const POD_REPOSITORY = "https://github.com/zaycruz/bimo.git";
 const POD_TARGET_BRANCH = "main";
 const PUBLISH_TIMEOUT_MS = 5 * 60 * 1_000;
 const IMAGE_TRANSFER_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -429,7 +429,7 @@ function transferImage(remote, image, { timeoutMs = IMAGE_TRANSFER_TIMEOUT_MS } 
 
 function imageTransferTag(imageId) {
   if (!SHA256.test(imageId)) fail("Docker returned an invalid local image ID");
-  return `monolith-transfer:${imageId.slice(7, 19)}-${randomUUID().replaceAll("-", "")}`;
+  return `bimo-transfer:${imageId.slice(7, 19)}-${randomUUID().replaceAll("-", "")}`;
 }
 
 async function prepareRemoteImage(remote, image, { retag = true } = {}) {
@@ -591,7 +591,7 @@ function validatePodReady(value, expected) {
   exactObject(value, ["status", "runId", "baseSha", "candidateSha", "branch"], "pod controller");
   if (value.status !== "ready" || value.runId !== expected.runId
       || value.baseSha !== expected.baseSha || !GIT_SHA.test(value.candidateSha ?? "")
-      || value.branch !== `monolith/${expected.runId}`) {
+      || value.branch !== `bimo/${expected.runId}`) {
     fail("pod controller returned an invalid ready receipt");
   }
   return value;
@@ -618,7 +618,7 @@ function validatePublishedPod(value, expected) {
       || publication.draft !== true || typeof publication.created !== "boolean"
       || publication.baseSha !== expected.baseSha || publication.headSha !== expected.candidateSha
       || publication.headBranch !== expected.branch || publication.targetBranch !== POD_TARGET_BRANCH
-      || !new RegExp(`^https://github\\.com/zaycruz/monolith-v2/pull/${publication.number}$`).test(publication.url ?? "")) {
+      || !new RegExp(`^https://github\\.com/zaycruz/bimo/pull/${publication.number}$`).test(publication.url ?? "")) {
     fail("pod publisher returned an invalid draft pull request receipt");
   }
   return value;
@@ -676,7 +676,7 @@ async function deploy(template, options) {
 
   const { remoteImage, transferTag } = await prepareRemoteImage(remote, image);
   try {
-    const hostRoot = `/var/lib/monolith/deployments/${options.deployment}`;
+    const hostRoot = `/var/lib/bimo/deployments/${options.deployment}`;
     if (pod) {
       await remoteExecute(remote, [
         "mkdir", "-p", `${hostRoot}/runs`, `${hostRoot}/source`,
@@ -703,7 +703,7 @@ async function deploy(template, options) {
         runId,
       });
       openRouterKey = "";
-      const controllerName = `monolith-${options.deployment}-controller`;
+      const controllerName = `bimo-${options.deployment}-controller`;
       const compute = await remoteExecute(remote, [
         "docker", "run", "--rm", "-i",
         "--name", controllerName,
@@ -748,7 +748,7 @@ async function deploy(template, options) {
       githubToken = "";
       const publisher = await remoteExecute(remote, [
         "docker", "run", "--rm", "-i",
-        "--name", `monolith-${options.deployment}-publisher`,
+        "--name", `bimo-${options.deployment}-publisher`,
         "--user", "0:0",
         "--read-only",
         "--cap-drop", "ALL",
@@ -757,7 +757,7 @@ async function deploy(template, options) {
         "--memory", "512m",
         "--cpus", "0.5",
         "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32m",
-        "--tmpfs", "/run/monolith-publish:rw,nosuid,nodev,noexec,size=16m,mode=0700",
+        "--tmpfs", "/run/bimo-publish:rw,nosuid,nodev,noexec,size=16m,mode=0700",
         "--volume", `${hostRoot}/runs:/state:rw`,
         "--volume", `${hostRoot}/source:/source:rw`,
         remoteImage.imageId,
@@ -791,7 +791,7 @@ async function deploy(template, options) {
         port,
         publicUrl: publicUrl.toString().replace(/\/$/, ""),
       });
-      const controllerName = `monolith-${options.deployment}-controller`;
+      const controllerName = `bimo-${options.deployment}-controller`;
       const result = await remoteExecute(remote, [
         "docker", "run", "--rm", "-i",
         "--name", controllerName,
@@ -846,7 +846,7 @@ async function organizeRemote(options) {
 
   const { remoteImage, transferTag } = await prepareRemoteImage(remote, image, { retag: false });
   try {
-    const hostRoot = `/var/lib/monolith/deployments/${options.deployment}`;
+    const hostRoot = `/var/lib/bimo/deployments/${options.deployment}`;
     await remoteExecute(remote, ["mkdir", "-p", `${hostRoot}/runs`, `${hostRoot}/worktrees`]);
     await remoteExecute(remote, ["chmod", "700", hostRoot, `${hostRoot}/runs`, `${hostRoot}/worktrees`]);
     const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
@@ -864,7 +864,7 @@ async function organizeRemote(options) {
     openRouterKey = "";
     const result = await remoteExecute(remote, [
       "docker", "run", "--rm", "-i",
-      "--name", `monolith-${options.deployment}-controller`,
+      "--name", `bimo-${options.deployment}-controller`,
       "--user", "0:0",
       "--read-only",
       "--cap-drop", "ALL",
@@ -1038,7 +1038,7 @@ export async function runPodController({
 
 async function internalRun(options) {
   exactOptions(options, ["host-root"]);
-  if (!/^\/var\/lib\/monolith\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) fail("--host-root is invalid");
+  if (!/^\/var\/lib\/bimo\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) fail("--host-root is invalid");
   const raw = await readStdin(128 * 1024);
   let envelope;
   try { envelope = JSON.parse(raw); } catch { fail("invalid controller envelope"); }
@@ -1077,14 +1077,14 @@ async function readJsonEnvelope(maximumBytes, fields, label) {
 
 async function internalOrganize(options) {
   exactOptions(options, ["host-root"]);
-  if (!/^\/var\/lib\/monolith\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) {
+  if (!/^\/var\/lib\/bimo\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) {
     fail("--host-root is invalid");
   }
   const envelope = await readJsonEnvelope(128 * 1024, [
     "version", "deployment", "runId", "prompt", "agents", "key", "model", "image",
   ], "organizer controller");
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "")
-      || options["host-root"] !== `/var/lib/monolith/deployments/${envelope.deployment}`
+      || options["host-root"] !== `/var/lib/bimo/deployments/${envelope.deployment}`
       || !RUN_ID.test(envelope.runId ?? "")
       || !Number.isInteger(envelope.agents) || envelope.agents < 1 || envelope.agents > 3
       || !/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(envelope.key ?? "")
@@ -1124,7 +1124,7 @@ async function internalOrganize(options) {
 
 async function internalPodRun(options) {
   exactOptions(options, ["host-root"]);
-  if (!/^\/var\/lib\/monolith\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) {
+  if (!/^\/var\/lib\/bimo\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) {
     fail("--host-root is invalid");
   }
   const envelope = await readJsonEnvelope(128 * 1024, [
@@ -1132,7 +1132,7 @@ async function internalPodRun(options) {
     "repository", "baseSha", "targetBranch", "runId",
   ], "pod controller");
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "")
-      || options["host-root"] !== `/var/lib/monolith/deployments/${envelope.deployment}`
+      || options["host-root"] !== `/var/lib/bimo/deployments/${envelope.deployment}`
       || envelope.template !== "parallel-engineering-pod"
       || !TEMPLATE_DIGEST.test(envelope.templateDigest ?? "")
       || typeof envelope.task !== "string" || !envelope.task.trim()
@@ -1214,7 +1214,7 @@ async function internalPublish(options) {
   if (envelope.version !== 1 || !RUN_ID.test(envelope.runId ?? "")
       || envelope.repository !== POD_REPOSITORY || envelope.targetBranch !== POD_TARGET_BRANCH
       || !GIT_SHA.test(envelope.baseSha ?? "") || !GIT_SHA.test(envelope.candidateSha ?? "")
-      || envelope.headBranch !== `monolith/${envelope.runId}`
+      || envelope.headBranch !== `bimo/${envelope.runId}`
       || !GITHUB_TOKEN.test(envelope.token ?? "")) {
     fail("publisher envelope is invalid");
   }
@@ -1243,7 +1243,7 @@ async function remoteLogs(options) {
   const remote = target(options);
   const image = options.image ?? DEFAULT_IMAGE;
   if (!IMAGE.test(image)) fail("--image is invalid");
-  const hostRoot = `/var/lib/monolith/deployments/${options.deployment}`;
+  const hostRoot = `/var/lib/bimo/deployments/${options.deployment}`;
   const result = await remoteExecute(remote, [
     "docker", "run", "--rm", "--read-only", "--network", "none",
     "--user", "0:0",
@@ -1279,13 +1279,13 @@ async function internalLogs(argv) {
 
 function usage() {
   return `usage:
-  monolith list [--json]
-  monolith validate TEMPLATE [--json]
-  monolith organize -p PROMPT [-n 1|2|3] --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --secret-ref op://VAULT/ITEM/FIELD [--json]
-  monolith -p PROMPT [-n 1|2|3] --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --secret-ref op://VAULT/ITEM/FIELD [--json]
-  monolith deploy TEMPLATE --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
-  monolith deploy parallel-engineering-pod --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --repository ${POD_REPOSITORY} --base-sha SHA --target-branch main [--json]
-  monolith logs --deployment NAME (--host HOST | --proxmox HOST --vmid ID) [--run ID] [--json]
+  bimo list [--json]
+  bimo validate TEMPLATE [--json]
+  bimo organize -p PROMPT [-n 1|2|3] --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --secret-ref op://VAULT/ITEM/FIELD [--json]
+  bimo -p PROMPT [-n 1|2|3] --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --secret-ref op://VAULT/ITEM/FIELD [--json]
+  bimo deploy TEMPLATE --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
+  bimo deploy parallel-engineering-pod --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --repository ${POD_REPOSITORY} --base-sha SHA --target-branch main [--json]
+  bimo logs --deployment NAME (--host HOST | --proxmox HOST --vmid ID) [--run ID] [--json]
 `;
 }
 
