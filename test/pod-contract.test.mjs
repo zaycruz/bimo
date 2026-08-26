@@ -235,6 +235,8 @@ test("packaged prompts state the strict handoff fields and deterministic authori
   assert.match(loaded.prompts["engineering-a"], /"ownerBriefSha256"/);
   assert.match(loaded.prompts.checker, /"diffSha256"/);
   assert.match(loaded.prompts.checker, /"deliveredInbox"/);
+  assert.match(loaded.prompts.checker, /concurrent writer results are not present/i);
+  assert.match(loaded.prompts.checker, /cross-writer test failure/i);
   assert.doesNotMatch(loaded.prompts.checker, /"files"\s*:/);
   assert.match(loaded.prompts.qa, /"candidateSha"/);
   assert.doesNotMatch(loaded.prompts.qa, /"files"\s*:/);
