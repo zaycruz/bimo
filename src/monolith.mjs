@@ -928,6 +928,7 @@ async function internalPodRun(options) {
     hostRoot: options["host-root"],
     key: envelope.key,
     model: envelope.model,
+    modelConcurrency: Object.keys(loaded.template.writers).length,
   });
   envelope.key = null;
   try {

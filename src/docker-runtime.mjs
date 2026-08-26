@@ -23,6 +23,7 @@ const EXECUTION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const NODE_UID = 1000;
 const NODE_GID = 1000;
 const PROXY_LIFETIME_SECONDS = 3_600;
+const MAX_MODEL_CONCURRENCY = 3;
 const MAX_SNAPSHOT_ENTRIES = 10_000;
 const MAX_SNAPSHOT_DEPTH = 64;
 const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
@@ -303,7 +304,12 @@ export function bootstrapArgs({ deployment, image, workspaceHost }) {
   ];
 }
 
-export function proxyCreateArgs({ deployment, image, network, model }) {
+export function proxyCreateArgs({ deployment, image, network, model, modelConcurrency = 1 }) {
+  if (!Number.isInteger(modelConcurrency)
+      || modelConcurrency < 1
+      || modelConcurrency > MAX_MODEL_CONCURRENCY) {
+    fail("invalid model concurrency");
+  }
   return [
     "create",
     "--interactive",
@@ -320,6 +326,7 @@ export function proxyCreateArgs({ deployment, image, network, model }) {
     "--port", "8787",
     "--model", model.replace(/^openrouter\//, ""),
     "--max-requests", "100",
+    "--max-concurrency", String(modelConcurrency),
     "--max-body-bytes", "2097152",
     "--timeout-seconds", "300",
   ];
@@ -766,6 +773,7 @@ export class DockerRuntime {
     stateRoot = "/state",
     key,
     model,
+    modelConcurrency = 1,
     port,
     publicUrl,
   }) {
@@ -778,6 +786,11 @@ export class DockerRuntime {
     if (path.resolve(stateRoot) !== stateRoot) fail("Monolith state root must be canonical");
     if (!SAFE_IMAGE.test(image)) fail("invalid image reference");
     if (!MODEL.test(model)) fail("invalid model reference");
+    if (!Number.isInteger(modelConcurrency)
+        || modelConcurrency < 1
+        || modelConcurrency > MAX_MODEL_CONCURRENCY) {
+      fail("invalid model concurrency");
+    }
     if (typeof key !== "string" || !/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(key)) fail("invalid OpenRouter key");
     const publicationConfigured = port !== undefined || publicUrl !== undefined;
     if (publicationConfigured && (!Number.isInteger(port) || port < 1_024 || port > 65_535)) {
@@ -796,6 +809,7 @@ export class DockerRuntime {
     this.stateRoot = path.resolve(stateRoot);
     this.key = key;
     this.model = model;
+    this.modelConcurrency = modelConcurrency;
     this.port = port ?? null;
     this.publicUrl = parsedUrl?.toString().replace(/\/$/, "") ?? null;
     this.controllerUid = typeof process.getuid === "function" ? process.getuid() : 0;
@@ -979,6 +993,7 @@ export class DockerRuntime {
         image: this.image,
         network: this.agentNetwork,
         model: this.model,
+        modelConcurrency: this.modelConcurrency,
       }), {}, deploymentDeadline, "deployment");
       this.proxyId = created.stdout.trim();
       await this.commandWithin(["network", "connect", this.egressNetwork, this.proxyId], {}, deploymentDeadline, "deployment");

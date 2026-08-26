@@ -229,6 +229,7 @@ test("credential gateway is isolated-listener policy with a hard lifetime", () =
   assert.match(rendered, /--lifetime-seconds 3600/);
   assert.match(rendered, /--model deepseek\/deepseek-v4-flash/);
   assert.match(rendered, /--max-requests 100/);
+  assert.match(rendered, /--max-concurrency 1/);
   assert.match(rendered, /--interactive/);
   assert.doesNotMatch(rendered, /OPENROUTER_API_KEY|sk-or-/);
 });
@@ -277,6 +278,7 @@ test("pod startup skips the React bootstrap but keeps the isolated credential ga
     hostRoot: "/var/lib/monolith/deployments/demo",
     key: SECRET,
     model: "openrouter/deepseek/deepseek-v4-flash",
+    modelConcurrency: 3,
   });
   const calls = [];
   runtime.command = async args => {
@@ -292,7 +294,9 @@ test("pod startup skips the React bootstrap but keeps the isolated credential ga
 
   assert.equal(calls.some(args => args[0] === "run" && args.includes("bootstrap")), false);
   assert(calls.some(args => args[0] === "network" && args[1] === "create" && args.includes("--internal")));
-  assert(calls.some(args => args[0] === "create" && args.includes("proxy")));
+  const proxyCreate = calls.find(args => args[0] === "create" && args.includes("proxy"));
+  assert(proxyCreate);
+  assert.equal(proxyCreate[proxyCreate.indexOf("--max-concurrency") + 1], "3");
   assert(calls.some(args => args[0] === "run" && args.includes("probe")));
 });
 
