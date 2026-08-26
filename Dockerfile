@@ -1,13 +1,15 @@
-FROM docker:27.5.1-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c AS docker-cli
+FROM docker:29.7.2-cli@sha256:000bb62ff495f986c9f5578eb67cc2cb98b91138eda81d7762d5371eb8a497fe AS docker-cli
 
-FROM node:22-slim@sha256:e9bff3a454208b46a1f96da92878cc7f56a2a41ceac2216825be3177736896b5
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
-ARG OPENCODE_VERSION=1.18.22
+ARG OPENCODE_VERSION=1.18.23
+ARG NPM_VERSION=12.0.2
 ARG TARGETARCH
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
+    && npm install --global "npm@${NPM_VERSION}" \
     && case "${TARGETARCH}" in \
       amd64) OPENCODE_ARCH=x64 ;; \
       arm64) OPENCODE_ARCH=arm64 ;; \

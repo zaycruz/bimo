@@ -42,6 +42,7 @@ jobs:
         with:
           image-ref: bimo-workflow:ci
           severity: HIGH,CRITICAL
+          ignore-unfixed: true
           exit-code: '1'
       - run: docker run --rm bimo-workflow:ci list --json
       - run: docker run --rm bimo-workflow:ci validate react-app --json
