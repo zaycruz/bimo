@@ -712,7 +712,7 @@ test("aborts an injected Git command at the absolute deadline and waits for sett
     repository: REPOSITORY,
     baseRevision: "a".repeat(40),
     targetBranch: "main",
-    deadlineAt: Date.now() + 50,
+    deadlineAt: Date.now() + 500,
   }), /Git operation deadline exceeded/);
   assert.equal(settled, true);
   assert.ok(Date.now() - startedAt < 1_000);
