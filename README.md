@@ -184,7 +184,10 @@ This is the complete bundled `react-app` manifest:
 The manifest cannot contain commands, images, executables, provider keys, or
 arbitrary environment variables. It declares bounded roles, transitions,
 timeouts, and static-output checks. Markdown prompts describe how each role
-should behave.
+should behave. The exact boundary — what a template may declare, how it is
+validated and digest-bound, what an operator may customize, and what is
+explicitly not promised — is defined in
+[the template boundary](docs/templates.md).
 
 ## What happens during a sequential deployment
 
