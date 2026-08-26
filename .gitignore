@@ -3,3 +3,4 @@ graphify-out/
 .monolith/
 node_modules/
 /target/
+/monolith-workflow-*.tgz*

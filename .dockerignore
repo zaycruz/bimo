@@ -9,5 +9,7 @@
 !templates/
 !templates/**
 !etc/
+!etc/organizer/
+!etc/organizer/organizer.md
 !etc/opencode/
 !etc/opencode/opencode.json

@@ -1,7 +1,9 @@
 # Monolith v0.3
 
 Monolith deploys predefined agent work to one Docker host. v0.3 preserves the
-bounded sequential workflows and adds one fixed parallel engineering pod.
+bounded sequential workflows, adds one fixed parallel engineering pod, and can
+ask up to three isolated organizer agents to select the installed template that
+best fits a prompt.
 
 **[Open the live agent-built demo](https://thisismonolith.pages.dev/).** It is
 the unchanged static artifact from the final `react-app` run on `pve-05`, not a
@@ -205,8 +207,8 @@ should behave.
    limits, rejects symlinks, and performs its own HTTP marker probe with
    image-baked server code.
 6. Only verified output is copied to an immutable per-run snapshot. The
-   controller probes a candidate before replacing the current app. If the final
-   replacement fails, it restores the previous app container.
+controller probes a candidate before replacing the current app. If the final
+replacement fails, it restores the previous app container.
 
 The `workflowSeconds` deadline begins before image inspection and bootstrap and
 covers gateway startup, every role, verification, and publication. Cancellation
@@ -235,32 +237,18 @@ Controller-owned verification is the separate fixed step described above.
 
 ## Install from GitHub
 
-The published v0.2 package contains the sequential workflows, not the v0.3 pod.
-It is not published to the npm registry. Download the release tarball, verify
-it, and install that exact file:
+Monolith is not published to the npm registry. Download the v0.3 release
+tarball and checksum, verify the exact file, then install it locally:
 
 ```bash
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/monolith-v2/releases/download/v0.2.0/monolith-workflow-0.2.0.tgz
-printf '%s  %s\n' \
-  3f93ed7439313066e5fa031f3a6b63df45519cd03c04d3b198bccfa8ef10051c \
-  monolith-workflow-0.2.0.tgz | shasum --algorithm 256 --check
-npm install --global ./monolith-workflow-0.2.0.tgz
-monolith list --json
-monolith validate react-app
-```
-
-Until a v0.3 artifact replaces the evidence placeholder below, build the pod
-candidate from its source branch instead:
-
-```bash
-git clone --depth 1 https://github.com/zaycruz/monolith-v2.git
-cd monolith-v2
-npm ci
-npm test
-npm pack
+  https://github.com/zaycruz/monolith-v2/releases/download/v0.3.0/monolith-workflow-0.3.0.tgz
+curl --fail --location --remote-name \
+  https://github.com/zaycruz/monolith-v2/releases/download/v0.3.0/monolith-workflow-0.3.0.tgz.sha256
+shasum --algorithm 256 --check monolith-workflow-0.3.0.tgz.sha256
 npm install --global ./monolith-workflow-0.3.0.tgz
-monolith --help
+monolith list --json
+monolith validate parallel-engineering-pod
 ```
 
 The operator machine needs Node.js 22+, Docker, SSH, and the 1Password CLI. The
@@ -282,6 +270,41 @@ monolith validate react-app
 monolith validate react-solo --json
 monolith validate parallel-engineering-pod --json
 ```
+
+### Organize a prompt with agents
+
+`-n` counts independent read-only organizers. It does not resize the selected
+workflow or the fixed three-writer engineering pod. Each organizer sees the
+same original assignment and the same digest-bound installed catalog. One
+valid vote selects with `-n 1`; two must be unanimous; three require a majority.
+Any invalid receipt, timeout, digest mismatch, or missing quorum fails without
+deploying anything.
+
+```bash
+PLAN="$(monolith -p "$(<examples/prompts/small-app.md)" \
+  -n 3 \
+  --deployment organize-demo \
+  --proxmox pve-05 \
+  --vmid 113 \
+  --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
+  --json)"
+
+printf '%s\n' "$PLAN" | jq .
+```
+
+The equivalent explicit form starts with `monolith organize -p`. The output is
+a plan receipt: prompt SHA-256, votes, selected template and digest, plus the
+names of the deploy options that template accepts. Organizer agents cannot
+add operational fields such as commands, targets, credentials, repositories,
+images, or models. Each vote's `reason` is untrusted explanatory text: it is
+never executed or used as deploy input. `deploy` remains a separate operator
+action because a static app workflow and a source engineering pod require
+different authority. Reuse the unchanged prompt as `--task-file` or
+`--task-stdin` when running the selected template.
+
+See [the organizer how-to](docs/organize.md) and the runnable
+[small-app](examples/prompts/small-app.md) and
+[parallel-pod](examples/prompts/parallel-engineering-pod.md) prompts.
 
 ### Deploy through `pve-05`
 
@@ -395,6 +418,10 @@ Defaults are port `8080`, model `openrouter/deepseek/deepseek-v4-flash`, and
 image tag `monolith-workflow:0.3.0`. `--account` selects a 1Password account;
 `--json` requests machine-readable output.
 
+Quote each `op://` reference as one shell argument. Vault, item, and field names
+may contain literal spaces; Monolith passes the validated reference directly to
+`op read` without invoking a shell.
+
 `--public-url` is only the address Monolith records and reports for the published
 port. Monolith does not create DNS records, TLS certificates, firewall rules,
 routes, or a reverse proxy. Supply an address that is actually reachable in
@@ -423,7 +450,7 @@ records against target-host root.
 Each successful verification creates a separate artifact snapshot that Monolith
 treats as immutable: it is created once, permission-locked, and mounted by the
 retained app read-only. Monolith performs automatic rollback only when replacing
-the current app fails; v0.2 has no user-facing rollback command or remote
+the current app fails; v0.3 has no user-facing rollback command or remote
 artifact backup.
 
 The fixed pod uses the same deployment root but keeps private run records under
@@ -508,14 +535,47 @@ Never put a credential in a task, prompt, workflow file, repository file,
   restore the prior app on failure, but zero downtime is not guaranteed.
 - History and artifacts remain on one target host. There is no database, remote
   backup, or user-invoked rollback.
+- Organizer audit runs are retained on the target and are not automatically
+  pruned in v0.3.
 - Pod publication stops at an isolated, draft pull request. It does not approve,
   mark ready, merge, deploy, or delete the branch.
 
 ## v0.3 release evidence
 
-> **RELEASE FINALIZER PLACEHOLDER:** replace this block with verified v0.3 test,
-> `pve-05`, publication, and draft-PR evidence before release. This documentation
-> draft makes no v0.3 live-run or test-count claim.
+Local verification on 2026-08-26: **201/201 automated tests passed**. The final
+`linux/amd64` image also executed its baked Git askpass helper while the private
+credential tmpfs remained `noexec`; the helper was root-owned and mode `0555`.
+
+Live organizer and deployment proof on `pve-05`, LXC `113`:
+
+- Organizer run `20260826040815-1e83d274` gave the unchanged small-app prompt
+  to three selectors; all three chose `react-solo` at digest
+  `af6c7d09debd98a4abb86170384242e76d8235f0177755b5cc4ae4b67371af98`.
+- The selected app then completed as run `20260826040943-3524acea`. Its
+  controller-owned artifact receipt was 3 files, 147,220 bytes, SHA-256
+  `4e47307d3654f9faac87f78bd11ff3a1772093f68ee00ecde703f9b177810d7c`;
+  the hardened retained container returned HTTP 200 at the recorded LXC URL.
+- Organizer run `20260826041417-b7c94c44` gave the parallel-pod prompt to three
+  selectors; all three chose `parallel-engineering-pod` at digest
+  `8ad45c2908a1c3626e5badea95f06161ca88b630ab064aa58412799b398347cd`.
+- Pod run `20260826051009-0fc6b396` passed all three writers, all three dedicated
+  checkers, QA, Testing, candidate and immutable-baseline source verification,
+  and the pre-publication scan on its first attempt. It published exact candidate
+  `8b4556fe0d725fe9e06a379e8551c6a93ab7e30a` as
+  [draft pull request #4](https://github.com/zaycruz/monolith-v2/pull/4), bound
+  to base `26864850cfd78521cfa95112513fc18a72e8bb51`; its GitHub `verify` job passed.
+- The source-verifier regression was reproduced against the exact candidate in
+  the production sandbox, then passed all **186/186** candidate tests with
+  `/tmp` still `noexec`, a separate bounded executable test-fixture tmpfs, no
+  network, no Docker socket, dropped capabilities, and a read-only source mount.
+- The final publisher image on the LXC had config digest
+  `sha256:bc35072f2efb296c7a1cdd3c6ac4e0979b4708c6b54249eb7c130a977c68b44d`.
+  After durable publication, no pod controller, role, publisher container,
+  transient network, worktree, snapshot, or private source clone remained.
+
+These receipts prove the bounded templates and isolated publication path
+described here. They do not prove arbitrary workload support, production HA,
+or Kubernetes-equivalent isolation.
 
 ## v0.2 release evidence
 

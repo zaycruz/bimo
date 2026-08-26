@@ -24,13 +24,15 @@ stage:
 
 ## Requirements
 
-- Under `src/`, add a pure data-only summary containing all 13 exact stage
-  labels in the exact order above.
-- Under `starters/`, render all 13 exact stage labels in the same order as
-  accessible status text.
+- Add `src/pod-stages.mjs` with one named export, `POD_STAGES`, containing all
+  13 exact stage labels in the exact order above. Freeze the exported array.
+- In `starters/react/src/main.jsx`, render all 13 exact stage labels in the
+  same order as accessible status text.
   Do not import files from outside the starter package.
-- Under `test/`, assert the complete 13-label summary order and every one of the
-  starter's 13 required stage labels. A subset is not sufficient.
+- Add `test/pod-stages.test.mjs`. Import the summary exactly as
+  `import { POD_STAGES } from "../src/pod-stages.mjs"`, assert its complete
+  ordered value, and assert that the starter source contains every one of the
+  13 required labels. A subset is not sufficient.
 - Preserve existing CLI behavior and `MONOLITH_DEMO_READY`.
 
 ## Constraints

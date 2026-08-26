@@ -14,6 +14,7 @@ const BASE_SHA = "a".repeat(40);
 const CANDIDATE_SHA = "b".repeat(40);
 const OTHER_SHA = "c".repeat(40);
 const TOKEN = "test-publish-token-must-stay-secret";
+const ASKPASS_PROGRAM = path.resolve(import.meta.dirname, "..", "bin", "monolith-git-askpass");
 
 async function fixture(t, readyOverrides = {}) {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-publish-run-"));
@@ -281,8 +282,10 @@ test("askpass credentials are private, absent from argv, zeroed, deleted, and sa
 
     const scriptStat = await lstat(options.env.GIT_ASKPASS);
     const tokenStat = await lstat(options.env.MONOLITH_GIT_TOKEN_FILE);
-    const directoryStat = await lstat(path.dirname(options.env.GIT_ASKPASS));
-    assert.equal(scriptStat.mode & 0o777, 0o700);
+    const directoryStat = await lstat(path.dirname(options.env.MONOLITH_GIT_TOKEN_FILE));
+    assert.equal(options.env.GIT_ASKPASS, ASKPASS_PROGRAM);
+    assert.equal(scriptStat.isFile(), true);
+    assert.equal(scriptStat.mode & 0o111, 0o111);
     assert.equal(tokenStat.mode & 0o777, 0o600);
     assert.equal(directoryStat.mode & 0o777, 0o700);
     assert.equal((await readFile(options.env.GIT_ASKPASS, "utf8")).includes(TOKEN), false);

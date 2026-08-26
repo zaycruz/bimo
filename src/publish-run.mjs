@@ -35,13 +35,7 @@ const INPUT_FIELDS = Object.freeze([
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const SOURCE_CLEANUP_TIMEOUT_MS = 5_000;
-const ASKPASS_SCRIPT = `#!/bin/sh
-case "$1" in
-  *sername*) printf '%s\\n' 'x-access-token' ;;
-  *assword*) IFS= read -r secret < "$MONOLITH_GIT_TOKEN_FILE" || exit 1; printf '%s\\n' "$secret" ;;
-  *) exit 1 ;;
-esac
-`;
+const ASKPASS_PROGRAM = path.resolve(import.meta.dirname, "..", "bin", "monolith-git-askpass");
 
 function fail(message) {
   throw new Error(message);
@@ -224,24 +218,26 @@ async function cleanupPrivateSourceGitDir(target, expected, removeSourceGitDir) 
 }
 
 async function createAskpass(askpassRoot, token) {
+  const program = await lstat(ASKPASS_PROGRAM).catch(() => null);
+  if (!program?.isFile() || program.isSymbolicLink()
+      || (program.mode & 0o100) === 0 || (program.mode & 0o022) !== 0) {
+    fail("baked askpass program is invalid");
+  }
   const priorRoot = await lstat(askpassRoot).catch(() => null);
   if (priorRoot === null) await mkdir(askpassRoot, { mode: 0o700 });
   await ensurePrivateDirectory(askpassRoot, "askpassRoot");
   const directory = await mkdtemp(path.join(askpassRoot, "credential-"));
   await chmod(directory, 0o700);
   const home = path.join(directory, "home");
-  const script = path.join(directory, "askpass.sh");
   const tokenFile = path.join(directory, "token");
   await mkdir(home, { mode: 0o700 });
-  await writeFile(script, ASKPASS_SCRIPT, { flag: "wx", mode: 0o700 });
   await writeFile(tokenFile, `${token}\n`, { flag: "wx", mode: 0o600 });
-  await chmod(script, 0o700);
   await chmod(tokenFile, 0o600);
   let cleaned = false;
   return {
     env: {
       ...baseGitEnvironment(home),
-      GIT_ASKPASS: script,
+      GIT_ASKPASS: ASKPASS_PROGRAM,
       GIT_ASKPASS_REQUIRE: "force",
       MONOLITH_GIT_TOKEN_FILE: tokenFile,
     },
@@ -255,7 +251,6 @@ async function createAskpass(askpassRoot, token) {
         }
       } finally {
         await rm(tokenFile, { force: true });
-        await rm(script, { force: true });
         await rm(home, { recursive: true, force: true });
         await rm(directory, { recursive: true, force: true });
         if (priorRoot === null) await rmdir(askpassRoot).catch(() => {});

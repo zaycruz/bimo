@@ -10,6 +10,13 @@ import process from "node:process";
 
 import { DockerRuntime } from "./docker-runtime.mjs";
 import { GitRuntime } from "./git-runtime.mjs";
+import {
+  validateOrganizerInput,
+  validateOrganizerReceipt,
+  validateOrganizerPrompt,
+  validateTemplateCatalog,
+} from "./organize.mjs";
+import { runOrganizerController } from "./organizer-controller.mjs";
 import { loadPodTemplate } from "./pod-contract.mjs";
 import { runEngineeringPod } from "./pod-controller.mjs";
 import { createPodRunStore, prunePodRuns } from "./pod-store.mjs";
@@ -18,6 +25,7 @@ import { loadWorkflow, runWorkflow } from "./workflow.mjs";
 
 const packageRoot = path.resolve(import.meta.dirname, "..");
 const templateRoot = path.join(packageRoot, "templates");
+const organizerInstructionsPath = path.join(packageRoot, "etc", "organizer", "organizer.md");
 const DEFAULT_IMAGE = "monolith-workflow:0.3.0";
 const DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash";
 const POD_REPOSITORY = "https://github.com/zaycruz/monolith-v2.git";
@@ -29,7 +37,7 @@ const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const EXECUTION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const SSH_TARGET = /^(?:[a-z_][a-z0-9_-]*@)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
 const IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$/;
-const SECRET_REF = /^op:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+$/;
+const SECRET_REF = /^op:\/\/[^/\u0000-\u001f\u007f]{1,255}\/[^/\u0000-\u001f\u007f]{1,255}\/[^/\u0000-\u001f\u007f]{1,255}$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/;
 const TEMPLATE_DIGEST = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
@@ -37,6 +45,14 @@ const GITHUB_TOKEN = /^(?:github_pat_[A-Za-z0-9_]{20,}|gh[psoru]_[A-Za-z0-9]{20,
 const IMAGE_CONFIG_FIELDS = [
   "Entrypoint", "Cmd", "Env", "User", "WorkingDir", "ExposedPorts",
   "Volumes", "Labels", "Healthcheck", "StopSignal", "Shell",
+];
+const WORKFLOW_DEPLOY_OPTIONS = [
+  "--deployment", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
+  "--secret-ref", "--public-url", "--port",
+];
+const POD_DEPLOY_OPTIONS = [
+  "--deployment", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
+  "--secret-ref", "--github-secret-ref", "--repository", "--base-sha", "--target-branch",
 ];
 
 function fail(message) {
@@ -58,6 +74,29 @@ function parseOptions(argv, { booleans = [] } = {}) {
     else {
       const next = argv[index + 1];
       if (next === undefined || next.startsWith("--")) fail(`--${key} requires a value`);
+      options[key] = next;
+      index += 1;
+    }
+  }
+  return { positional, options };
+}
+
+function parseOrganizerOptions(argv) {
+  const options = {};
+  const positional = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const value = argv[index];
+    const option = value === "-p" ? "--prompt" : value === "-n" ? "--agents" : value;
+    if (!option.startsWith("--")) {
+      positional.push(value);
+      continue;
+    }
+    const key = option.slice(2);
+    if (Object.hasOwn(options, key)) fail(`duplicate option: --${key}`);
+    if (key === "json") options[key] = true;
+    else {
+      const next = argv[index + 1];
+      if (next === undefined) fail(`--${key} requires a value`);
       options[key] = next;
       index += 1;
     }
@@ -253,6 +292,35 @@ async function listTemplates() {
   return templates;
 }
 
+async function loadOrganizerCatalog() {
+  const entries = await readdir(templateRoot, { withFileTypes: true });
+  const catalog = [];
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!entry.isDirectory() || !NAME.test(entry.name)) continue;
+    const loaded = await loadTemplate(entry.name);
+    if (loaded.kind === "workflow") {
+      catalog.push({
+        template: loaded.name,
+        templateDigest: loaded.templateDigest,
+        kind: loaded.kind,
+        roles: Object.keys(loaded.workflow.roles),
+        maxSteps: loaded.workflow.maxSteps,
+        acceptedOptions: WORKFLOW_DEPLOY_OPTIONS,
+      });
+    } else {
+      catalog.push({
+        template: loaded.name,
+        templateDigest: loaded.templateDigest,
+        kind: loaded.kind,
+        roles: ["planner", ...Object.keys(loaded.template.writers), "checker", "qa", "testing"],
+        maxAttempts: loaded.template.maxAttempts,
+        acceptedOptions: POD_DEPLOY_OPTIONS,
+      });
+    }
+  }
+  return validateTemplateCatalog(catalog);
+}
+
 function target(options) {
   const proxmox = options.proxmox;
   const host = options.host;
@@ -364,6 +432,46 @@ function imageTransferTag(imageId) {
   return `monolith-transfer:${imageId.slice(7, 19)}-${randomUUID().replaceAll("-", "")}`;
 }
 
+async function prepareRemoteImage(remote, image, { retag = true } = {}) {
+  await execute("docker", ["build", "--platform", "linux/amd64", "--tag", image, packageRoot]);
+  const imageResult = await execute("docker", ["image", "inspect", image]);
+  const localImage = parseImageInspect(imageResult.stdout, "local");
+  const transferTag = imageTransferTag(localImage.imageId);
+  let remoteTransferStarted = false;
+  try {
+    await execute("docker", ["image", "tag", localImage.imageId, transferTag], { timeoutMs: 30_000 });
+    const taggedImageResult = await execute("docker", ["image", "inspect", transferTag]);
+    const taggedImage = parseImageInspect(taggedImageResult.stdout, "tagged local");
+    if (taggedImage.imageId !== localImage.imageId
+        || taggedImage.contentFingerprint !== localImage.contentFingerprint) {
+      fail("local transfer tag does not match the inspected image");
+    }
+
+    remoteTransferStarted = true;
+    await transferImage(remote, transferTag);
+    const remoteImageResult = await remoteExecute(remote, ["docker", "image", "inspect", transferTag]);
+    const remoteImage = parseImageInspect(remoteImageResult.stdout, "remote");
+    if (remoteImage.contentFingerprint !== localImage.contentFingerprint) {
+      fail("transferred image content does not match the inspected local image");
+    }
+    if (retag) {
+      await remoteExecute(remote, ["docker", "image", "tag", transferTag, image], { timeoutMs: 30_000 });
+    }
+    return { remoteImage, transferTag };
+  } catch (error) {
+    if (remoteTransferStarted) {
+      await remoteExecute(remote, ["docker", "image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
+    }
+    await execute("docker", ["image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
+    throw error;
+  }
+}
+
+async function cleanupTransferredImage(remote, transferTag) {
+  await remoteExecute(remote, ["docker", "image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
+  await execute("docker", ["image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
+}
+
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     && Object.getPrototypeOf(value) === Object.prototype;
@@ -441,6 +549,42 @@ function parseLastJson(stdout, label) {
   } catch {
     fail(`${label} returned invalid JSON`);
   }
+}
+
+function validateOrganizerPlan(value, expected) {
+  exactObject(value, [
+    "version", "status", "promptSha256", "template", "templateDigest",
+    "agents", "votes", "handoff", "runId",
+  ], "organizer controller");
+  const promptSha256 = createHash("sha256").update(expected.prompt, "utf8").digest("hex");
+  if (value.version !== 1 || value.status !== "planned" || value.runId !== expected.runId
+      || value.promptSha256 !== promptSha256 || value.agents !== expected.agents
+      || !Array.isArray(value.votes) || value.votes.length !== expected.agents) {
+    fail("organizer controller returned an invalid plan");
+  }
+  const votes = value.votes.map((vote, index) => {
+    exactObject(vote, ["template", "templateDigest", "reason"], `organizer vote ${index + 1}`);
+    return validateOrganizerReceipt({ version: 1, ...vote }, expected.catalog);
+  });
+  const selected = expected.catalog.find(entry => entry.template === value.template);
+  if (!selected || selected.templateDigest !== value.templateDigest) {
+    fail("organizer controller selected an unknown template or digest");
+  }
+  const selectedVotes = votes.filter(vote => (
+    vote.template === selected.template && vote.templateDigest === selected.templateDigest
+  )).length;
+  const quorum = expected.agents === 2 ? 2 : Math.ceil(expected.agents / 2);
+  if (selectedVotes < quorum) fail("organizer controller plan lacks the required quorum");
+
+  exactObject(value.handoff, ["template", "templateDigest", "acceptedOptions"], "organizer handoff");
+  if (value.handoff.template !== selected.template
+      || value.handoff.templateDigest !== selected.templateDigest
+      || !Array.isArray(value.handoff.acceptedOptions)
+      || value.handoff.acceptedOptions.length !== selected.acceptedOptions.length
+      || value.handoff.acceptedOptions.some((option, index) => option !== selected.acceptedOptions[index])) {
+    fail("organizer controller returned an invalid handoff");
+  }
+  return value;
 }
 
 function validatePodReady(value, expected) {
@@ -530,29 +674,8 @@ async function deploy(template, options) {
   if (!task.trim() || Buffer.byteLength(task) > 64 * 1024) fail("task must contain 1 to 65536 bytes");
   if (!options["secret-ref"]) fail("--secret-ref is required");
 
-  await execute("docker", ["build", "--platform", "linux/amd64", "--tag", image, packageRoot]);
-  const imageResult = await execute("docker", ["image", "inspect", image]);
-  const localImage = parseImageInspect(imageResult.stdout, "local");
-  const transferTag = imageTransferTag(localImage.imageId);
-  let remoteTransferStarted = false;
+  const { remoteImage, transferTag } = await prepareRemoteImage(remote, image);
   try {
-    await execute("docker", ["image", "tag", localImage.imageId, transferTag], { timeoutMs: 30_000 });
-    const taggedImageResult = await execute("docker", ["image", "inspect", transferTag]);
-    const taggedImage = parseImageInspect(taggedImageResult.stdout, "tagged local");
-    if (taggedImage.imageId !== localImage.imageId
-        || taggedImage.contentFingerprint !== localImage.contentFingerprint) {
-      fail("local transfer tag does not match the inspected image");
-    }
-
-    remoteTransferStarted = true;
-    await transferImage(remote, transferTag);
-    const remoteImageResult = await remoteExecute(remote, ["docker", "image", "inspect", transferTag]);
-    const remoteImage = parseImageInspect(remoteImageResult.stdout, "remote");
-    if (remoteImage.contentFingerprint !== localImage.contentFingerprint) {
-      fail("transferred image content does not match the inspected local image");
-    }
-    await remoteExecute(remote, ["docker", "image", "tag", transferTag, image], { timeoutMs: 30_000 });
-
     const hostRoot = `/var/lib/monolith/deployments/${options.deployment}`;
     if (pod) {
       await remoteExecute(remote, [
@@ -696,10 +819,88 @@ async function deploy(template, options) {
       else process.stdout.write(`deployed ${response.template} as ${response.deployment}\nrun: ${response.runId}\nurl: ${response.url}\n`);
     }
   } finally {
-    if (remoteTransferStarted) {
-      await remoteExecute(remote, ["docker", "image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
-    }
-    await execute("docker", ["image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
+    await cleanupTransferredImage(remote, transferTag);
+  }
+}
+
+async function organizeRemote(options) {
+  exactOptions(options, [
+    "prompt", "agents", "deployment", "proxmox", "host", "vmid",
+    "secret-ref", "account", "model", "image", "json",
+  ]);
+  if (!NAME.test(options.deployment ?? "")) {
+    fail("--deployment must use lowercase letters, numbers, and dashes");
+  }
+  const remote = target(options);
+  const prompt = validateOrganizerPrompt(options.prompt);
+  const agentsText = options.agents ?? "1";
+  if (!/^[1-3]$/u.test(agentsText)) fail("--agents must be an integer from 1 to 3");
+  const agents = Number(agentsText);
+  if (!options["secret-ref"]) fail("--secret-ref is required");
+  const image = options.image ?? DEFAULT_IMAGE;
+  if (!IMAGE.test(image)) fail("--image is invalid");
+  const model = options.model ?? DEFAULT_MODEL;
+  if (!/^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/.test(model)) fail("--model is invalid");
+  const catalog = await loadOrganizerCatalog();
+  validateOrganizerInput({ prompt, agents, catalog });
+
+  const { remoteImage, transferTag } = await prepareRemoteImage(remote, image, { retag: false });
+  try {
+    const hostRoot = `/var/lib/monolith/deployments/${options.deployment}`;
+    await remoteExecute(remote, ["mkdir", "-p", `${hostRoot}/runs`, `${hostRoot}/worktrees`]);
+    await remoteExecute(remote, ["chmod", "700", hostRoot, `${hostRoot}/runs`, `${hostRoot}/worktrees`]);
+    const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
+    let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
+    const envelope = JSON.stringify({
+      version: 1,
+      deployment: options.deployment,
+      runId,
+      prompt,
+      agents,
+      key: openRouterKey,
+      model,
+      image: remoteImage.imageId,
+    });
+    openRouterKey = "";
+    const result = await remoteExecute(remote, [
+      "docker", "run", "--rm", "-i",
+      "--name", `monolith-${options.deployment}-controller`,
+      "--user", "0:0",
+      "--read-only",
+      "--cap-drop", "ALL",
+      "--security-opt", "no-new-privileges",
+      "--pids-limit", "128",
+      "--memory", "512m",
+      "--cpus", "0.5",
+      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=128m",
+      "--volume", "/var/run/docker.sock:/var/run/docker.sock:rw",
+      "--volume", `${hostRoot}/runs:/state:rw`,
+      "--volume", `${hostRoot}/worktrees:/worktrees:rw`,
+      remoteImage.imageId,
+      "internal-organize",
+      "--host-root", hostRoot,
+    ], {
+      input: envelope,
+      timeoutMs: 12 * 60 * 1_000,
+      maxOutputBytes: 256 * 1024,
+    });
+    const response = validateOrganizerPlan(parseLastJson(result.stdout, "organizer controller"), {
+      prompt,
+      agents,
+      catalog,
+      runId,
+    });
+    if (options.json) process.stdout.write(`${JSON.stringify(response)}\n`);
+    else process.stdout.write([
+      `planned ${response.template} with ${response.agents} organizer${response.agents === 1 ? "" : "s"}`,
+      `run: ${response.runId}`,
+      `prompt: ${response.promptSha256}`,
+      `template digest: ${response.templateDigest}`,
+      `accepted deploy options: ${response.handoff.acceptedOptions.join(", ")}`,
+      "",
+    ].join("\n"));
+  } finally {
+    await cleanupTransferredImage(remote, transferTag);
   }
 }
 
@@ -874,6 +1075,53 @@ async function readJsonEnvelope(maximumBytes, fields, label) {
   return exactObject(envelope, fields, `${label} envelope`);
 }
 
+async function internalOrganize(options) {
+  exactOptions(options, ["host-root"]);
+  if (!/^\/var\/lib\/monolith\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) {
+    fail("--host-root is invalid");
+  }
+  const envelope = await readJsonEnvelope(128 * 1024, [
+    "version", "deployment", "runId", "prompt", "agents", "key", "model", "image",
+  ], "organizer controller");
+  if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "")
+      || options["host-root"] !== `/var/lib/monolith/deployments/${envelope.deployment}`
+      || !RUN_ID.test(envelope.runId ?? "")
+      || !Number.isInteger(envelope.agents) || envelope.agents < 1 || envelope.agents > 3
+      || !/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(envelope.key ?? "")
+      || !/^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/.test(envelope.model ?? "")
+      || !SHA256.test(envelope.image ?? "")) {
+    fail("organizer controller envelope is invalid");
+  }
+  const catalog = await loadOrganizerCatalog();
+  validateOrganizerInput({ prompt: envelope.prompt, agents: envelope.agents, catalog });
+  const instructionsStat = await lstat(organizerInstructionsPath).catch(() => null);
+  if (!instructionsStat?.isFile() || instructionsStat.isSymbolicLink()
+      || instructionsStat.size < 1 || instructionsStat.size > 16 * 1024) {
+    fail("packaged organizer instructions are invalid");
+  }
+  const baseInstructions = await readFile(organizerInstructionsPath, "utf8");
+  const runtime = new DockerRuntime({
+    image: envelope.image,
+    deployment: envelope.deployment,
+    hostRoot: options["host-root"],
+    key: envelope.key,
+    model: envelope.model,
+    modelConcurrency: envelope.agents,
+    modelRequestLimit: 100,
+  });
+  envelope.key = null;
+  const result = await runOrganizerController({
+    prompt: envelope.prompt,
+    agents: envelope.agents,
+    catalog,
+    baseInstructions,
+    model: envelope.model,
+    runtime,
+    runId: envelope.runId,
+  });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
 async function internalPodRun(options) {
   exactOptions(options, ["host-root"]);
   if (!/^\/var\/lib\/monolith\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) {
@@ -1033,6 +1281,8 @@ function usage() {
   return `usage:
   monolith list [--json]
   monolith validate TEMPLATE [--json]
+  monolith organize -p PROMPT [-n 1|2|3] --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --secret-ref op://VAULT/ITEM/FIELD [--json]
+  monolith -p PROMPT [-n 1|2|3] --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --secret-ref op://VAULT/ITEM/FIELD [--json]
   monolith deploy TEMPLATE --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
   monolith deploy parallel-engineering-pod --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --repository ${POD_REPOSITORY} --base-sha SHA --target-branch main [--json]
   monolith logs --deployment NAME (--host HOST | --proxmox HOST --vmid ID) [--run ID] [--json]
@@ -1040,7 +1290,11 @@ function usage() {
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const [command, ...rest] = argv;
+  let [command, ...rest] = argv;
+  if (command === "-p" || command === "--prompt") {
+    command = "organize";
+    rest = argv;
+  }
   if (!command || command === "help" || command === "--help") {
     process.stdout.write(usage());
     return;
@@ -1063,6 +1317,12 @@ export async function main(argv = process.argv.slice(2)) {
     process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `valid template ${result.template} (${result.digest})\n`);
     return;
   }
+  if (command === "organize") {
+    const { positional, options } = parseOrganizerOptions(rest);
+    if (positional.length) fail("organize accepts no positional arguments");
+    await organizeRemote(options);
+    return;
+  }
   if (command === "deploy") {
     const { positional, options } = parseOptions(rest, { booleans: ["task-stdin", "json"] });
     if (positional.length !== 1) fail("deploy requires one template name");
@@ -1079,6 +1339,12 @@ export async function main(argv = process.argv.slice(2)) {
     const { positional, options } = parseOptions(rest);
     if (positional.length) fail("internal-run accepts no positional arguments");
     await internalRun(options);
+    return;
+  }
+  if (command === "internal-organize") {
+    const { positional, options } = parseOptions(rest);
+    if (positional.length) fail("internal-organize accepts no positional arguments");
+    await internalOrganize(options);
     return;
   }
   if (command === "internal-pod-run") {

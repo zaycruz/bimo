@@ -27,6 +27,7 @@ COPY --chown=root:root bin ./bin
 COPY --chown=root:root src ./src
 COPY --chown=root:root starters ./starters
 COPY --chown=root:root templates ./templates
+COPY --chown=root:root etc/organizer ./etc/organizer
 COPY --chown=root:root --chmod=0444 etc/opencode/opencode.json /etc/opencode/opencode.json
 
 COPY --chown=root:root starters/react/package.json starters/react/package-lock.json /opt/monolith-react/
@@ -34,7 +35,7 @@ RUN cd /opt/monolith-react \
     && npm ci --include=dev --ignore-scripts --no-audit --no-fund \
     && npm cache clean --force
 
-RUN chmod 0555 /app/bin/monolith /etc/opencode \
+RUN chmod 0555 /app/bin/monolith /app/bin/monolith-git-askpass /etc/opencode \
     && chown -R root:root /app /etc/opencode
 
 USER node

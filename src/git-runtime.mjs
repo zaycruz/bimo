@@ -1300,19 +1300,20 @@ export class GitRuntime {
     });
   }
 
-  async #unlockControllerPaths(record, directories, deadlineAt) {
-    for (const directory of directories) {
-      const full = await this.#assertSafeDirectory(record.root, directory, deadlineAt);
-      const entries = await collectTree(full, deadlineAt);
-      await checked(deadlineAt, () => chmod(full, 0o755));
-      for (const entry of entries) {
-        if (entry.metadata.isSymbolicLink()) fail(`${entry.relative} is a symbolic link`);
-        if (!entry.metadata.isDirectory() && !entry.metadata.isFile()) fail(`${entry.relative} is a special file`);
-        await checked(deadlineAt, () => chmod(
-          entry.full,
-          entry.metadata.isDirectory() ? 0o755 : ((entry.metadata.mode & 0o111) ? 0o755 : 0o644),
-        ));
-      }
+  async #unlockControllerWorktree(record, deadlineAt) {
+    const controllerUid = typeof process.getuid === "function" ? process.getuid() : 0;
+    const controllerGid = typeof process.getgid === "function" ? process.getgid() : 0;
+    const entries = await collectTree(record.root, deadlineAt);
+    await checked(deadlineAt, () => chown(record.root, controllerUid, controllerGid));
+    await checked(deadlineAt, () => chmod(record.root, 0o755));
+    for (const entry of entries) {
+      if (entry.metadata.isSymbolicLink()) fail(`${entry.relative} is a symbolic link`);
+      if (!entry.metadata.isDirectory() && !entry.metadata.isFile()) fail(`${entry.relative} is a special file`);
+      await checked(deadlineAt, () => chown(entry.full, controllerUid, controllerGid));
+      await checked(deadlineAt, () => chmod(
+        entry.full,
+        entry.metadata.isDirectory() ? 0o755 : ((entry.metadata.mode & 0o111) ? 0o755 : 0o644),
+      ));
     }
   }
 
@@ -1333,7 +1334,7 @@ export class GitRuntime {
         fail("accepted result escaped its captured writer scope");
       }
     }
-    await this.#unlockControllerPaths(record, resultRecord.writeDirectories, deadlineAt);
+    await this.#unlockControllerWorktree(record, deadlineAt);
     await this.#git(["update-index", "--refresh"], {
       deadlineAt,
       gitDir: record.gitDir,
@@ -1559,11 +1560,7 @@ export class GitRuntime {
           fail(`candidate tree does not exactly preserve the accepted ${slot} result`);
         }
       }
-      await this.#unlockControllerPaths(
-        record,
-        FIXED_INTEGRATION_ORDER.flatMap(slot => bySlot.get(slot).writeDirectories),
-        deadlineAt,
-      );
+      await this.#unlockControllerWorktree(record, deadlineAt);
       await this.#git(["reset", "--hard", candidateSha], {
         deadlineAt,
         gitDir: record.gitDir,

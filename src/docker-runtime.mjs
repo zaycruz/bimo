@@ -401,7 +401,8 @@ export function sourceVerifierCreateArgs({
     "--network", "none",
     ...commonSandbox({ memory: "2g", cpus: "1.5", pids: "256" }),
     "--ulimit", "fsize=8388608:8388608",
-    "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,uid=1000,gid=1000",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000",
+    "--tmpfs", "/test-tools:rw,exec,nosuid,nodev,size=32m,uid=1000,gid=1000",
     "--tmpfs", "/home/node:rw,nosuid,nodev,size=256m,uid=1000,gid=1000",
     "--mount", bind(path.resolve(snapshotHost), "/workspace", true),
     ...(suite === "baseline"

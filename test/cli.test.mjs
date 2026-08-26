@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -111,6 +112,7 @@ else if (args[0] === "save") process.stdout.write("fake-image-archive");
 `;
   const ssh = `#!/usr/bin/env node
 const fs = require("node:fs");
+const { createHash } = require("node:crypto");
 const args = process.argv.slice(2);
 const command = args.slice(5);
 const log = value => fs.appendFileSync(process.env.MONOLITH_TEST_LOG, JSON.stringify(value) + "\\n");
@@ -132,7 +134,8 @@ if (command[0] === "docker" && command[1] === "load") {
       templateDigest: envelope.templateDigest,
       image: envelope.image,
     });
-    const internalCommand = command.find(value => value === "internal-pod-run" || value === "internal-publish");
+    const internalCommand = command.find(value => value === "internal-pod-run"
+      || value === "internal-publish" || value === "internal-organize");
     if (process.env.MONOLITH_TEST_CONTROLLER === "conflict") {
       process.stderr.write("Conflict: controller name is already in use\\n");
       process.exitCode = 125;
@@ -182,6 +185,34 @@ if (command[0] === "docker" && command[1] === "load") {
           baseSha: envelope.baseSha,
         },
       }) + "\\n");
+    } else if (process.env.MONOLITH_TEST_CONTROLLER === "organize-success"
+      && internalCommand === "internal-organize") {
+      const template = process.env.MONOLITH_TEST_ORGANIZER_TEMPLATE;
+      const templateDigest = process.env.MONOLITH_TEST_ORGANIZER_DIGEST;
+      const acceptedOptions = JSON.parse(process.env.MONOLITH_TEST_ORGANIZER_OPTIONS);
+      log({
+        tool: "organizer-envelope",
+        fields: Object.keys(envelope).sort(),
+        version: envelope.version,
+        deployment: envelope.deployment,
+        runId: envelope.runId,
+        prompt: envelope.prompt,
+        agents: envelope.agents,
+        model: envelope.model,
+        image: envelope.image,
+      });
+      const vote = { template, templateDigest, reason: "The installed workflow matches the assignment." };
+      process.stdout.write(JSON.stringify({
+        version: 1,
+        status: "planned",
+        promptSha256: createHash("sha256").update(envelope.prompt, "utf8").digest("hex"),
+        template,
+        templateDigest,
+        agents: envelope.agents,
+        votes: Array.from({ length: envelope.agents }, () => vote),
+        handoff: { template, templateDigest, acceptedOptions },
+        runId: envelope.runId,
+      }) + "\\n");
     } else {
       process.stdout.write(JSON.stringify({
         template: envelope.template,
@@ -218,6 +249,14 @@ else process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
       MONOLITH_TEST_REMOTE_INSPECT: imageInspect(remoteImageId, { config: remoteConfig, layers: remoteLayers }),
       MONOLITH_TEST_CONTROLLER: controller,
       MONOLITH_TEST_POD_CANDIDATE: POD_CANDIDATE_SHA,
+      MONOLITH_TEST_ORGANIZER_TEMPLATE: "react-app",
+      MONOLITH_TEST_ORGANIZER_DIGEST: (await loadWorkflow("react-app", {
+        templateRoot: path.join(root, "templates"),
+      })).templateDigest,
+      MONOLITH_TEST_ORGANIZER_OPTIONS: JSON.stringify([
+        "--deployment", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
+        "--secret-ref", "--public-url", "--port",
+      ]),
     },
   };
 }
@@ -250,10 +289,23 @@ function podDeployArgs(taskFile) {
     "--host", "example.invalid",
     "--task-file", taskFile,
     "--secret-ref", "op://Test/Monolith/openrouter",
-    "--github-secret-ref", "op://Test/Monolith/github",
+    "--github-secret-ref", "op://Test/Monolith publisher/github",
     "--repository", "https://github.com/zaycruz/monolith-v2.git",
     "--base-sha", POD_BASE_SHA,
     "--target-branch", "main",
+    "--image", "monolith-workflow:test",
+    "--json",
+  ];
+}
+
+function organizeArgs(prompt, agents) {
+  return [
+    "organize",
+    "--prompt", prompt,
+    ...(agents === undefined ? [] : ["--agents", String(agents)]),
+    "--deployment", "organizer-demo",
+    "--host", "example.invalid",
+    "--secret-ref", "op://Test/Monolith/openrouter",
     "--image", "monolith-workflow:test",
     "--json",
   ];
@@ -304,6 +356,217 @@ test("the installed CLI validates the packaged fixed engineering pod", async () 
   assert.equal(result.kind, "engineering-pod");
   assert.equal(result.template, "parallel-engineering-pod");
   assert.match(result.digest, /^[a-f0-9]{64}$/);
+});
+
+test("organize transfers content-verified image without retagging and runs one exact sandboxed controller", async t => {
+  const prompt = "Build a small status page with a readable health indicator.";
+  const tools = await fakeDeployTools(t, { controller: "organize-success" });
+  const result = await invoke(organizeArgs(prompt, 2), { env: tools.env });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+
+  const response = JSON.parse(result.stdout);
+  assert.deepEqual(Object.keys(response).sort(), [
+    "agents", "handoff", "promptSha256", "runId", "status", "template", "templateDigest", "version", "votes",
+  ]);
+  assert.equal(response.version, 1);
+  assert.equal(response.status, "planned");
+  assert.equal(response.template, "react-app");
+  assert.equal(response.templateDigest, tools.env.MONOLITH_TEST_ORGANIZER_DIGEST);
+  assert.equal(response.agents, 2);
+  assert.equal(response.promptSha256, createHash("sha256").update(prompt, "utf8").digest("hex"));
+  assert.equal(response.votes.length, 2);
+  assert.ok(response.votes.every(vote => (
+    Object.keys(vote).sort().join(",") === "reason,template,templateDigest"
+      && vote.template === response.template
+      && vote.templateDigest === response.templateDigest
+  )));
+  assert.deepEqual(response.handoff, {
+    template: "react-app",
+    templateDigest: response.templateDigest,
+    acceptedOptions: [
+      "--deployment", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
+      "--secret-ref", "--public-url", "--port",
+    ],
+  });
+
+  const entries = await readCommandLog(tools.logFile);
+  const localCommands = entries.filter(entry => entry.tool === "docker").map(entry => entry.args);
+  const remoteEntries = entries.filter(entry => entry.tool === "ssh");
+  const remoteCommands = remoteEntries.map(entry => entry.command);
+  const localTag = localCommands.find(command => command[0] === "image" && command[1] === "tag");
+  assert.ok(localTag);
+  assert.equal(localTag[2], LOCAL_IMAGE_ID);
+  assert.match(localTag[3], /^monolith-transfer:[a-f0-9]{12}-[a-f0-9]{32}$/);
+  const transferTag = localTag[3];
+  const remoteInspect = remoteCommands.find(command => (
+    command[0] === "docker" && command[1] === "image" && command[2] === "inspect"
+  ));
+  assert.deepEqual(remoteInspect, ["docker", "image", "inspect", transferTag]);
+  const remoteRun = remoteCommands.find(command => command[0] === "docker" && command[1] === "run");
+  const hostRoot = "/var/lib/monolith/deployments/organizer-demo";
+  assert.deepEqual(remoteRun, [
+    "docker", "run", "--rm", "-i",
+    "--name", "monolith-organizer-demo-controller",
+    "--user", "0:0",
+    "--read-only",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    "--pids-limit", "128",
+    "--memory", "512m",
+    "--cpus", "0.5",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=128m",
+    "--volume", "/var/run/docker.sock:/var/run/docker.sock:rw",
+    "--volume", `${hostRoot}/runs:/state:rw`,
+    "--volume", `${hostRoot}/worktrees:/worktrees:rw`,
+    REMOTE_IMAGE_ID,
+    "internal-organize", "--host-root", hostRoot,
+  ]);
+  assert.equal(remoteCommands.some(command => (
+    command[0] === "docker" && command[1] === "image" && command[2] === "tag"
+  )), false);
+  assert.ok(remoteCommands.some(command => command[0] === "mkdir"
+    && command.includes(`${hostRoot}/runs`) && command.includes(`${hostRoot}/worktrees`)));
+  assert.ok(remoteCommands.some(command => command[0] === "chmod"
+    && command.includes(hostRoot) && command.includes(`${hostRoot}/runs`)
+    && command.includes(`${hostRoot}/worktrees`)));
+  for (const mount of [
+    "/var/run/docker.sock:/var/run/docker.sock:rw",
+    `${hostRoot}/runs:/state:rw`,
+    `${hostRoot}/worktrees:/worktrees:rw`,
+  ]) assert.ok(remoteRun.includes(mount), `organizer controller missing ${mount}`);
+  assert.equal(remoteRun.includes("bootstrap"), false);
+  assert.equal(remoteCommands.some(command => command.some(value => (
+    value === "internal-run" || value === "internal-pod-run" || value === "internal-publish"
+      || value === "github" || value === "app"
+  ))), false);
+
+  const organizerEnvelope = entries.find(entry => entry.tool === "organizer-envelope");
+  assert.deepEqual(organizerEnvelope.fields, [
+    "agents", "deployment", "image", "key", "model", "prompt", "runId", "version",
+  ]);
+  assert.equal(organizerEnvelope.deployment, "organizer-demo");
+  assert.equal(organizerEnvelope.agents, 2);
+  assert.equal(organizerEnvelope.prompt, prompt);
+  assert.equal(organizerEnvelope.image, REMOTE_IMAGE_ID);
+  assert.equal(organizerEnvelope.runId, response.runId);
+  const serializedLog = JSON.stringify(entries);
+  assert.equal(serializedLog.includes(`sk-or-v1-${"k".repeat(32)}`), false);
+
+  const remoteCleanup = remoteCommands.filter(command => command.join(" ") === `docker image rm -f ${transferTag}`);
+  const localCleanup = localCommands.filter(command => command.join(" ") === `image rm -f ${transferTag}`);
+  assert.equal(remoteCleanup.length, 1);
+  assert.equal(localCleanup.length, 1);
+  assert.ok(remoteCommands.indexOf(remoteCleanup[0]) > remoteCommands.indexOf(remoteRun));
+  assert.ok(localCommands.indexOf(localCleanup[0]) > localCommands.findIndex(command => command[0] === "save"));
+});
+
+test("organize explicit and root prompt aliases preserve short/long option parity", async t => {
+  const prompt = "Build a small status page with a readable health indicator.";
+  const tools = await fakeDeployTools(t, { controller: "organize-success" });
+  const variants = [
+    organizeArgs(prompt, 2),
+    ["organize", "-p", prompt, "-n", "2", "--deployment", "organizer-demo", "--host", "example.invalid",
+      "--secret-ref", "op://Test/Monolith/openrouter", "--image", "monolith-workflow:test", "--json"],
+    ["-p", prompt, "--agents", "2", "--deployment", "organizer-demo", "--host", "example.invalid",
+      "--secret-ref", "op://Test/Monolith/openrouter", "--image", "monolith-workflow:test", "--json"],
+  ];
+  const responses = [];
+  for (const args of variants) {
+    const result = await invoke(args, { env: tools.env });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    responses.push(JSON.parse(result.stdout));
+  }
+  const comparable = ({ runId, ...response }) => response;
+  assert.deepEqual(comparable(responses[1]), comparable(responses[0]));
+  assert.deepEqual(comparable(responses[2]), comparable(responses[0]));
+
+  const literalOptionPrompt = await invoke([
+    "organize", "--prompt", "-n", "--agents", "1",
+    "--deployment", "organizer-demo", "--host", "example.invalid",
+    "--secret-ref", "op://Test/Monolith/openrouter",
+    "--image", "monolith-workflow:test", "--json",
+  ], { env: tools.env });
+  assert.equal(literalOptionPrompt.code, 0, literalOptionPrompt.stderr);
+  assert.equal(
+    JSON.parse(literalOptionPrompt.stdout).promptSha256,
+    createHash("sha256").update("-n", "utf8").digest("hex"),
+  );
+});
+
+test("organize defaults to one agent and accepts the 1-to-3 agent bounds", async t => {
+  const prompt = "Build a small status page with a readable health indicator.";
+  const tools = await fakeDeployTools(t, { controller: "organize-success" });
+  for (const [args, expected] of [[organizeArgs(prompt), 1], [organizeArgs(prompt, 1), 1], [organizeArgs(prompt, 3), 3]]) {
+    const result = await invoke(args, { env: tools.env });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).agents, expected);
+  }
+});
+
+test("organize rejects missing, empty, and unsafe prompts before Docker", async t => {
+  const tools = await fakeDeployTools(t);
+  const common = [
+    "organize", "--deployment", "organizer-demo", "--host", "example.invalid",
+    "--secret-ref", "op://Test/Monolith/openrouter", "--image", "monolith-workflow:test", "--json",
+  ];
+  for (const [promptArgs, pattern] of [
+    [[], /prompt must be a non-empty string/],
+    [["--prompt", ""], /prompt must be a non-empty string/],
+    [["--prompt", " \t\n"], /prompt must be a non-empty string/],
+    [["--prompt", "unsafe\u0007prompt"], /prompt contains unsafe control characters/],
+  ]) {
+    const result = await invoke([...common.slice(0, 1), ...promptArgs, ...common.slice(1)], { env: tools.env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, pattern);
+  }
+  assert.deepEqual(await readCommandLog(tools.logFile), []);
+});
+
+test("organize rejects out-of-bounds, duplicate, and unknown options before Docker", async t => {
+  const tools = await fakeDeployTools(t);
+  const valid = organizeArgs("Build a small status page.");
+  for (const [args, pattern] of [
+    [organizeArgs("Build a small status page.", 0), /--agents must be an integer from 1 to 3/],
+    [organizeArgs("Build a small status page.", 4), /--agents must be an integer from 1 to 3/],
+    [organizeArgs("Build a small status page.", 1.5), /--agents must be an integer from 1 to 3/],
+    [[...valid.slice(0, 3), "--prompt", "another", ...valid.slice(3)], /duplicate option: --prompt/],
+    [[...valid, "--json"], /duplicate option: --json/],
+    [[...valid, "--unknown", "value"], /unknown option: --unknown/],
+  ]) {
+    const result = await invoke(args, { env: tools.env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, pattern);
+  }
+  assert.deepEqual(await readCommandLog(tools.logFile), []);
+});
+
+test("internal-organize rejects exact envelope violations before Docker", async t => {
+  const tools = await fakeDeployTools(t);
+  const base = {
+    version: 1,
+    deployment: "organizer-demo",
+    runId: "organizer-run-1",
+    prompt: "Build a small status page.",
+    agents: 1,
+    key: `sk-or-v1-${"k".repeat(32)}`,
+    model: "openrouter/deepseek/deepseek-v4-flash",
+    image: LOCAL_IMAGE_ID,
+  };
+  for (const [envelope, pattern] of [
+    [{ ...base, extra: true }, /invalid shape|exactly/],
+    [{ ...base, image: undefined }, /invalid shape|exactly/],
+    [{ ...base, agents: 0 }, /controller envelope is invalid/],
+  ]) {
+    if (envelope.image === undefined) delete envelope.image;
+    const result = await invoke([
+      "internal-organize", "--host-root", "/var/lib/monolith/deployments/organizer-demo",
+    ], { input: JSON.stringify(envelope), env: tools.env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, pattern);
+  }
+  assert.deepEqual(await readCommandLog(tools.logFile), []);
 });
 
 test("logs rejects remote-shell syntax before SSH", async () => {

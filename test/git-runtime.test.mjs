@@ -42,6 +42,33 @@ async function git(cwd, args) {
   return result.stdout.trim();
 }
 
+function gitRunnerWithHook(hook) {
+  return async (command, args, options = {}) => {
+    await hook({ command, args, ...options });
+    return new Promise((resolve, reject) => {
+      const child = execFile(command, args, {
+        cwd: options.cwd,
+        env: options.env,
+        encoding: null,
+        maxBuffer: options.maxOutputBytes ?? 4 * 1024 * 1024,
+        signal: options.signal,
+      }, (error, stdout, stderr) => {
+        if (error && !Number.isInteger(error.code)) {
+          reject(error);
+          return;
+        }
+        resolve({
+          stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout ?? ""),
+          stderr: Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? ""),
+          exitCode: Number.isInteger(error?.code) ? error.code : 0,
+        });
+      });
+      child.stdin.on("error", () => {});
+      child.stdin.end(options.input);
+    });
+  };
+}
+
 async function repositoryFixture(t, { externalSymlink } = {}) {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-git-runtime-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
@@ -334,7 +361,23 @@ test("authors the checkpoint commit itself with an exact bounded diff and disabl
 
 test("combines only same-attempt dependency results and integrates the fixed slots in deterministic order", async (t) => {
   const fixture = await repositoryFixture(t);
-  const runtime = runtimeFor(fixture);
+  let controllerResets = 0;
+  const runtime = runtimeFor(fixture, {
+    runner: gitRunnerWithHook(async ({ args }) => {
+      const workTree = args.find(argument => argument.startsWith("--work-tree="))?.slice("--work-tree=".length);
+      const controllerMaterialization = workTree?.includes("-integration-")
+        || workTree?.includes("-engineering-a-resume-");
+      if (!controllerMaterialization || !args.includes("reset") || !args.includes("--hard")) return;
+      for (const directory of [workTree, path.join(workTree, ".github", "workflows")]) {
+        assert.notEqual((await lstat(directory)).mode & 0o200, 0, `${directory} must be controller-writable before reset`);
+      }
+      await Promise.all([
+        unlink(path.join(workTree, ".gitignore")),
+        unlink(path.join(workTree, ".github", "workflows", "ci.yml")),
+      ]);
+      controllerResets += 1;
+    }),
+  });
   await prepare(runtime, fixture);
 
   const engineeringA = await writer(runtime, fixture, { ownerSlot: "engineering-a" });
@@ -364,6 +407,12 @@ test("combines only same-attempt dependency results and integrates the fixed slo
   assert.match(combined.baseSha, /^[a-f0-9]{40}$/);
   assert.equal(await readFile(path.join(combined.workspace.root, "src", "app.mjs"), "utf8"), "export const app = 'requester checkpoint';\n");
   assert.equal(await readFile(path.join(combined.workspace.root, "templates", "page.html"), "utf8"), "<h1>Dependency</h1>\n");
+  assert.equal(await readFile(path.join(combined.workspace.root, ".gitignore"), "utf8"), "src/ignored.txt\n");
+  assert.equal(await readFile(path.join(combined.workspace.root, ".github", "workflows", "ci.yml"), "utf8"), "name: CI\n");
+  assert.equal((await lstat(combined.workspace.root)).mode & 0o777, 0o555);
+  assert.equal((await lstat(path.join(combined.workspace.root, ".github", "workflows"))).mode & 0o777, 0o555);
+  assert.equal((await lstat(path.join(combined.workspace.root, ".git"))).mode & 0o777, 0o400);
+  assert.equal((await lstat(path.join(combined.workspace.root, ".gitignore"))).mode & 0o777, 0o444);
 
   await writeFile(path.join(combined.workspace.root, "src", "app.mjs"), "export const app = 'resumed';\n");
   const requesterResult = await checkpoint(runtime, combined.workspace, "engineering-a");
@@ -392,6 +441,13 @@ test("combines only same-attempt dependency results and integrates the fixed slo
   assert.equal(await readFile(path.join(integrated.workspaceRoot, "src", "app.mjs"), "utf8"), "export const app = 'resumed';\n");
   assert.equal(await readFile(path.join(integrated.workspaceRoot, "templates", "page.html"), "utf8"), "<h1>Dependency</h1>\n");
   assert.equal(await readFile(path.join(integrated.workspaceRoot, "test", "app.test.mjs"), "utf8"), "// exact candidate test\n");
+  assert.equal(await readFile(path.join(integrated.workspaceRoot, ".gitignore"), "utf8"), "src/ignored.txt\n");
+  assert.equal(await readFile(path.join(integrated.workspaceRoot, ".github", "workflows", "ci.yml"), "utf8"), "name: CI\n");
+  assert.equal((await lstat(integrated.workspaceRoot)).mode & 0o777, 0o555);
+  assert.equal((await lstat(path.join(integrated.workspaceRoot, ".github", "workflows"))).mode & 0o777, 0o555);
+  assert.equal((await lstat(path.join(integrated.workspaceRoot, ".git"))).mode & 0o777, 0o400);
+  assert.equal((await lstat(path.join(integrated.workspaceRoot, ".gitignore"))).mode & 0o777, 0o444);
+  assert.equal((await lstat(path.join(integrated.workspaceRoot, ".github", "workflows", "ci.yml"))).mode & 0o777, 0o444);
 
   const repeated = await runtime.integrate({
     attempt: 1,
@@ -402,6 +458,7 @@ test("combines only same-attempt dependency results and integrates the fixed slo
     deadlineAt: futureDeadline(),
   });
   assert.equal(repeated.candidateSha, integrated.candidateSha, "integration is deterministic for exact accepted commits");
+  assert.equal(controllerResets, 4);
 
   const scan = await runtime.scan({
     baseSha: fixture.baseSha,

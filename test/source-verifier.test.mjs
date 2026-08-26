@@ -202,6 +202,12 @@ test("runs the immutable base regression suite through the fixed profile", async
 
 test("the production runner executes the fixed candidate profile with a sanitized child environment", async t => {
   const workspaceRoot = await temporaryWorkspace(t);
+  await writeFile(path.join(workspaceRoot, "package.json"), JSON.stringify({
+    name: "fixture",
+    scripts: {
+      test: "node -e \"if (process.env.TMPDIR !== '/test-tools') process.exit(23)\"",
+    },
+  }));
   const expectedSnapshot = await scanSourceSnapshot(workspaceRoot);
   const receipt = await verifySourceCandidate({
     workspaceRoot,

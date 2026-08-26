@@ -26,7 +26,7 @@ function safeEnvironment() {
   return {
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     HOME: "/tmp/home",
-    TMPDIR: "/tmp",
+    TMPDIR: "/test-tools",
     LANG: "C.UTF-8",
     CI: "1",
     GIT_CONFIG_NOSYSTEM: "1",

@@ -495,6 +495,8 @@ test("source verification containers receive only immutable snapshots and no con
   assert.match(renderedCandidate, new RegExp(`--expected-snapshot-sha ${"c".repeat(64)}`));
   assert.match(renderedBaseline, /dst=\/workspace\/test,readonly/);
   for (const rendered of [renderedCandidate, renderedBaseline]) {
+    assert.match(rendered, /--tmpfs \/tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000/);
+    assert.match(rendered, /--tmpfs \/test-tools:rw,exec,nosuid,nodev,size=32m,uid=1000,gid=1000/);
     assert.doesNotMatch(rendered, /docker\.sock|dst=\/state|MONOLITH_GATEWAY|sk-or-v1|github_pat_/);
   }
 });
