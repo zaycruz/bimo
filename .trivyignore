@@ -1,0 +1,43 @@
+# Accepted vulnerabilities: fixable upstream but no remediation path ships today.
+# Each entry names the affected component and why the risk is accepted.
+# Revisit on every dependency or base-image bump; remove entries as fixes ship.
+
+# npm 12.0.2 (installed over node:22-slim) bundles these unfixed versions.
+# Latest npm release predates the fixed deps; we cannot patch npm's own bundles.
+# The npm CLI runs only at image build time, never at runtime.
+CVE-2026-14257 # brace-expansion 5.0.7 (fix: 5.0.8), bundled in npm 12.0.2
+CVE-2026-69152 # brace-expansion 5.0.7 (fix: 5.0.9), bundled in npm 12.0.2
+CVE-2026-69192 # ip-address 10.2.0 (fix: 10.3.1), bundled in npm 12.0.2
+CVE-2026-73566 # tar 7.5.19 (fix: 7.5.21), bundled in npm 12.0.2
+
+# esbuild 0.25.12 binary (Go stdlib 1.23.12) in /opt/bimo-react/node_modules.
+# esbuild 0.25.x is the newest line vite 6.4.3 accepts; no 0.25.x build ships a
+# fixed Go toolchain. esbuild is a build-time devDependency of the React
+# starter; it never runs in the deployed app.
+CVE-2025-68121 # CRITICAL, fix: Go 1.24.13/1.25.7 — no esbuild 0.25.x release has it
+CVE-2025-61726 # esbuild 0.25.12 Go stdlib
+CVE-2025-61729 # esbuild 0.25.12 Go stdlib
+CVE-2026-25679 # esbuild 0.25.12 Go stdlib
+CVE-2026-27145 # esbuild 0.25.12 Go stdlib
+CVE-2026-32280 # esbuild 0.25.12 Go stdlib
+CVE-2026-32281 # esbuild 0.25.12 Go stdlib
+CVE-2026-32283 # esbuild 0.25.12 Go stdlib
+CVE-2026-33811 # esbuild 0.25.12 Go stdlib
+CVE-2026-33814 # esbuild 0.25.12 Go stdlib
+CVE-2026-39820 # esbuild 0.25.12 Go stdlib
+CVE-2026-39822 # esbuild 0.25.12 Go stdlib
+CVE-2026-39836 # esbuild 0.25.12 Go stdlib
+CVE-2026-42499 # esbuild 0.25.12 Go stdlib
+CVE-2026-42504 # esbuild 0.25.12 Go stdlib
+
+# docker 29.7.2 CLI binary (Go stdlib 1.26.5) copied from docker:29.7.2-cli.
+# Latest published CLI image; fixes land in Go 1.26.6/1.25.13, not yet shipped
+# in any docker image. These seven also affect the esbuild binary above.
+CVE-2026-33818 # docker CLI + esbuild Go stdlib (fix: Go 1.26.6/1.25.13)
+CVE-2026-39821 # docker CLI + esbuild Go stdlib (fix: Go 1.26.6/1.25.13)
+CVE-2026-56853 # docker CLI + esbuild Go stdlib (fix: Go 1.26.6/1.25.13)
+CVE-2026-56858 # docker CLI + esbuild Go stdlib (fix: Go 1.26.6/1.25.13)
+CVE-2026-56859 # docker CLI + esbuild Go stdlib (fix: Go 1.26.6/1.25.13)
+CVE-2026-56860 # docker CLI + esbuild Go stdlib (fix: Go 1.26.6/1.25.13)
+CVE-2026-56862 # docker CLI + esbuild Go stdlib (fix: Go 1.26.6/1.25.13)
+CVE-2026-46600 # docker CLI only (fix: Go 1.26.6)
