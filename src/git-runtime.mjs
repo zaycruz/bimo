@@ -827,6 +827,7 @@ export class GitRuntime {
       await this.#secureWorktree(record, deadlineAt);
       this.#workspaces.set(id, record);
     } catch (error) {
+      await this.#unlockForRemoval(root, deadlineAt).catch(() => {});
       await this.#git(["worktree", "remove", "--force", "--", root], {
         deadlineAt,
         allowedExitCodes: [0, 128],
@@ -1901,6 +1902,8 @@ export class GitRuntime {
   }
 
   async #unlockForRemoval(root, deadlineAt) {
+    const controllerUid = typeof process.getuid === "function" ? process.getuid() : 0;
+    const controllerGid = typeof process.getgid === "function" ? process.getgid() : 0;
     let metadata;
     try {
       metadata = await checked(deadlineAt, () => lstat(root));
@@ -1909,13 +1912,16 @@ export class GitRuntime {
       throw error;
     }
     if (!metadata.isDirectory()) {
+      await checked(deadlineAt, () => chown(root, controllerUid, controllerGid));
       await checked(deadlineAt, () => chmod(root, 0o600));
       return;
     }
+    await checked(deadlineAt, () => chown(root, controllerUid, controllerGid));
     await checked(deadlineAt, () => chmod(root, 0o700));
     const entries = await collectTree(root, deadlineAt);
     for (const entry of entries) {
       if (entry.metadata.isSymbolicLink()) continue;
+      await checked(deadlineAt, () => chown(entry.full, controllerUid, controllerGid));
       await checked(deadlineAt, () => chmod(entry.full, entry.metadata.isDirectory() ? 0o700 : 0o600));
     }
   }
@@ -1960,11 +1966,6 @@ export class GitRuntime {
       await rm(this.#home, { recursive: true, force: true });
       if (!retainForPublication) await rm(this.#bareRoot, { recursive: true, force: true });
       await rm(this.#markerPath, { force: true });
-      if (!retainForPublication) {
-        await rmdir(this.#gitRoot).catch(error => {
-          if (!["ENOENT", "ENOTEMPTY", "EBUSY"].includes(error?.code)) throw error;
-        });
-      }
     }
     this.#closed = true;
   }

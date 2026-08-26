@@ -514,6 +514,7 @@ test("pod deploy computes without GitHub authority then publishes one exact draf
   assert.ok(compute, "compute controller was not launched");
   assert.ok(publisher, "isolated publisher was not launched");
   assert.equal(compute[compute.indexOf("--name") + 1], "monolith-pod-demo-controller");
+  assert.equal(compute[compute.indexOf("--cap-add") + 1], "CHOWN");
   assert.equal(publisher[publisher.indexOf("--name") + 1], "monolith-pod-demo-publisher");
   assert.equal(remoteCommands.some(command => (
     command[0] === "docker" && command[1] === "rm" && command.includes("monolith-pod-demo-publisher")

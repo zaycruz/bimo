@@ -8,6 +8,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readdir,
   readFile,
   rm,
   symlink,
@@ -184,6 +185,7 @@ test("prepares only an allowlisted GitHub repository at an exact SHA-1 base", as
   assert.deepEqual(prepared.existingDirectories, ["src", "templates", "test"]);
   await runtime.close({ deadlineAt: futureDeadline() });
   await assert.rejects(lstat(path.join(fixture.temporary, "controller", "repository.git")), /ENOENT/);
+  assert.deepEqual(await readdir(path.join(fixture.temporary, "controller")), []);
 });
 
 test("creates each writer from the immutable run base with only validated writable directories", async (t) => {

@@ -587,6 +587,7 @@ async function deploy(template, options) {
         "--user", "0:0",
         "--read-only",
         "--cap-drop", "ALL",
+        "--cap-add", "CHOWN",
         "--security-opt", "no-new-privileges",
         "--pids-limit", "384",
         "--memory", "2g",
