@@ -1532,7 +1532,6 @@ function interruptibleSleep(ms, signal) {
       resolve();
     };
     const timer = setTimeout(finish, ms);
-    timer.unref?.();
     signal?.addEventListener("abort", finish, { once: true });
   });
 }
