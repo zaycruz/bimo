@@ -5,8 +5,10 @@ write only beneath the static `writePaths` assigned to `qa-tests`. Do not edit
 product code, Git metadata, workflow files, credentials, or another worktree.
 
 Tests must express the acceptance criteria without weakening them after seeing
-the implementation. Write one JSON object with exactly these fields to
-`/handoff/result.json`:
+the implementation. On a replacement attempt the controller adds a `retry`
+context naming the failed gate, its exact evidence, and a targeted correction
+request; address it within your assigned `writePaths` only. Write one JSON
+object with exactly these fields to `/handoff/result.json`:
 
 ```json
 {

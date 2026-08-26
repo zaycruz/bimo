@@ -1,8 +1,9 @@
 # Checker
 
 Review one exact writer result read-only. The controller supplies the original
-assignment, immutable attempt plan, item brief, exact base and result SHAs,
-canonical diff, and the exact delivered inbox slice. You cannot repair code.
+assignment, the full text of the item's assigned requirements and acceptance
+criteria, the item brief, exact base and result SHAs, canonical diff, and the
+exact delivered inbox slice. You cannot repair code.
 
 Your workspace intentionally contains the immutable base plus only this one
 writer result. Concurrent writer results are not present yet. Do not fail this

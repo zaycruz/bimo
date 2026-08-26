@@ -343,6 +343,14 @@ test("fans out all three writers, checks exact results, and marks the tested can
       if (input.role === "checker") {
         const writerId = ["engineering-a", "engineering-b", "qa-tests"]
           .find(slot => input.executionId.endsWith(slot));
+        const prompt = promptContext(input.prompt);
+        const writer = attemptPlan.writers[writerId];
+        assert.deepEqual(prompt.requirements, attemptPlan.requirements
+          .filter(item => writer.requirementIds.includes(item.id)));
+        assert.deepEqual(prompt.acceptanceCriteria, attemptPlan.acceptanceCriteria
+          .filter(item => writer.acceptanceIds.includes(item.id)));
+        assert(prompt.requirements.every(item => typeof item.text === "string" && item.text.length > 0));
+        assert(prompt.acceptanceCriteria.every(item => typeof item.text === "string" && item.text.length > 0));
         const commit = calls.find(call => call.type === "commit" && call.input.workItem.id === writerId).input;
         const resultSha = {
           "engineering-a": SHA.engineeringA,
@@ -882,6 +890,108 @@ test("a red Testing gate starts a complete next attempt from the immutable run b
   assert.equal(writerExecutions.length, 6);
   assert.equal(verificationCalls, 1);
   assert.deepEqual(calls.filter(call => call.type === "integrate").map(call => call.input.attempt), [1, 2]);
+});
+
+test("retry writers receive the failed gate, its exact evidence, and a targeted correction", async () => {
+  const calls = [];
+  const store = createStore();
+  const source = createSource(calls);
+  const writerPrompts = [];
+
+  const agents = {
+    async cancel() {
+      calls.push({ type: "cancel" });
+    },
+    async runAgentExecution(input) {
+      calls.push({ type: "agent", input });
+      const attemptPlan = plan(input.attempt);
+      if (input.role === "planner") return { receipt: attemptPlan };
+      if (["engineering-a", "engineering-b", "qa-tests"].includes(input.role)) {
+        writerPrompts.push({ executionId: input.executionId, context: promptContext(input.prompt) });
+        return { receipt: writerReceipt(input.role, attemptPlan) };
+      }
+      if (input.role === "checker") {
+        const prompt = promptContext(input.prompt);
+        const writer = prompt.workItem;
+        return {
+          receipt: {
+            outcome: "passed",
+            baseSha: prompt.baseSha,
+            resultSha: prompt.resultSha,
+            diffSha256: prompt.diffSha256,
+            what: `Checked ${writer.ownerSlot}.`,
+            why: "The exact result passes.",
+            evidence: [`checker:${writer.ownerSlot}:passed`],
+            requirementIds: [...writer.requirementIds],
+            acceptanceIds: [...writer.acceptanceIds],
+            files: [],
+            deliveredInbox: [],
+          },
+        };
+      }
+      if (input.role === "qa") {
+        return {
+          receipt: {
+            gate: "qa",
+            outcome: "passed",
+            candidateSha: SHA.candidate,
+            what: "The exact integrated candidate conforms.",
+            why: "The product and tests conform.",
+            evidence: ["qa:passed"],
+            requirementIds: attemptPlan.requirements.map(item => item.id),
+            acceptanceIds: attemptPlan.acceptanceCriteria.map(item => item.id),
+            files: [],
+          },
+        };
+      }
+      if (input.role === "testing") {
+        const failed = input.attempt === 1;
+        return {
+          receipt: {
+            gate: "testing",
+            outcome: failed ? "failed" : "passed",
+            candidateSha: SHA.candidate,
+            what: failed ? "The exact candidate has a regression." : "The exact candidate is ready.",
+            why: failed ? "The regression gate is red." : "The testing review found no red condition.",
+            evidence: [failed ? "testing:failed:REGRESSION-9" : "testing:passed"],
+            requirementIds: attemptPlan.requirements.map(item => item.id),
+            acceptanceIds: attemptPlan.acceptanceCriteria.map(item => item.id),
+            files: [],
+          },
+        };
+      }
+      throw new Error(`unexpected role: ${input.role}`);
+    },
+  };
+
+  const result = await runEngineeringPod(controllerInput({
+    agents,
+    source,
+    store,
+    verifyCandidate: async input => ({
+      status: "passed",
+      candidateSha: input.expectedSha,
+      evidence: ["tests:passed"],
+    }),
+  }));
+
+  assert.equal(result.status, "ready");
+  const firstAttempt = writerPrompts.filter(entry => entry.executionId.startsWith("attempt-1-"));
+  const secondAttempt = writerPrompts.filter(entry => entry.executionId.startsWith("attempt-2-"));
+  assert.equal(firstAttempt.length, 3);
+  assert.equal(secondAttempt.length, 3);
+  assert(firstAttempt.every(entry => !Object.hasOwn(entry.context, "retry")));
+  for (const entry of secondAttempt) {
+    const retry = entry.context.retry;
+    assert(retry, `${entry.executionId} must receive the retry context`);
+    assert.equal(retry.attempt, 1);
+    assert.equal(retry.gate, "testing");
+    assert.equal(retry.outcome, "failed");
+    assert.deepEqual(retry.evidence, ["testing:failed:REGRESSION-9"]);
+    assert.match(retry.reason, /Testing review failed/);
+    assert.match(retry.correction, /testing/);
+    assert.match(retry.correction, /writePaths/);
+  }
 });
 
 test("a structural writer failure settles sibling executions before the replacement attempt", async () => {

@@ -310,6 +310,10 @@ export async function runEngineeringPod({
       prompt: buildPrompt(prompts.checker, "checker", {
         assignment,
         requirementIds: workItem.requirementIds,
+        requirements: attemptState.plan.requirements
+          .filter(item => workItem.requirementIds.includes(item.id)),
+        acceptanceCriteria: attemptState.plan.acceptanceCriteria
+          .filter(item => workItem.acceptanceIds.includes(item.id)),
         workItem,
         baseSha: result.baseSha,
         resultSha: result.resultSha,
@@ -347,22 +351,44 @@ export async function runEngineeringPod({
     return receipt;
   };
 
-  const executeWriter = ({ attemptState, workItem, workspace, inbox, execution, executionBaseSha }) => runAgent({
-    executionId: execution,
-    role: workItem.ownerSlot,
-    attempt: attemptState.attempt,
-    access: "write",
-    prompt: buildPrompt(prompts[workItem.ownerSlot], "writer", {
-      assignment,
-      plan: attemptState.plan,
-      workItem,
-      inbox,
-      executionBaseSha,
-    }),
-    workspaceId: workspace.id,
-    writeDirectories: workspace.writeDirectories,
-    deadlineAt: attemptState.deadlineAt,
-  });
+  const retryContext = workItem => {
+    const prior = priorAttempts.at(-1);
+    if (!prior) return null;
+    const failedGate = [...prior.gates].reverse().find(gate => gate.outcome !== "passed") ?? null;
+    const gate = failedGate?.gate ?? "attempt";
+    const correction = failedGate?.workItemId === workItem.id
+      ? `Attempt ${prior.attempt} failed the ${gate} gate on your writer item. Correct only your assigned work within its writePaths so this exact gate passes on the replacement attempt.`
+      : `Attempt ${prior.attempt} failed the ${gate} gate. Correct only your assigned work within its writePaths so this exact gate passes on the replacement attempt.`;
+    return {
+      attempt: prior.attempt,
+      gate,
+      outcome: failedGate?.outcome ?? "failed",
+      reason: prior.reason,
+      evidence: failedGate?.evidence ?? [],
+      correction,
+    };
+  };
+
+  const executeWriter = ({ attemptState, workItem, workspace, inbox, execution, executionBaseSha }) => {
+    const retry = retryContext(workItem);
+    return runAgent({
+      executionId: execution,
+      role: workItem.ownerSlot,
+      attempt: attemptState.attempt,
+      access: "write",
+      prompt: buildPrompt(prompts[workItem.ownerSlot], "writer", {
+        assignment,
+        plan: attemptState.plan,
+        workItem,
+        inbox,
+        executionBaseSha,
+        ...(retry ? { retry } : {}),
+      }),
+      workspaceId: workspace.id,
+      writeDirectories: workspace.writeDirectories,
+      deadlineAt: attemptState.deadlineAt,
+    });
+  };
 
   const validateWriter = (raw, {
     attemptState,
