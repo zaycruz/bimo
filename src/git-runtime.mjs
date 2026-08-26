@@ -1200,7 +1200,7 @@ export class GitRuntime {
     return this.#head(record, deadlineAt);
   }
 
-  async validateAndCommit({ workspace, workItem, receipt, limits, deadlineAt }) {
+  async validateAndCommit({ workspace, workItem, limits, deadlineAt }) {
     requireDeadline(deadlineAt);
     const record = this.#workspaceRecord(workspace);
     if (record.kind !== "writer" && record.kind !== "combined") fail("workspace is not writable");
@@ -1212,7 +1212,6 @@ export class GitRuntime {
     ) {
       fail("workItem does not match the controller-captured writer scope");
     }
-    void receipt;
     await this.#freezeWorktree(record, deadlineAt);
     const inspected = await this.inspect({ workspace, limits, deadlineAt });
     if (inspected.changedFiles === 0) fail("writer produced no changes");

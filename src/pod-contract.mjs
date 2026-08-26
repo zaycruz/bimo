@@ -29,8 +29,6 @@ const WRITER_RECEIPT_FIELDS = [
   "evidence",
   "requirementIds",
   "acceptanceIds",
-  "files",
-  "changedBytes",
   "inboxCursor",
   "dependencyRequest",
 ];
@@ -155,7 +153,7 @@ function assertRepositoryDirectory(value, label) {
   }
 }
 
-function assertRepositoryFile(value, label) {
+export function assertRepositoryFile(value, label) {
   assertText(value, label, 512);
   if (value.includes("\\") || path.posix.isAbsolute(value) || value.endsWith("/")) {
     fail(`${label} must be a canonical relative file path`);
@@ -651,25 +649,6 @@ export function validateWriterReceipt(receipt, {
   const writer = plan.writers[writerId];
   assertExactStringArray(receipt.requirementIds, writer.requirementIds, "writer receipt requirementIds");
   assertExactStringArray(receipt.acceptanceIds, writer.acceptanceIds, "writer receipt acceptanceIds");
-
-  if (!Array.isArray(receipt.files) || receipt.files.length > template.changes.maxFiles) {
-    fail(`writer receipt files must contain at most ${template.changes.maxFiles} paths`);
-  }
-  if (receipt.outcome === "completed" && receipt.files.length === 0) {
-    fail("completed writer receipt must report at least one changed file");
-  }
-  const seenFiles = new Set();
-  for (let index = 0; index < receipt.files.length; index += 1) {
-    const file = receipt.files[index];
-    assertRepositoryFile(file, `writer receipt files[${index}]`);
-    const folded = file.toLowerCase();
-    if (seenFiles.has(folded)) fail(`writer receipt files contains duplicate path: ${file}`);
-    seenFiles.add(folded);
-    if (!writer.writePaths.some(writePath => file.startsWith(`${writePath}/`))) {
-      fail(`writer receipt file is outside ${writerId} writePaths: ${file}`);
-    }
-  }
-  assertInteger(receipt.changedBytes, 0, template.changes.maxBytes, "writer receipt changedBytes");
 
   const expectedCursor = validateDeliveredInbox(deliveredInbox, {
     plan,

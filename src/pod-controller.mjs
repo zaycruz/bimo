@@ -1,4 +1,5 @@
 import {
+  assertRepositoryFile,
   validateAttemptPlan,
   validateCheckerReceipt,
   validateConformanceReceipt,
@@ -242,7 +243,6 @@ export async function runEngineeringPod({
     const committed = await source.validateAndCommit({
       workspace,
       workItem,
-      receipt,
       deadlineAt: attemptState.deadlineAt,
       limits: template.changes,
     });
@@ -250,9 +250,25 @@ export async function runEngineeringPod({
     const committedBaseSha = assertSha(committed.baseSha, "writer baseSha");
     if (committedBaseSha !== receipt.baseSha) fail("writer receipt base does not match the committed delta");
     if (!Array.isArray(committed.changedPaths)
-        || committed.changedBytes !== receipt.changedBytes
-        || [...committed.changedPaths].sort().join("\0") !== [...receipt.files].sort().join("\0")) {
-      fail("writer receipt does not match the controller-inspected delta");
+        || committed.changedPaths.length < 1
+        || committed.changedPaths.length > template.changes.maxFiles) {
+      fail("commit changedPaths are outside the fixed writer scope");
+    }
+    const seenPaths = new Set();
+    for (let index = 0; index < committed.changedPaths.length; index += 1) {
+      const repositoryPath = committed.changedPaths[index];
+      assertRepositoryFile(repositoryPath, `commit changedPaths[${index}]`);
+      const folded = repositoryPath.toLowerCase();
+      if (seenPaths.has(folded)) fail(`commit changedPaths contains duplicate path: ${repositoryPath}`);
+      seenPaths.add(folded);
+      if (!workItem.writePaths.some(writePath => pathIsOwned(repositoryPath, writePath))) {
+        fail("commit changedPaths are outside the fixed writer scope");
+      }
+    }
+    if (!Number.isInteger(committed.changedBytes)
+        || committed.changedBytes < 0
+        || committed.changedBytes > template.changes.maxBytes) {
+      fail("commit changedBytes are outside the fixed limit");
     }
     if (typeof committed.diffSha256 !== "string" || !/^[a-f0-9]{64}$/.test(committed.diffSha256)) {
       fail("commit diffSha256 must be a SHA-256 digest");
@@ -263,6 +279,8 @@ export async function runEngineeringPod({
       ownerSlot: workItem.ownerSlot,
       baseSha: committedBaseSha,
       resultSha: assertSha(committed.resultSha, "writer resultSha"),
+      files: [...committed.changedPaths],
+      changedBytes: committed.changedBytes,
       diffSha256: committed.diffSha256,
       diff: committed.diff,
     };

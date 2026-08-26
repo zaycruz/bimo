@@ -137,7 +137,6 @@ async function checkpoint(runtime, workspace, ownerSlot, limits = {}) {
   return runtime.validateAndCommit({
     workspace,
     workItem: workItem(ownerSlot, workspace.writeDirectories),
-    receipt: { files: ["untrusted"], changedBytes: 1 },
     limits: {
       maxFiles: 20,
       maxBytes: 128 * 1024,

@@ -87,11 +87,6 @@ function plan(attempt = 1) {
 
 function writerReceipt(writerId, attemptPlan = plan(), overrides = {}) {
   const writer = attemptPlan.writers[writerId];
-  const files = {
-    "engineering-a": ["src/a.mjs"],
-    "engineering-b": ["starters/b.mjs"],
-    "qa-tests": ["test/feature.test.mjs"],
-  }[writerId];
   return {
     outcome: "completed",
     baseSha: SHA.base,
@@ -100,8 +95,6 @@ function writerReceipt(writerId, attemptPlan = plan(), overrides = {}) {
     evidence: [`evidence:${writerId}`],
     requirementIds: [...writer.requirementIds],
     acceptanceIds: [...writer.acceptanceIds],
-    files,
-    changedBytes: 100,
     inboxCursor: 0,
     dependencyRequest: null,
     ...overrides,
@@ -190,11 +183,16 @@ function createSource(calls) {
     },
     async validateAndCommit(input) {
       calls.push({ type: "commit", input });
+      const changedPaths = {
+        "engineering-a": ["src/a.mjs"],
+        "engineering-b": ["starters/b.mjs"],
+        "qa-tests": ["test/feature.test.mjs"],
+      }[input.workItem.ownerSlot];
       return {
         baseSha: input.workspace.baseSha,
         resultSha: resultBySlot[input.workItem.ownerSlot],
-        changedPaths: [...input.receipt.files],
-        changedBytes: input.receipt.changedBytes,
+        changedPaths,
+        changedBytes: 100,
         diffSha256: DIFF_BY_SLOT[input.workItem.ownerSlot],
         diff: `diff:${input.workItem.ownerSlot}`,
       };
@@ -438,6 +436,21 @@ test("fans out all three writers, checks exact results, and marks the tested can
     SHA.qaTests,
   ]);
   assert.deepEqual(integration.integrationOrder, ["engineering-a", "engineering-b", "qa-tests"]);
+  assert(calls
+    .filter(call => call.type === "commit")
+    .every(call => !Object.hasOwn(call.input, "receipt")));
+  assert.deepEqual(
+    store.records.workResults.map(({ value }) => ({
+      ownerSlot: value.ownerSlot,
+      files: value.files,
+      changedBytes: value.changedBytes,
+    })),
+    [
+      { ownerSlot: "engineering-a", files: ["src/a.mjs"], changedBytes: 100 },
+      { ownerSlot: "engineering-b", files: ["starters/b.mjs"], changedBytes: 100 },
+      { ownerSlot: "qa-tests", files: ["test/feature.test.mjs"], changedBytes: 100 },
+    ],
+  );
   assert.deepEqual(verified, [{
     workspaceRoot: "/candidate",
     candidateView: { id: "candidate", root: "/candidate", sha: SHA.candidate },
@@ -496,6 +509,46 @@ test("fans out all three writers, checks exact results, and marks the tested can
   assert(verifyIndex < scanIndex);
 });
 
+test("rejects a non-canonical controller delta before recording a work result", async () => {
+  const calls = [];
+  const store = createStore();
+  const source = createSource(calls);
+  source.validateAndCommit = async input => {
+    calls.push({ type: "commit", input });
+    return {
+      baseSha: input.workspace.baseSha,
+      resultSha: SHA.engineeringA,
+      changedPaths: ["src/../README.md"],
+      changedBytes: 100,
+      diffSha256: DIFF_BY_SLOT["engineering-a"],
+      diff: "invalid out-of-scope diff",
+    };
+  };
+  const agents = {
+    async cancel() {},
+    async runAgentExecution(input) {
+      const attemptPlan = plan(input.attempt);
+      if (input.role === "planner") return { receipt: attemptPlan };
+      if (["engineering-a", "engineering-b", "qa-tests"].includes(input.role)) {
+        return { receipt: writerReceipt(input.role, attemptPlan) };
+      }
+      throw new Error(`unexpected role: ${input.role}`);
+    },
+  };
+
+  await assert.rejects(runEngineeringPod(controllerInput({
+    agents,
+    source,
+    store,
+    verifyCandidate: async () => {
+      throw new Error("verification must not start");
+    },
+  })), /commit changedPaths\[0\] must be a canonical relative file path/);
+
+  assert.deepEqual(store.records.workResults, []);
+  assert.deepEqual(store.records.finished.map(entry => entry.status), ["failed"]);
+});
+
 test("queues one active-owner dependency and resumes the requester only after the owner passes", async () => {
   const calls = [];
   const timeline = [];
@@ -547,11 +600,18 @@ test("queues one active-owner dependency and resumes the requester only after th
       "engineering-b": count === 1 ? checkpointB : SHA.engineeringB,
       "qa-tests": SHA.qaTests,
     }[slot];
+    const baseSha = slot === "engineering-b" && count === 2
+      ? checkpointB
+      : input.workspace.baseSha;
     return {
-      baseSha: input.receipt.baseSha,
+      baseSha,
       resultSha,
-      changedPaths: [...input.receipt.files],
-      changedBytes: input.receipt.changedBytes,
+      changedPaths: {
+        "engineering-a": ["src/a.mjs"],
+        "engineering-b": ["starters/b.mjs"],
+        "qa-tests": ["test/feature.test.mjs"],
+      }[slot],
+      changedBytes: 100,
       diffSha256: DIFF_BY_SLOT[slot],
       diff: `diff:${slot}:${count}`,
     };

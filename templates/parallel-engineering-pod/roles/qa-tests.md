@@ -17,8 +17,6 @@ the implementation. Write one JSON object with exactly these fields to
   "evidence": ["Exact check and result."],
   "requirementIds": ["REQ-ONE"],
   "acceptanceIds": ["AC-ONE"],
-  "files": ["test/example.test.mjs"],
-  "changedBytes": 123,
   "inboxCursor": 0,
   "dependencyRequest": null
 }

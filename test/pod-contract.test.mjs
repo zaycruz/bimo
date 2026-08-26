@@ -106,8 +106,6 @@ function writerReceipt(overrides = {}) {
     evidence: ["node --test test/pod-contract.test.mjs passed"],
     requirementIds: ["REQ-CONTRACT"],
     acceptanceIds: ["AC-CONTRACT"],
-    files: ["src/pod-contract.mjs"],
-    changedBytes: 4_096,
     inboxCursor: 0,
     dependencyRequest: null,
     ...overrides,
@@ -348,7 +346,7 @@ test("attempt traceability has no orphan requirements or acceptance criteria", (
   );
 });
 
-test("writer receipts are strict, traced, bounded, and confined to writePaths", () => {
+test("writer receipts are strict and traced without claiming controller-owned deltas", () => {
   const context = {
     template: podTemplate(),
     plan: attemptPlan(),
@@ -365,18 +363,12 @@ test("writer receipts are strict, traced, bounded, and confined to writePaths", 
     /unknown writer receipt field: surprise/,
   );
   assert.throws(
-    () => validateWriterReceipt(writerReceipt({ files: ["test/pod-contract.test.mjs"] }), context),
-    /outside engineering-a writePaths/,
+    () => validateWriterReceipt(writerReceipt({ files: ["src/pod-contract.mjs"] }), context),
+    /unknown writer receipt field: files/,
   );
-  for (const unsafe of ["src/space name.js", "src/café.js", `src/${"a".repeat(241)}`]) {
-    assert.throws(
-      () => validateWriterReceipt(writerReceipt({ files: [unsafe] }), context),
-      /portable ASCII path no larger than 240 bytes/,
-    );
-  }
   assert.throws(
-    () => validateWriterReceipt(writerReceipt({ changedBytes: podTemplate().changes.maxBytes + 1 }), context),
-    /changedBytes must be an integer from 0 to 5242880/,
+    () => validateWriterReceipt(writerReceipt({ changedBytes: 1 }), context),
+    /unknown writer receipt field: changedBytes/,
   );
   assert.throws(
     () => validateWriterReceipt(writerReceipt({ requirementIds: ["REQ-TEMPLATE"] }), context),
