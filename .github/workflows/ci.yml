@@ -25,6 +25,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Audit npm dependencies
+        run: |
+          npm audit --audit-level=high
+          (cd starters/react && npm ci && npm audit --audit-level=high)
       - run: npm test
       - name: Check JavaScript syntax
         run: |
@@ -33,6 +37,12 @@ jobs:
           done
       - run: npm pack --dry-run
       - run: docker build --tag bimo-workflow:ci .
+      - name: Scan the CI image for vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: bimo-workflow:ci
+          severity: HIGH,CRITICAL
+          exit-code: '1'
       - run: docker run --rm bimo-workflow:ci list --json
       - run: docker run --rm bimo-workflow:ci validate react-app --json
       - run: docker run --rm bimo-workflow:ci validate react-solo --json
