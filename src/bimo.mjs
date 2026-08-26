@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import {
   lstat,
+  mkdir,
+  open,
   readFile,
   readdir,
 } from "node:fs/promises";
@@ -9,6 +12,13 @@ import path from "node:path";
 import process from "node:process";
 
 import { DockerRuntime } from "./docker-runtime.mjs";
+import {
+  builtInTargetCatalog,
+  commandForTarget,
+  deploymentRootForTarget,
+  isDeploymentHostRoot,
+  resolveDeploymentTarget,
+} from "./deployment-target.mjs";
 import { GitRuntime } from "./git-runtime.mjs";
 import {
   validateOrganizerInput,
@@ -26,7 +36,7 @@ import { loadWorkflow, runWorkflow } from "./workflow.mjs";
 const packageRoot = path.resolve(import.meta.dirname, "..");
 const templateRoot = path.join(packageRoot, "templates");
 const organizerInstructionsPath = path.join(packageRoot, "etc", "organizer", "organizer.md");
-const DEFAULT_IMAGE = "bimo-workflow:0.4.0";
+const DEFAULT_IMAGE = "bimo-workflow:0.5.0";
 const DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash";
 const POD_REPOSITORY = "https://github.com/zaycruz/bimo.git";
 const POD_TARGET_BRANCH = "main";
@@ -35,7 +45,6 @@ const IMAGE_TRANSFER_TIMEOUT_MS = 10 * 60 * 1_000;
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const EXECUTION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const SSH_TARGET = /^(?:[a-z_][a-z0-9_-]*@)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
 const IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$/;
 const SECRET_REF = /^op:\/\/[^/\u0000-\u001f\u007f]{1,255}\/[^/\u0000-\u001f\u007f]{1,255}\/[^/\u0000-\u001f\u007f]{1,255}$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/;
@@ -47,13 +56,18 @@ const IMAGE_CONFIG_FIELDS = [
   "Volumes", "Labels", "Healthcheck", "StopSignal", "Shell",
 ];
 const WORKFLOW_DEPLOY_OPTIONS = [
-  "--deployment", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
+  "--deployment", "--target", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
   "--secret-ref", "--public-url", "--port",
 ];
 const POD_DEPLOY_OPTIONS = [
-  "--deployment", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
+  "--deployment", "--target", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
   "--secret-ref", "--github-secret-ref", "--repository", "--base-sha", "--target-branch",
 ];
+const DEPLOYMENT_LAYOUTS = {
+  workflow: ["runs", "workspace"],
+  organizer: ["runs", "worktrees"],
+  pod: ["runs", "source", "worktrees", "snapshots"],
+};
 
 function fail(message) {
   throw new Error(message);
@@ -292,6 +306,44 @@ async function listTemplates() {
   return templates;
 }
 
+async function listDeploymentTargets() {
+  const catalog = builtInTargetCatalog();
+  const local = await inspectLocalDocker();
+  return catalog.map(target => target.kind === "local"
+    ? { ...target, ...local }
+    : { ...target, availability: "on-demand" });
+}
+
+async function inspectLocalDocker() {
+  try {
+    if (process.env.DOCKER_HOST?.trim()) {
+      return { availability: "unavailable", reason: "DOCKER_HOST overrides are not accepted for local targets" };
+    }
+    const endpoint = (await execute("docker", [
+      "context", "inspect", "--format", "{{(index .Endpoints \"docker\").Host}}",
+    ], { timeoutMs: 10_000, maxOutputBytes: 4 * 1024 })).stdout.trim();
+    if (!/^unix:\/\/\/[^\u0000\r\n]+$/u.test(endpoint)) {
+      return { availability: "unavailable", reason: "Docker endpoint is not a local Unix socket" };
+    }
+    const result = await execute("docker", [
+      "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}",
+    ], { timeoutMs: 10_000, maxOutputBytes: 4 * 1024 });
+    const platform = result.stdout.trim();
+    if (!/^linux\/(?:amd64|arm64)$/u.test(platform)) {
+      return { availability: "unavailable", reason: "Docker platform must be linux/amd64 or linux/arm64" };
+    }
+    return { availability: "ready", platform };
+  } catch {
+    return { availability: "unavailable", reason: "Docker is unavailable" };
+  }
+}
+
+async function requireLocalDocker() {
+  const status = await inspectLocalDocker();
+  if (status.availability !== "ready") fail(`local target unavailable: ${status.reason}`);
+  return status;
+}
+
 async function loadOrganizerCatalog() {
   const entries = await readdir(templateRoot, { withFileTypes: true });
   const catalog = [];
@@ -321,38 +373,45 @@ async function loadOrganizerCatalog() {
   return validateTemplateCatalog(catalog);
 }
 
-function target(options) {
-  const proxmox = options.proxmox;
-  const host = options.host;
-  if (Boolean(proxmox) === Boolean(host)) fail("use exactly one of --host or --proxmox");
-  const sshTarget = proxmox ?? host;
-  if (!SSH_TARGET.test(sshTarget)) fail("SSH target contains unsupported characters");
-  if (proxmox) {
-    if (!/^\d{1,9}$/.test(options.vmid ?? "")) fail("--vmid must be numeric with --proxmox");
-    return { sshTarget, prefix: ["pct", "exec", options.vmid, "--"] };
+async function targetExecute(target, command, options) {
+  const invocation = commandForTarget(target, command);
+  return execute(invocation.command, invocation.args, options);
+}
+
+async function targetPlatform(target) {
+  if (target.kind === "local") return (await requireLocalDocker()).platform;
+  const result = await targetExecute(target, [
+    "docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}",
+  ], { timeoutMs: 10_000, maxOutputBytes: 4 * 1024 });
+  const platform = result.stdout.trim();
+  if (!/^linux\/(?:amd64|arm64)$/u.test(platform)) {
+    fail("target Docker platform must be linux/amd64 or linux/arm64");
   }
-  if (options.vmid) fail("--vmid is only valid with --proxmox");
-  return { sshTarget, prefix: [] };
+  return platform;
 }
 
-function sshArgs(remote, command) {
-  return [
-    "-o", "BatchMode=yes",
-    "-o", "StrictHostKeyChecking=yes",
-    remote.sshTarget,
-    ...remote.prefix,
-    ...command,
-  ];
+function deploymentDirectories(layout) {
+  const directories = DEPLOYMENT_LAYOUTS[layout];
+  if (!directories) fail("layout must be workflow, organizer, or pod");
+  return directories;
 }
 
-async function remoteExecute(remote, command, options) {
-  return execute("ssh", sshArgs(remote, command), options);
+function controllerLocalRootArgs(target) {
+  return target.kind === "local" ? ["--local-home", target.home] : [];
 }
 
-function transferImage(remote, image, { timeoutMs = IMAGE_TRANSFER_TIMEOUT_MS } = {}) {
+function controllerHostRootIsValid(hostRoot, deployment, localHome) {
+  return isDeploymentHostRoot(hostRoot, deployment, { localHome });
+}
+
+function transferImage(target, image, { timeoutMs = IMAGE_TRANSFER_TIMEOUT_MS } = {}) {
+  const loadInvocation = commandForTarget(target, ["docker", "load"]);
+  if (target.kind === "local" || loadInvocation.command !== "ssh") {
+    fail("image transfer requires a remote deployment target");
+  }
   return new Promise((resolve, reject) => {
     const save = spawn("docker", ["save", image], { cwd: packageRoot, stdio: ["ignore", "pipe", "pipe"] });
-    const load = spawn("ssh", sshArgs(remote, ["docker", "load"]), { stdio: ["pipe", "pipe", "pipe"] });
+    const load = spawn(loadInvocation.command, loadInvocation.args, { stdio: ["pipe", "pipe", "pipe"] });
     save.stdout.pipe(load.stdin);
     const output = [];
     let outputBytes = 0;
@@ -432,10 +491,20 @@ function imageTransferTag(imageId) {
   return `bimo-transfer:${imageId.slice(7, 19)}-${randomUUID().replaceAll("-", "")}`;
 }
 
-async function prepareRemoteImage(remote, image, { retag = true } = {}) {
-  await execute("docker", ["build", "--platform", "linux/amd64", "--tag", image, packageRoot]);
+async function prepareImage(target, image, { retag = true } = {}) {
+  const platform = await targetPlatform(target);
+  const buildArgs = target.kind === "local"
+    ? ["build", "--tag", image, packageRoot]
+    : ["build", "--platform", platform, "--tag", image, packageRoot];
+  await execute("docker", buildArgs);
   const imageResult = await execute("docker", ["image", "inspect", image]);
   const localImage = parseImageInspect(imageResult.stdout, "local");
+  if (localImage.platform !== platform) {
+    fail(`built image platform ${localImage.platform} does not match target ${platform}`);
+  }
+  if (target.kind === "local") {
+    return { remoteImage: localImage, transferTag: null };
+  }
   const transferTag = imageTransferTag(localImage.imageId);
   let remoteTransferStarted = false;
   try {
@@ -448,28 +517,95 @@ async function prepareRemoteImage(remote, image, { retag = true } = {}) {
     }
 
     remoteTransferStarted = true;
-    await transferImage(remote, transferTag);
-    const remoteImageResult = await remoteExecute(remote, ["docker", "image", "inspect", transferTag]);
+    await transferImage(target, transferTag);
+    const remoteImageResult = await targetExecute(target, ["docker", "image", "inspect", transferTag]);
     const remoteImage = parseImageInspect(remoteImageResult.stdout, "remote");
     if (remoteImage.contentFingerprint !== localImage.contentFingerprint) {
       fail("transferred image content does not match the inspected local image");
     }
     if (retag) {
-      await remoteExecute(remote, ["docker", "image", "tag", transferTag, image], { timeoutMs: 30_000 });
+      await targetExecute(target, ["docker", "image", "tag", transferTag, image], { timeoutMs: 30_000 });
     }
     return { remoteImage, transferTag };
   } catch (error) {
     if (remoteTransferStarted) {
-      await remoteExecute(remote, ["docker", "image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
+      await targetExecute(target, ["docker", "image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
     }
     await execute("docker", ["image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
     throw error;
   }
 }
 
-async function cleanupTransferredImage(remote, transferTag) {
-  await remoteExecute(remote, ["docker", "image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
+async function cleanupTransferredImage(target, transferTag) {
+  if (!transferTag) return;
+  await targetExecute(target, ["docker", "image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
   await execute("docker", ["image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
+}
+
+async function validateLocalStateChain(home, hostRoot, { allowMissing }) {
+  const relative = path.relative(home, hostRoot);
+  if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    fail("local deployment state root is invalid");
+  }
+  let current = home;
+  for (const component of ["", ...relative.split(path.sep)]) {
+    if (component) current = path.join(current, component);
+    let stat;
+    try {
+      stat = await lstat(current);
+    } catch (error) {
+      if (allowMissing && error?.code === "ENOENT") return;
+      fail("local deployment state path is invalid");
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      fail("local deployment state path must contain only real directories");
+    }
+  }
+}
+
+async function ensureLocalStateRoot(target, hostRoot) {
+  await validateLocalStateChain(target.home, hostRoot, { allowMissing: true });
+  await mkdir(hostRoot, { recursive: true, mode: 0o700 });
+  await validateLocalStateChain(target.home, hostRoot, { allowMissing: false });
+}
+
+async function prepareLocalState(target, image, hostRoot, layout) {
+  if (target.kind !== "local") fail("local state preparation requires the local target");
+  deploymentDirectories(layout);
+  await ensureLocalStateRoot(target, hostRoot);
+  await targetExecute(target, [
+    "docker", "run", "--rm",
+    "--user", "0:0",
+    "--network", "none",
+    "--read-only",
+    "--cap-drop", "ALL",
+    "--cap-add", "CHOWN",
+    "--cap-add", "DAC_OVERRIDE",
+    "--cap-add", "FOWNER",
+    "--security-opt", "no-new-privileges",
+    "--pids-limit", "32",
+    "--memory", "64m",
+    "--cpus", "0.25",
+    "--volume", `${hostRoot}:/deployment:rw`,
+    image,
+    "internal-prepare",
+    "--layout", layout,
+  ], { timeoutMs: 30_000, maxOutputBytes: 16 * 1024 });
+}
+
+async function prepareDeploymentState(target, image, hostRoot, layout) {
+  const directories = deploymentDirectories(layout);
+  if (target.kind === "local") {
+    await prepareLocalState(target, image, hostRoot, layout);
+    return;
+  }
+  const paths = directories.map(directory => `${hostRoot}/${directory}`);
+  await targetExecute(target, ["mkdir", "-p", ...paths]);
+  await targetExecute(target, ["chmod", "700", hostRoot, ...paths]);
+  if (layout === "workflow") {
+    await targetExecute(target, ["chown", "1000:0", `${hostRoot}/workspace`]);
+    await targetExecute(target, ["chmod", "770", `${hostRoot}/workspace`]);
+  }
 }
 
 function isPlainObject(value) {
@@ -520,6 +656,7 @@ function parseImageInspect(raw, label) {
   };
   return {
     imageId: value.Id,
+    platform: `${value.Os}/${value.Architecture}`,
     contentFingerprint: createHash("sha256").update(canonicalJson(content)).digest("hex"),
   };
 }
@@ -640,15 +777,15 @@ async function deploy(template, options) {
   const loaded = await loadTemplate(template);
   const pod = loaded.kind === "engineering-pod";
   exactOptions(options, pod ? [
-    "deployment", "proxmox", "host", "vmid", "task-file", "task-stdin",
+    "deployment", "target", "proxmox", "host", "vmid", "task-file", "task-stdin",
     "secret-ref", "github-secret-ref", "account", "repository", "base-sha",
     "target-branch", "model", "image", "json",
   ] : [
-    "deployment", "proxmox", "host", "vmid", "task-file", "task-stdin",
+    "deployment", "target", "proxmox", "host", "vmid", "task-file", "task-stdin",
     "secret-ref", "account", "public-url", "port", "model", "image", "json",
   ]);
   if (!NAME.test(options.deployment ?? "")) fail("--deployment must use lowercase letters, numbers, and dashes");
-  const remote = target(options);
+  const deploymentTarget = resolveDeploymentTarget(options);
   const image = options.image ?? DEFAULT_IMAGE;
   if (!IMAGE.test(image)) fail("--image is invalid");
   const model = options.model ?? DEFAULT_MODEL;
@@ -674,18 +811,11 @@ async function deploy(template, options) {
   if (!task.trim() || Buffer.byteLength(task) > 64 * 1024) fail("task must contain 1 to 65536 bytes");
   if (!options["secret-ref"]) fail("--secret-ref is required");
 
-  const { remoteImage, transferTag } = await prepareRemoteImage(remote, image);
+  const { remoteImage, transferTag } = await prepareImage(deploymentTarget, image);
   try {
-    const hostRoot = `/var/lib/bimo/deployments/${options.deployment}`;
+    const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
     if (pod) {
-      await remoteExecute(remote, [
-        "mkdir", "-p", `${hostRoot}/runs`, `${hostRoot}/source`,
-        `${hostRoot}/worktrees`, `${hostRoot}/snapshots`,
-      ]);
-      await remoteExecute(remote, [
-        "chmod", "700", hostRoot, `${hostRoot}/runs`, `${hostRoot}/source`,
-        `${hostRoot}/worktrees`, `${hostRoot}/snapshots`,
-      ]);
+      await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "pod");
       const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
       let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
       const computeEnvelope = JSON.stringify({
@@ -704,7 +834,7 @@ async function deploy(template, options) {
       });
       openRouterKey = "";
       const controllerName = `bimo-${options.deployment}-controller`;
-      const compute = await remoteExecute(remote, [
+      const compute = await targetExecute(deploymentTarget, [
         "docker", "run", "--rm", "-i",
         "--name", controllerName,
         "--user", "0:0",
@@ -724,6 +854,7 @@ async function deploy(template, options) {
         remoteImage.imageId,
         "internal-pod-run",
         "--host-root", hostRoot,
+        ...controllerLocalRootArgs(deploymentTarget),
       ], {
         input: computeEnvelope,
         timeoutMs: (loaded.template.timeouts.workflowSeconds + 600) * 1_000,
@@ -746,7 +877,7 @@ async function deploy(template, options) {
         token: githubToken,
       });
       githubToken = "";
-      const publisher = await remoteExecute(remote, [
+      const publisher = await targetExecute(deploymentTarget, [
         "docker", "run", "--rm", "-i",
         "--name", `bimo-${options.deployment}-publisher`,
         "--user", "0:0",
@@ -773,10 +904,7 @@ async function deploy(template, options) {
         `deployed ${loaded.template.name} as ${options.deployment}\nrun: ${response.runId}\nPR: ${response.publication.url} (draft)\n`,
       );
     } else {
-      await remoteExecute(remote, ["mkdir", "-p", `${hostRoot}/runs`, `${hostRoot}/workspace`]);
-      await remoteExecute(remote, ["chmod", "700", hostRoot, `${hostRoot}/runs`]);
-      await remoteExecute(remote, ["chown", "1000:0", `${hostRoot}/workspace`]);
-      await remoteExecute(remote, ["chmod", "770", `${hostRoot}/workspace`]);
+      await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "workflow");
 
       const secret = await resolveSecret(options["secret-ref"], options.account);
       const envelope = JSON.stringify({
@@ -792,7 +920,7 @@ async function deploy(template, options) {
         publicUrl: publicUrl.toString().replace(/\/$/, ""),
       });
       const controllerName = `bimo-${options.deployment}-controller`;
-      const result = await remoteExecute(remote, [
+      const result = await targetExecute(deploymentTarget, [
         "docker", "run", "--rm", "-i",
         "--name", controllerName,
         "--user", "0:0",
@@ -809,6 +937,7 @@ async function deploy(template, options) {
         remoteImage.imageId,
         "internal-run",
         "--host-root", hostRoot,
+        ...controllerLocalRootArgs(deploymentTarget),
       ], {
         input: envelope,
         timeoutMs: (loaded.workflow.timeouts.workflowSeconds + 600) * 1_000,
@@ -819,19 +948,19 @@ async function deploy(template, options) {
       else process.stdout.write(`deployed ${response.template} as ${response.deployment}\nrun: ${response.runId}\nurl: ${response.url}\n`);
     }
   } finally {
-    await cleanupTransferredImage(remote, transferTag);
+    await cleanupTransferredImage(deploymentTarget, transferTag);
   }
 }
 
 async function organizeRemote(options) {
   exactOptions(options, [
-    "prompt", "agents", "deployment", "proxmox", "host", "vmid",
+    "prompt", "agents", "deployment", "target", "proxmox", "host", "vmid",
     "secret-ref", "account", "model", "image", "json",
   ]);
   if (!NAME.test(options.deployment ?? "")) {
     fail("--deployment must use lowercase letters, numbers, and dashes");
   }
-  const remote = target(options);
+  const deploymentTarget = resolveDeploymentTarget(options);
   const prompt = validateOrganizerPrompt(options.prompt);
   const agentsText = options.agents ?? "1";
   if (!/^[1-3]$/u.test(agentsText)) fail("--agents must be an integer from 1 to 3");
@@ -844,11 +973,10 @@ async function organizeRemote(options) {
   const catalog = await loadOrganizerCatalog();
   validateOrganizerInput({ prompt, agents, catalog });
 
-  const { remoteImage, transferTag } = await prepareRemoteImage(remote, image, { retag: false });
+  const { remoteImage, transferTag } = await prepareImage(deploymentTarget, image, { retag: false });
   try {
-    const hostRoot = `/var/lib/bimo/deployments/${options.deployment}`;
-    await remoteExecute(remote, ["mkdir", "-p", `${hostRoot}/runs`, `${hostRoot}/worktrees`]);
-    await remoteExecute(remote, ["chmod", "700", hostRoot, `${hostRoot}/runs`, `${hostRoot}/worktrees`]);
+    const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+    await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "organizer");
     const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
     let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
     const envelope = JSON.stringify({
@@ -862,7 +990,7 @@ async function organizeRemote(options) {
       image: remoteImage.imageId,
     });
     openRouterKey = "";
-    const result = await remoteExecute(remote, [
+    const result = await targetExecute(deploymentTarget, [
       "docker", "run", "--rm", "-i",
       "--name", `bimo-${options.deployment}-controller`,
       "--user", "0:0",
@@ -879,6 +1007,7 @@ async function organizeRemote(options) {
       remoteImage.imageId,
       "internal-organize",
       "--host-root", hostRoot,
+      ...controllerLocalRootArgs(deploymentTarget),
     ], {
       input: envelope,
       timeoutMs: 12 * 60 * 1_000,
@@ -900,7 +1029,7 @@ async function organizeRemote(options) {
       "",
     ].join("\n"));
   } finally {
-    await cleanupTransferredImage(remote, transferTag);
+    await cleanupTransferredImage(deploymentTarget, transferTag);
   }
 }
 
@@ -1037,8 +1166,7 @@ export async function runPodController({
 }
 
 async function internalRun(options) {
-  exactOptions(options, ["host-root"]);
-  if (!/^\/var\/lib\/bimo\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) fail("--host-root is invalid");
+  exactOptions(options, ["host-root", "local-home"]);
   const raw = await readStdin(128 * 1024);
   let envelope;
   try { envelope = JSON.parse(raw); } catch { fail("invalid controller envelope"); }
@@ -1049,6 +1177,7 @@ async function internalRun(options) {
     fail("controller envelope has unexpected fields");
   }
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "") || !NAME.test(envelope.template ?? "")
+      || !controllerHostRootIsValid(options["host-root"], envelope.deployment, options["local-home"])
       || !TEMPLATE_DIGEST.test(envelope.templateDigest ?? "") || !SHA256.test(envelope.image ?? "")) {
     fail("controller envelope is invalid");
   }
@@ -1058,6 +1187,7 @@ async function internalRun(options) {
     image: envelope.image,
     deployment: envelope.deployment,
     hostRoot: options["host-root"],
+    localHome: options["local-home"],
     key: envelope.key,
     model: envelope.model,
     port: envelope.port,
@@ -1075,16 +1205,51 @@ async function readJsonEnvelope(maximumBytes, fields, label) {
   return exactObject(envelope, fields, `${label} envelope`);
 }
 
-async function internalOrganize(options) {
-  exactOptions(options, ["host-root"]);
-  if (!/^\/var\/lib\/bimo\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) {
-    fail("--host-root is invalid");
+async function openDeploymentDirectory(targetPath, label, { create = false } = {}) {
+  if (create) {
+    try {
+      await mkdir(targetPath, { mode: 0o700 });
+    } catch (error) {
+      if (error?.code !== "EEXIST") fail(`deployment state ${label} is invalid`);
+    }
   }
+  try {
+    return await open(targetPath,
+      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+  } catch {
+    fail(`deployment state ${label} is invalid`);
+  }
+}
+
+async function internalPrepare(options) {
+  exactOptions(options, ["layout"]);
+  const directories = deploymentDirectories(options.layout);
+  const root = "/deployment";
+  const rootHandle = await openDeploymentDirectory(root, "mount");
+  try {
+    await rootHandle.chmod(0o700);
+  } finally {
+    await rootHandle.close();
+  }
+  for (const directory of directories) {
+    const targetPath = path.join(root, directory);
+    const handle = await openDeploymentDirectory(targetPath, directory, { create: true });
+    try {
+      await handle.chmod(directory === "workspace" ? 0o770 : 0o700);
+      if (directory === "workspace") await handle.chown(1_000, 0);
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+async function internalOrganize(options) {
+  exactOptions(options, ["host-root", "local-home"]);
   const envelope = await readJsonEnvelope(128 * 1024, [
     "version", "deployment", "runId", "prompt", "agents", "key", "model", "image",
   ], "organizer controller");
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "")
-      || options["host-root"] !== `/var/lib/bimo/deployments/${envelope.deployment}`
+      || !controllerHostRootIsValid(options["host-root"], envelope.deployment, options["local-home"])
       || !RUN_ID.test(envelope.runId ?? "")
       || !Number.isInteger(envelope.agents) || envelope.agents < 1 || envelope.agents > 3
       || !/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(envelope.key ?? "")
@@ -1104,6 +1269,7 @@ async function internalOrganize(options) {
     image: envelope.image,
     deployment: envelope.deployment,
     hostRoot: options["host-root"],
+    localHome: options["local-home"],
     key: envelope.key,
     model: envelope.model,
     modelConcurrency: envelope.agents,
@@ -1123,16 +1289,13 @@ async function internalOrganize(options) {
 }
 
 async function internalPodRun(options) {
-  exactOptions(options, ["host-root"]);
-  if (!/^\/var\/lib\/bimo\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) {
-    fail("--host-root is invalid");
-  }
+  exactOptions(options, ["host-root", "local-home"]);
   const envelope = await readJsonEnvelope(128 * 1024, [
     "version", "template", "templateDigest", "deployment", "task", "key", "model", "image",
     "repository", "baseSha", "targetBranch", "runId",
   ], "pod controller");
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "")
-      || options["host-root"] !== `/var/lib/bimo/deployments/${envelope.deployment}`
+      || !controllerHostRootIsValid(options["host-root"], envelope.deployment, options["local-home"])
       || envelope.template !== "parallel-engineering-pod"
       || !TEMPLATE_DIGEST.test(envelope.templateDigest ?? "")
       || typeof envelope.task !== "string" || !envelope.task.trim()
@@ -1174,6 +1337,7 @@ async function internalPodRun(options) {
     image: envelope.image,
     deployment: envelope.deployment,
     hostRoot: options["host-root"],
+    localHome: options["local-home"],
     key: envelope.key,
     model: envelope.model,
     modelConcurrency: Object.keys(loaded.template.writers).length,
@@ -1236,15 +1400,16 @@ async function internalPublish(options) {
 }
 
 async function remoteLogs(options) {
-  exactOptions(options, ["deployment", "proxmox", "host", "vmid", "run", "image", "json"]);
+  exactOptions(options, ["deployment", "target", "proxmox", "host", "vmid", "run", "image", "json"]);
   if (!NAME.test(options.deployment ?? "")) fail("--deployment is invalid");
   const runId = options.run ?? "latest";
   if (runId !== "latest" && !RUN_ID.test(runId)) fail("--run is invalid");
-  const remote = target(options);
+  const deploymentTarget = resolveDeploymentTarget(options);
+  if (deploymentTarget.kind === "local") await requireLocalDocker();
   const image = options.image ?? DEFAULT_IMAGE;
   if (!IMAGE.test(image)) fail("--image is invalid");
-  const hostRoot = `/var/lib/bimo/deployments/${options.deployment}`;
-  const result = await remoteExecute(remote, [
+  const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  const result = await targetExecute(deploymentTarget, [
     "docker", "run", "--rm", "--read-only", "--network", "none",
     "--user", "0:0",
     "--cap-drop", "ALL",
@@ -1280,12 +1445,13 @@ async function internalLogs(argv) {
 function usage() {
   return `usage:
   bimo list [--json]
+  bimo targets [--json]
   bimo validate TEMPLATE [--json]
-  bimo organize -p PROMPT [-n 1|2|3] --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --secret-ref op://VAULT/ITEM/FIELD [--json]
-  bimo -p PROMPT [-n 1|2|3] --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --secret-ref op://VAULT/ITEM/FIELD [--json]
-  bimo deploy TEMPLATE --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
-  bimo deploy parallel-engineering-pod --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --repository ${POD_REPOSITORY} --base-sha SHA --target-branch main [--json]
-  bimo logs --deployment NAME (--host HOST | --proxmox HOST --vmid ID) [--run ID] [--json]
+  bimo organize -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
+  bimo -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
+  bimo deploy TEMPLATE --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
+  bimo deploy parallel-engineering-pod --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --repository ${POD_REPOSITORY} --base-sha SHA --target-branch main [--json]
+  bimo logs --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json]
 `;
 }
 
@@ -1306,6 +1472,21 @@ export async function main(argv = process.argv.slice(2)) {
     const templates = await listTemplates();
     if (options.json) process.stdout.write(`${JSON.stringify({ templates })}\n`);
     else templates.forEach(template => process.stdout.write(`${template.name}\t${template.roles.join(" -> ")}\n`));
+    return;
+  }
+  if (command === "targets") {
+    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    if (positional.length) fail("targets accepts no positional arguments");
+    exactOptions(options, ["json"]);
+    const targets = await listDeploymentTargets();
+    if (options.json) process.stdout.write(`${JSON.stringify({ targets })}\n`);
+    else targets.forEach(target => process.stdout.write([
+      target.kind,
+      target.availability,
+      target.runtime,
+      target.platform ?? "-",
+      target.configuration,
+    ].join("\t") + "\n"));
     return;
   }
   if (command === "validate") {
@@ -1339,6 +1520,12 @@ export async function main(argv = process.argv.slice(2)) {
     const { positional, options } = parseOptions(rest);
     if (positional.length) fail("internal-run accepts no positional arguments");
     await internalRun(options);
+    return;
+  }
+  if (command === "internal-prepare") {
+    const { positional, options } = parseOptions(rest);
+    if (positional.length) fail("internal-prepare accepts no positional arguments");
+    await internalPrepare(options);
     return;
   }
   if (command === "internal-organize") {

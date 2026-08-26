@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -81,10 +82,14 @@ const REORDERED_CONFIG = {
 };
 const BASE_LAYERS = [`sha256:${"c".repeat(64)}`, `sha256:${"d".repeat(64)}`];
 
-function imageInspect(imageId, { config = BASE_CONFIG, layers = BASE_LAYERS } = {}) {
+function imageInspect(imageId, {
+  architecture = "amd64",
+  config = BASE_CONFIG,
+  layers = BASE_LAYERS,
+} = {}) {
   return JSON.stringify([{
     Id: imageId,
-    Architecture: "amd64",
+    Architecture: architecture,
     Os: "linux",
     Config: config,
     RootFS: { Type: "layers", Layers: layers },
@@ -95,6 +100,8 @@ async function fakeDeployTools(t, {
   remoteImageId = REMOTE_IMAGE_ID,
   remoteConfig = REORDERED_CONFIG,
   remoteLayers = BASE_LAYERS,
+  remotePlatform = "linux/amd64",
+  localArchitecture = "amd64",
   controller = "conflict",
 } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "bimo-cli-test-"));
@@ -103,26 +110,60 @@ async function fakeDeployTools(t, {
   await writeFile(logFile, "");
   await writeFile(taskFile, "Build the test application.\n");
 
-  const docker = `#!/usr/bin/env node
+const docker = `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify({ tool: "docker", args }) + "\\n");
-if (args[0] === "image" && args[1] === "inspect") process.stdout.write(process.env.BIMO_TEST_LOCAL_INSPECT + "\\n");
+const log = value => fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify(value) + "\\n");
+if (args[0] === "context" && args[1] === "inspect") process.stdout.write(process.env.BIMO_TEST_DOCKER_ENDPOINT + "\\n");
+else if (args[0] === "version") process.stdout.write("linux/arm64\\n");
+else if (args[0] === "image" && args[1] === "inspect") process.stdout.write(process.env.BIMO_TEST_LOCAL_INSPECT + "\\n");
 else if (args[0] === "save") process.stdout.write("fake-image-archive");
+else if (args[0] === "run") {
+  const internalCommand = args.find(value => value === "internal-prepare" || value === "internal-run");
+  if (internalCommand === "internal-prepare") process.stdout.write("prepared\\n");
+  else {
+    let raw = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", chunk => { raw += chunk; });
+    process.stdin.on("end", () => {
+      const envelope = JSON.parse(raw);
+      log({
+        tool: "local-controller-envelope",
+        fields: Object.keys(envelope).sort(),
+        templateDigest: envelope.templateDigest,
+        image: envelope.image,
+      });
+      process.stdout.write(JSON.stringify({
+        template: envelope.template,
+        deployment: envelope.deployment,
+        runId: "local-test-run",
+        url: envelope.publicUrl,
+      }) + "\\n");
+    });
+  }
+}
 `;
   const ssh = `#!/usr/bin/env node
 const fs = require("node:fs");
 const { createHash } = require("node:crypto");
 const args = process.argv.slice(2);
 const command = args.slice(5);
+const dockerIndex = command.indexOf("docker");
+const runtimeCommand = dockerIndex === -1 ? command : command.slice(dockerIndex);
 const log = value => fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify(value) + "\\n");
 log({ tool: "ssh", args, command });
-if (command[0] === "docker" && command[1] === "load") {
+if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "version") {
+  process.stdout.write(process.env.BIMO_TEST_REMOTE_PLATFORM + "\\n");
+} else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "load") {
   process.stdin.resume();
   process.stdin.on("end", () => process.stdout.write("Loaded image\\n"));
-} else if (command[0] === "docker" && command[1] === "image" && command[2] === "inspect") {
+} else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "image" && runtimeCommand[2] === "inspect") {
   process.stdout.write(process.env.BIMO_TEST_REMOTE_INSPECT + "\\n");
-} else if (command[0] === "docker" && command[1] === "run") {
+} else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "run"
+    && runtimeCommand.includes("internal-logs")) {
+  process.stdout.write("");
+} else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "run") {
   let raw = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", chunk => { raw += chunk; });
@@ -244,9 +285,16 @@ else process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
     env: {
       ...process.env,
       PATH: `${directory}${path.delimiter}${process.env.PATH}`,
+      DOCKER_HOST: "",
       BIMO_TEST_LOG: logFile,
-      BIMO_TEST_LOCAL_INSPECT: imageInspect(LOCAL_IMAGE_ID),
-      BIMO_TEST_REMOTE_INSPECT: imageInspect(remoteImageId, { config: remoteConfig, layers: remoteLayers }),
+      BIMO_TEST_DOCKER_ENDPOINT: "unix:///tmp/bimo-test-docker.sock",
+      BIMO_TEST_LOCAL_INSPECT: imageInspect(LOCAL_IMAGE_ID, { architecture: localArchitecture }),
+      BIMO_TEST_REMOTE_INSPECT: imageInspect(remoteImageId, {
+        architecture: remotePlatform.split("/")[1],
+        config: remoteConfig,
+        layers: remoteLayers,
+      }),
+      BIMO_TEST_REMOTE_PLATFORM: remotePlatform,
       BIMO_TEST_CONTROLLER: controller,
       BIMO_TEST_POD_CANDIDATE: POD_CANDIDATE_SHA,
       BIMO_TEST_ORGANIZER_TEMPLATE: "react-app",
@@ -254,7 +302,7 @@ else process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
         templateRoot: path.join(root, "templates"),
       })).templateDigest,
       BIMO_TEST_ORGANIZER_OPTIONS: JSON.stringify([
-        "--deployment", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
+        "--deployment", "--target", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
         "--secret-ref", "--public-url", "--port",
       ]),
     },
@@ -336,6 +384,146 @@ test("the installed CLI lists the packaged workflows and fixed engineering pod",
   )));
 });
 
+test("targets reports the working local Docker adapter and the two on-demand access adapters", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke(["targets", "--json"], { env: tools.env });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    targets: [
+      {
+        kind: "local",
+        runtime: "docker",
+        configuration: "automatic",
+        availability: "ready",
+        platform: "linux/arm64",
+      },
+      {
+        kind: "ssh",
+        runtime: "docker",
+        configuration: "--host HOST",
+        availability: "on-demand",
+      },
+      {
+        kind: "proxmox-lxc",
+        runtime: "docker",
+        configuration: "--proxmox HOST --vmid ID",
+        availability: "on-demand",
+      },
+    ],
+  });
+  const commands = await readCommandLog(tools.logFile);
+  assert.deepEqual(commands, [
+    {
+      tool: "docker",
+      args: ["context", "inspect", "--format", "{{(index .Endpoints \"docker\").Host}}"],
+    },
+    {
+      tool: "docker",
+      args: ["version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"],
+    },
+  ]);
+});
+
+test("targets fails closed for non-local Docker endpoints and DOCKER_HOST overrides", async t => {
+  const tools = await fakeDeployTools(t);
+  const remoteEndpoint = await invoke(["targets", "--json"], {
+    env: { ...tools.env, BIMO_TEST_DOCKER_ENDPOINT: "tcp://docker.example:2376" },
+  });
+  assert.equal(remoteEndpoint.code, 0, remoteEndpoint.stderr);
+  assert.deepEqual(JSON.parse(remoteEndpoint.stdout).targets[0], {
+    kind: "local",
+    runtime: "docker",
+    configuration: "automatic",
+    availability: "unavailable",
+    reason: "Docker endpoint is not a local Unix socket",
+  });
+
+  const overridden = await invoke(["targets", "--json"], {
+    env: { ...tools.env, DOCKER_HOST: "unix:///tmp/untrusted-docker.sock" },
+  });
+  assert.equal(overridden.code, 0, overridden.stderr);
+  assert.equal(JSON.parse(overridden.stdout).targets[0].reason,
+    "DOCKER_HOST overrides are not accepted for local targets");
+});
+
+test("deploy defaults to local Docker without SSH or image transfer", async t => {
+  const tools = await fakeDeployTools(t, {
+    controller: "workflow-success",
+    localArchitecture: "arm64",
+  });
+  const args = deployArgs(tools.taskFile).filter((value, index, all) => (
+    value !== "--host" && all[index - 1] !== "--host"
+  ));
+  const result = await invoke(args, { env: tools.env });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    template: "react-app",
+    deployment: "fleet-demo",
+    runId: "local-test-run",
+    url: "http://example.invalid:8080",
+  });
+
+  const entries = await readCommandLog(tools.logFile);
+  assert.equal(entries.some(entry => entry.tool === "ssh"), false);
+  const docker = entries.filter(entry => entry.tool === "docker").map(entry => entry.args);
+  assert.ok(docker.some(command => command[0] === "build"
+    && command.includes("--tag") && !command.includes("--platform")));
+  assert.equal(docker.some(command => command[0] === "save"), false);
+  assert.equal(docker.some(command => command[0] === "image" && command[1] === "tag"), false);
+
+  const hostRoot = path.join(os.homedir(), ".local", "share", "bimo", "deployments", "fleet-demo");
+  const prepare = docker.find(command => command.includes("internal-prepare"));
+  const controller = docker.find(command => command.includes("internal-run"));
+  assert.ok(prepare);
+  assert.ok(controller);
+  assert.ok(prepare.includes(`${hostRoot}:/deployment:rw`));
+  assert.ok(controller.includes(`${hostRoot}/runs:/state:rw`));
+  assert.ok(controller.includes(`${hostRoot}/workspace:/workspace:rw`));
+  assert.equal(controller[controller.indexOf("--local-home") + 1], os.homedir());
+  assert.equal(controller[controller.indexOf("internal-run") - 1], LOCAL_IMAGE_ID);
+  const envelope = entries.find(entry => entry.tool === "local-controller-envelope");
+  assert.equal(envelope.image, LOCAL_IMAGE_ID);
+});
+
+test("explicit SSH target builds for the target daemon architecture", async t => {
+  const tools = await fakeDeployTools(t, {
+    controller: "workflow-success",
+    remotePlatform: "linux/arm64",
+    localArchitecture: "arm64",
+  });
+  const args = deployArgs(tools.taskFile);
+  args.splice(args.indexOf("--host"), 0, "--target", "ssh");
+  const result = await invoke(args, { env: tools.env });
+
+  assert.equal(result.code, 0, result.stderr);
+  const entries = await readCommandLog(tools.logFile);
+  const build = entries.find(entry => entry.tool === "docker" && entry.args[0] === "build");
+  assert.ok(build);
+  assert.equal(build.args[build.args.indexOf("--platform") + 1], "linux/arm64");
+  assert.ok(entries.some(entry => entry.tool === "ssh"
+    && entry.command.join(" ").includes("docker version --format")));
+});
+
+test("explicit Proxmox LXC target wraps Docker with pct exec", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke([
+    "logs",
+    "--deployment", "fleet-demo",
+    "--target", "proxmox-lxc",
+    "--proxmox", "root@pve-05",
+    "--vmid", "212",
+    "--image", "bimo-workflow:test",
+  ], { env: tools.env });
+
+  assert.equal(result.code, 0, result.stderr);
+  const entries = await readCommandLog(tools.logFile);
+  const invocation = entries.find(entry => entry.tool === "ssh");
+  assert.deepEqual(invocation.command.slice(0, 5), ["pct", "exec", "212", "--", "docker"]);
+  assert.ok(invocation.command.includes("internal-logs"));
+});
+
 test("the installed CLI validates the packaged React workflow", async () => {
   const result = await run("validate", "react-app", "--json");
   assert.equal(result.valid, true);
@@ -368,6 +556,7 @@ test("the package ships its runnable how-to and example prompts", async () => {
   for (const expected of [
     "README.md",
     "docs/organize.md",
+    "docs/targets.md",
     "examples/fleet-demo.md",
     "examples/solo-demo.md",
     "examples/prompts/small-app.md",
@@ -405,7 +594,7 @@ test("organize transfers content-verified image without retagging and runs one e
     template: "react-app",
     templateDigest: response.templateDigest,
     acceptedOptions: [
-      "--deployment", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
+      "--deployment", "--target", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
       "--secret-ref", "--public-url", "--port",
     ],
   });
