@@ -322,7 +322,10 @@ export async function runEngineeringPod({
       deadlineAt: attemptState.deadlineAt,
     });
     const receipt = validateCheckerReceipt(
-      receiptOf(raw, `checker receipt ${workItem.id}`),
+      {
+        ...receiptOf(raw, `checker receipt ${workItem.id}`),
+        files: [],
+      },
       {
         plan: attemptState.plan,
         writerId: workItem.ownerSlot,
@@ -663,7 +666,10 @@ export async function runEngineeringPod({
       deadlineAt: attemptState.deadlineAt,
     });
     const qaReceipt = validateConformanceReceipt(
-      receiptOf(qaRaw, "QA conformance receipt"),
+      {
+        ...receiptOf(qaRaw, "QA conformance receipt"),
+        files: [],
+      },
       { plan: attemptState.plan, gate: "qa", candidateSha },
     );
     await recordGate(attemptState, {
@@ -688,7 +694,10 @@ export async function runEngineeringPod({
       deadlineAt: attemptState.deadlineAt,
     });
     const testingReceipt = validateConformanceReceipt(
-      receiptOf(testingRaw, "Testing receipt"),
+      {
+        ...receiptOf(testingRaw, "Testing receipt"),
+        files: [],
+      },
       { plan: attemptState.plan, gate: "testing", candidateSha },
     );
     await recordGate(attemptState, {

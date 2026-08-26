@@ -360,7 +360,7 @@ test("fans out all three writers, checks exact results, and marks the tested can
             evidence: [`checked:${writerId}`],
             requirementIds: [...attemptPlan.writers[writerId].requirementIds],
             acceptanceIds: [...attemptPlan.writers[writerId].acceptanceIds],
-            files: [],
+            files: [`${writerId}/model-reported-review-path`],
             deliveredInbox: [],
           },
         };
@@ -376,7 +376,7 @@ test("fans out all three writers, checks exact results, and marks the tested can
             evidence: ["qa:passed"],
             requirementIds: attemptPlan.requirements.map(item => item.id),
             acceptanceIds: attemptPlan.acceptanceCriteria.map(item => item.id),
-            files: [],
+            files: ["qa/model-reported-review-path"],
           },
         };
       }
@@ -395,7 +395,7 @@ test("fans out all three writers, checks exact results, and marks the tested can
             evidence: ["testing:passed"],
             requirementIds: attemptPlan.requirements.map(item => item.id),
             acceptanceIds: attemptPlan.acceptanceCriteria.map(item => item.id),
-            files: [],
+            files: ["testing/model-reported-review-path"],
           },
         };
       }
@@ -457,6 +457,9 @@ test("fans out all three writers, checks exact results, and marks the tested can
       { ownerSlot: "qa-tests", files: ["test/feature.test.mjs"], changedBytes: 100 },
     ],
   );
+  assert(store.records.gates
+    .filter(({ value }) => ["checker", "qa-conformance", "testing"].includes(value.gate))
+    .every(({ value }) => Array.isArray(value.files) && value.files.length === 0));
   assert.deepEqual(verified, [{
     workspaceRoot: "/candidate",
     candidateView: { id: "candidate", root: "/candidate", sha: SHA.candidate },

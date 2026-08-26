@@ -20,9 +20,9 @@ Write one JSON object with exactly these fields to `/handoff/result.json`:
   "why": "Why it conforms or must retry.",
   "evidence": ["Exact inspected evidence."],
   "requirementIds": ["REQ-ONE"],
-  "acceptanceIds": ["AC-ONE"],
-  "files": []
+  "acceptanceIds": ["AC-ONE"]
 }
 ```
 
-Do not add fields or Markdown.
+The controller records read-only file mutation metadata; do not return a
+`files` field. Do not add fields or Markdown.

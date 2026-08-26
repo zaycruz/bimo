@@ -24,11 +24,11 @@ Write one JSON object with exactly these fields to `/handoff/result.json`:
   "evidence": ["Exact inspected evidence."],
   "requirementIds": ["REQ-ONE"],
   "acceptanceIds": ["AC-ONE"],
-  "files": [],
   "deliveredInbox": []
 }
 ```
 
 `outcome` is `passed` or `failed`. Echo the exact controller-delivered inbox
 slice, including sequence, requester, owner, path, IDs, owner brief digest,
-need, why, and requester checkpoint SHA. Do not add fields or Markdown.
+need, why, and requester checkpoint SHA. The controller records read-only file
+mutation metadata; do not return a `files` field. Do not add fields or Markdown.
