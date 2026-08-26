@@ -17,18 +17,18 @@ is displayed for context but never executed or reused as deployment input.
 Use one selector for the smallest, deterministic path:
 
 ```sh
-bimo organize -p "Build a small React app that displays a task list." -n 1 --deployment organize-demo --proxmox pve-05 --vmid 113 --secret-ref op://VAULT/ITEM/FIELD --json
+bimo organize -p "Build a small React app that displays a task list." -n 1 --deployment organize-demo --secret-ref op://VAULT/ITEM/FIELD --json
 ```
 
 The root shorthand accepts the same prompt without the subcommand:
 
 ```sh
-bimo -p "Build a small React app that displays a task list." -n 1 --deployment organize-demo --proxmox pve-05 --vmid 113 --secret-ref op://VAULT/ITEM/FIELD --json
+bimo -p "Build a small React app that displays a task list." -n 1 --deployment organize-demo --secret-ref op://VAULT/ITEM/FIELD --json
 ```
 
 These values show the complete command shape. Replace the `op://` placeholder
 with an authorized OpenRouter secret reference, and substitute the deployment
-name, target, or VM ID when using another environment. Keep these operational
+name or target when using another environment. Keep these operational
 values in the command boundary only: they are never fields in the selector
 receipt.
 

@@ -30,7 +30,7 @@ test("publishes the clean-break Bimo product contract", async () => {
   const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 
   assert.equal(packageJson.name, "bimo-workflow");
-  assert.equal(packageJson.version, "0.4.0");
+  assert.equal(packageJson.version, "0.5.0");
   assert.deepEqual(packageJson.bin, { bimo: "bin/bimo" });
   assert.equal(packageJson.repository.url, "git+https://github.com/zaycruz/bimo.git");
   assert.equal(packageJson.homepage, "https://github.com/zaycruz/bimo#readme");

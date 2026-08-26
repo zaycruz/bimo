@@ -14,9 +14,10 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
+import { isDeploymentHostRoot } from "./deployment-target.mjs";
+
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const MODEL = /^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/;
-const HOST_ROOT = /^\/var\/lib\/bimo\/deployments\/[a-z][a-z0-9-]{0,31}$/;
 const SAFE_IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$/;
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const EXECUTION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -347,6 +348,8 @@ export function proxyCreateArgs({
 
 export function sourceVerifierCreateArgs({
   deployment,
+  hostRoot,
+  localHome,
   image,
   snapshotHost,
   baselineTestHost,
@@ -361,7 +364,10 @@ export function sourceVerifierCreateArgs({
     fail("invalid source verifier identity");
   }
   if (!SAFE_IMAGE.test(image ?? "")) fail("invalid source verifier image");
-  const snapshotRoot = path.join("/var/lib/bimo/deployments", deployment, "snapshots");
+  if (!isDeploymentHostRoot(hostRoot, deployment, { localHome })) {
+    fail("invalid source verifier host root");
+  }
+  const snapshotRoot = path.join(hostRoot, "snapshots");
   if (typeof snapshotHost !== "string" || !path.isAbsolute(snapshotHost)
       || !path.resolve(snapshotHost).startsWith(`${snapshotRoot}${path.sep}`)) {
     fail("invalid source snapshot host path");
@@ -784,6 +790,7 @@ export class DockerRuntime {
     image,
     deployment,
     hostRoot,
+    localHome,
     stateRoot = "/state",
     key,
     model,
@@ -793,8 +800,7 @@ export class DockerRuntime {
     publicUrl,
   }) {
     if (!NAME.test(deployment)) fail("invalid deployment name");
-    if (!HOST_ROOT.test(hostRoot)) fail("invalid Bimo host root");
-    if (hostRoot !== `/var/lib/bimo/deployments/${deployment}`) {
+    if (!isDeploymentHostRoot(hostRoot, deployment, { localHome })) {
       fail("Bimo host root must match deployment");
     }
     if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) fail("invalid Bimo state root");
@@ -826,6 +832,7 @@ export class DockerRuntime {
     this.image = image;
     this.deployment = deployment;
     this.hostRoot = hostRoot;
+    this.localHome = localHome;
     this.stateRoot = path.resolve(stateRoot);
     this.key = key;
     this.model = model;
@@ -1266,6 +1273,8 @@ export class DockerRuntime {
       try {
         const created = await this.commandWithin(sourceVerifierCreateArgs({
           deployment: this.deployment,
+          hostRoot: this.hostRoot,
+          localHome: this.localHome,
           image: this.image,
           snapshotHost: candidateHost,
           ...(suite === "baseline" ? { baselineTestHost: baselineTestsHost } : {}),

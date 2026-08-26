@@ -88,6 +88,10 @@ function createRuntime(overrides = {}) {
 }
 
 test("runtime host root is bound to its deployment name", () => {
+  assert.doesNotThrow(() => createRuntime({
+    hostRoot: "/Users/tester/.local/share/bimo/deployments/demo",
+    localHome: "/Users/tester",
+  }));
   assert.throws(
     () => createRuntime({ hostRoot: "/var/lib/bimo/deployments/another" }),
     /host root must match deployment/,
@@ -465,6 +469,7 @@ test("source verification containers receive only immutable snapshots and no con
   const receipt = { files: 12, bytes: 4_096, sha256: "c".repeat(64) };
   const candidate = sourceVerifierCreateArgs({
     deployment: "demo",
+    hostRoot: "/var/lib/bimo/deployments/demo",
     image: IMAGE,
     snapshotHost: "/var/lib/bimo/deployments/demo/snapshots/run-1/candidate-1",
     expectedSha: "d".repeat(40),
@@ -476,6 +481,7 @@ test("source verification containers receive only immutable snapshots and no con
   });
   const baseline = sourceVerifierCreateArgs({
     deployment: "demo",
+    hostRoot: "/var/lib/bimo/deployments/demo",
     image: IMAGE,
     snapshotHost: "/var/lib/bimo/deployments/demo/snapshots/run-1/candidate-1",
     baselineTestHost: "/var/lib/bimo/deployments/demo/snapshots/run-1/base/test",
@@ -499,6 +505,34 @@ test("source verification containers receive only immutable snapshots and no con
     assert.match(rendered, /--tmpfs \/test-tools:rw,exec,nosuid,nodev,size=32m,uid=1000,gid=1000/);
     assert.doesNotMatch(rendered, /docker\.sock|dst=\/state|BIMO_GATEWAY|sk-or-v1|github_pat_/);
   }
+
+  const local = sourceVerifierCreateArgs({
+    deployment: "demo",
+    hostRoot: "/Users/tester/.local/share/bimo/deployments/demo",
+    localHome: "/Users/tester",
+    image: IMAGE,
+    snapshotHost: "/Users/tester/.local/share/bimo/deployments/demo/snapshots/run-1/candidate-1",
+    expectedSha: "d".repeat(40),
+    expectedSnapshot: receipt,
+    profile: "bimo-repo-v1",
+    suite: "candidate",
+    timeoutSeconds: 300,
+    nameSuffix: "source-candidate",
+  });
+  assert.match(local.join(" "), /src=\/Users\/tester\/\.local\/share\/bimo\/deployments\/demo\/snapshots/);
+  assert.throws(() => sourceVerifierCreateArgs({
+    deployment: "demo",
+    hostRoot: "/Users/tester/.local/share/bimo/deployments/demo",
+    localHome: "/Users/other",
+    image: IMAGE,
+    snapshotHost: "/Users/tester/.local/share/bimo/deployments/demo/snapshots/run-1/candidate-1",
+    expectedSha: "d".repeat(40),
+    expectedSnapshot: receipt,
+    profile: "bimo-repo-v1",
+    suite: "candidate",
+    timeoutSeconds: 300,
+    nameSuffix: "source-candidate",
+  }), /invalid source verifier host root/);
 });
 
 test("verifySource binds candidate and immutable-base evidence without mounting controller state", async () => {

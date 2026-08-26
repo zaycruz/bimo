@@ -3,14 +3,20 @@ FROM docker:27.5.1-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87
 FROM node:22-slim@sha256:e9bff3a454208b46a1f96da92878cc7f56a2a41ceac2216825be3177736896b5
 
 ARG OPENCODE_VERSION=1.18.22
+ARG TARGETARCH
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
+    && case "${TARGETARCH}" in \
+      amd64) OPENCODE_ARCH=x64 ;; \
+      arm64) OPENCODE_ARCH=arm64 ;; \
+      *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
     && npm install --global --ignore-scripts --omit=optional "opencode-ai@${OPENCODE_VERSION}" \
-    && npm install --global --ignore-scripts "opencode-linux-x64@${OPENCODE_VERSION}" \
+    && npm install --global --ignore-scripts "opencode-linux-${OPENCODE_ARCH}@${OPENCODE_VERSION}" \
     && ln --symbolic --force \
-      /usr/local/lib/node_modules/opencode-linux-x64/bin/opencode \
+      "/usr/local/lib/node_modules/opencode-linux-${OPENCODE_ARCH}/bin/opencode" \
       /usr/local/bin/opencode \
     && test "$(opencode --version)" = "${OPENCODE_VERSION}" \
     && npm cache clean --force

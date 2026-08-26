@@ -1,9 +1,9 @@
-# Bimo v0.4
+# Bimo v0.5
 
-Bimo deploys predefined agent work to one Docker host. v0.4 includes bounded
-sequential workflows, one fixed parallel engineering pod, and up to three
-isolated organizer agents that select the installed template best suited to a
-prompt.
+Bimo deploys predefined agent work to a local or remote Docker-compatible
+target. v0.5 adds a default local target and one closed target seam to the
+bounded sequential workflows, fixed parallel engineering pod, and isolated
+organizer agents introduced in v0.4.
 
 ```text
 template = workflow.json + one Markdown prompt per role
@@ -233,16 +233,16 @@ Controller-owned verification is the separate fixed step described above.
 
 ## Install from GitHub
 
-Bimo is not published to the npm registry. Download the v0.4.0 release
+Bimo is not published to the npm registry. Download the v0.5.0 release
 tarball and checksum, verify the exact file, then install it locally:
 
 ```bash
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/bimo/releases/download/v0.4.0/bimo-workflow-0.4.0.tgz
+  https://github.com/zaycruz/bimo/releases/download/v0.5.0/bimo-workflow-0.5.0.tgz
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/bimo/releases/download/v0.4.0/bimo-workflow-0.4.0.tgz.sha256
-shasum --algorithm 256 --check bimo-workflow-0.4.0.tgz.sha256
-npm install --global ./bimo-workflow-0.4.0.tgz
+  https://github.com/zaycruz/bimo/releases/download/v0.5.0/bimo-workflow-0.5.0.tgz.sha256
+shasum --algorithm 256 --check bimo-workflow-0.5.0.tgz.sha256
+npm install --global ./bimo-workflow-0.5.0.tgz
 bimo list --json
 bimo validate parallel-engineering-pod
 BIMO_PACKAGE_ROOT="$(npm root --global)/bimo-workflow"
@@ -267,10 +267,41 @@ List and validate the installed templates:
 ```bash
 bimo list
 bimo list --json
+bimo targets
+bimo targets --json
 bimo validate react-app
 bimo validate react-solo --json
 bimo validate parallel-engineering-pod --json
 ```
+
+`bimo targets` probes the local Docker daemon and reports the built-in access
+adapters. `local` is automatic and is the default. `ssh` and `proxmox-lxc` are
+configured per command; their `on-demand` status means Bimo has not contacted a
+specific host yet. Local mode uses the active Unix-socket Docker context and
+rejects ambient `DOCKER_HOST` overrides.
+
+### Deploy locally
+
+With Docker available, no target flags are required. On this Mac, for example,
+the `local` adapter uses the active Colima Docker daemon and builds the image for
+the daemon's native `linux/arm64` platform:
+
+```bash
+BIMO_PACKAGE_ROOT="${BIMO_PACKAGE_ROOT:-$(npm root --global)/bimo-workflow}"
+
+bimo deploy react-solo \
+  --deployment solo-local \
+  --task-file "$BIMO_PACKAGE_ROOT/examples/solo-demo.md" \
+  --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
+  --public-url 'http://127.0.0.1:8080'
+
+bimo logs --deployment solo-local
+```
+
+`--target local` is the equivalent explicit form. Local state lives under
+`~/.local/share/bimo/deployments/<deployment>/`. Local deployment still uses
+Linux containers and a Docker socket; it does not silently substitute macOS
+Seatbelt or Apple's `container` runtime.
 
 ### Organize a prompt with agents
 
@@ -289,8 +320,6 @@ SMALL_APP_ASSIGNMENT="$(<"$SMALL_APP_PROMPT")"
 PLAN="$(bimo -p "$SMALL_APP_ASSIGNMENT" \
   -n 3 \
   --deployment organize-demo \
-  --proxmox pve-05 \
-  --vmid 113 \
   --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
   --json)"
 
@@ -327,6 +356,7 @@ BASE_SHA="$(git ls-remote --refs "$REPOSITORY" refs/heads/main | cut -f1)"
 POD_PLAN="$(bimo -p "$POD_ASSIGNMENT" \
   -n 3 \
   --deployment pod-plan-demo \
+  --target proxmox-lxc \
   --proxmox root@pve-05 \
   --vmid 113 \
   --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
@@ -336,6 +366,7 @@ printf '%s\n' "$POD_PLAN" | jq .
 
 bimo deploy parallel-engineering-pod \
   --deployment pod-demo \
+  --target proxmox-lxc \
   --proxmox root@pve-05 \
   --vmid 113 \
   --task-file "$POD_TASK_FILE" \
@@ -371,6 +402,7 @@ LXC_ADDRESS='10.200.160.143' # Replace this when targeting another LXC.
 
 bimo deploy react-app \
   --deployment fleet-demo \
+  --target proxmox-lxc \
   --proxmox root@pve-05 \
   --vmid 113 \
   --task-file "$BIMO_PACKAGE_ROOT/examples/fleet-demo.md" \
@@ -383,6 +415,7 @@ Deploy the sequential one-role template independently:
 ```bash
 bimo deploy react-solo \
   --deployment solo-demo \
+  --target proxmox-lxc \
   --proxmox root@pve-05 \
   --vmid 113 \
   --task-file "$BIMO_PACKAGE_ROOT/examples/solo-demo.md" \
@@ -409,14 +442,14 @@ bimo logs \
 
 ### Deploy to a Docker host
 
-Use `--host` instead of `--proxmox` and `--vmid` when Docker runs directly on
-the SSH target:
+Use `--target ssh --host HOST` when Docker runs directly on the SSH target:
 
 ```bash
 BIMO_PACKAGE_ROOT="${BIMO_PACKAGE_ROOT:-$(npm root --global)/bimo-workflow}"
 
 bimo deploy react-app \
   --deployment fleet-demo \
+  --target ssh \
   --host deploy@docker-host.example \
   --task-file "$BIMO_PACKAGE_ROOT/examples/fleet-demo.md" \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
@@ -427,8 +460,11 @@ bimo logs \
   --host deploy@docker-host.example
 ```
 
-Deploy accepts exactly one target (`--host`, or `--proxmox` with `--vmid`) and
-exactly one task source (`--task-file FILE` or `--task-stdin`). Every deployment
+Deploy defaults to local Docker. The explicit forms are `--target local`,
+`--target ssh --host HOST`, and `--target proxmox-lxc --proxmox HOST --vmid ID`.
+The older `--host` and `--proxmox ... --vmid ...` forms remain aliases. Target
+options cannot be mixed. Deploy also accepts exactly one task source
+(`--task-file FILE` or `--task-stdin`). Every deployment
 requires `--deployment` and `--secret-ref`. Sequential workflows also require
 `--public-url`. The fixed pod instead requires `--github-secret-ref`, the fixed
 repository URL, an immutable `--base-sha`, and `--target-branch main`.
@@ -438,7 +474,7 @@ sequential deploys also accept `--port`. `logs` accepts `--run`, `--image`, and
 `--json`.
 
 Defaults are port `8080`, model `openrouter/deepseek/deepseek-v4-flash`, and
-image tag `bimo-workflow:0.4.0`. `--account` selects a 1Password account;
+image tag `bimo-workflow:0.5.0`. `--account` selects a 1Password account;
 `--json` requests machine-readable output.
 
 Quote each `op://` reference as one shell argument. Vault, item, and field names
@@ -452,7 +488,9 @@ your environment; this repository does not claim a public hosted domain.
 
 ## State and logs
 
-One deployment keeps its state on the target:
+One deployment keeps its state on the target. Remote targets use
+`/var/lib/bimo/deployments/<deployment>/`; local targets use
+`~/.local/share/bimo/deployments/<deployment>/`:
 
 ```text
 /var/lib/bimo/deployments/<deployment>/
@@ -473,7 +511,7 @@ records against target-host root.
 Each successful verification creates a separate artifact snapshot that Bimo
 treats as immutable: it is created once, permission-locked, and mounted by the
 retained app read-only. Bimo performs automatic rollback only when replacing
-the current app fails; v0.4 has no user-facing rollback command or remote
+the current app fails; v0.5 has no user-facing rollback command or remote
 artifact backup.
 
 The fixed pod uses the same deployment root but keeps private run records under
@@ -494,12 +532,13 @@ and private temporary roots. The pod does not resume a partial Planner, writer,
 or checker attempt. Confirm no controller or publisher is active, preserve the
 run records for diagnosis, then recover only that dedicated deployment root
 before starting a new run. The internal publisher can reconcile an interrupted
-durable publication, but v0.4 has no general user-facing resume command.
+durable publication, but v0.5 has no general user-facing resume command.
 
 ## Security boundary
 
-- The OpenRouter key is resolved locally with `op read`, sent through SSH and
-  controller stdin, then sent to a run-scoped credential gateway through stdin.
+- The OpenRouter key is resolved locally with `op read`, sent to the controller
+  through stdin (and over SSH for remote targets), then sent to a run-scoped
+  credential gateway through stdin.
   It is not placed in workflow JSON, prompts, command-line arguments, the shared
   workspace, or role-container environment.
 - Role containers join an internal Docker network with no direct egress. Only
@@ -551,19 +590,25 @@ Never put a credential in a task, prompt, workflow file, repository file,
   workspace.
 - OpenRouter is the only provider. There is no provider discovery, marketplace,
   generic DAG, manager service, inter-agent chat, message bus, or graph runtime.
-- Deployment is Docker over SSH, directly or through Proxmox `pct exec`. There
-  is no Helm, Terraform, Kubernetes scheduler, multi-host placement, HA, or
-  autoscaling layer.
+- Deployment uses the local Docker daemon, Docker over SSH, or Docker inside a
+  Proxmox LXC through `pct exec`. There is no Proxmox API adapter, native Linux
+  LXC lifecycle manager, Apple `container` adapter, Seatbelt runtime, Helm,
+  Terraform, Kubernetes scheduler, multi-host placement, HA, or autoscaling
+  layer.
+- Deployment targets are a closed built-in registry, not executable third-party
+  plugins. Templates remain data-only packs. A plugin ABI would add lifecycle,
+  trust, and compatibility surface before Bimo has a second container runtime
+  that needs it; see [the target boundary](docs/targets.md).
 - Publication serves static files only. Replacement is preflighted and can
   restore the prior app on failure, but zero downtime is not guaranteed.
 - History and artifacts remain on one target host. There is no database, remote
   backup, or user-invoked rollback.
 - Organizer audit runs are retained on the target and are not automatically
-  pruned in v0.4.
+  pruned in v0.5.
 - Pod publication stops at an isolated, draft pull request. It does not approve,
   mark ready, merge, deploy, or delete the branch.
 
-## v0.4 verification
+## v0.5 verification
 
 The release gate runs the full Node test suite, package manifest verification,
 Docker image build, all template validations, and the bundled starter offline
