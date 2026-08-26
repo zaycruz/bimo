@@ -19,6 +19,7 @@ const MODEL = /^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/;
 const HOST_ROOT = /^\/var\/lib\/monolith\/deployments\/[a-z][a-z0-9-]{0,31}$/;
 const SAFE_IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$/;
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+const EXECUTION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const NODE_UID = 1000;
 const NODE_GID = 1000;
 const PROXY_LIFETIME_SECONDS = 3_600;
@@ -53,6 +54,57 @@ function commonSandbox({ memory = "2g", cpus = "1.5", pids = "256" } = {}) {
 function bind(source, target, readOnly = false) {
   if (source.includes(",") || source.includes("\n")) fail("unsafe bind mount source");
   return `type=bind,src=${source},dst=${target}${readOnly ? ",readonly" : ""}`;
+}
+
+function writableWorkspaceMounts(workspaceHost, access, writeMounts) {
+  if (writeMounts === undefined) {
+    return {
+      rootReadOnly: access !== "write",
+      maskGit: false,
+      mounts: [],
+    };
+  }
+  if (!Array.isArray(writeMounts) || writeMounts.length > 32) {
+    fail("invalid writable workspace directories");
+  }
+  if ((access === "write") !== (writeMounts.length > 0)) {
+    fail("writable workspace directories do not match access");
+  }
+
+  const relatives = [];
+  const mounts = writeMounts.map(value => {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+        || Object.getPrototypeOf(value) !== Object.prototype
+        || Object.keys(value).sort().join(",") !== "relative,source") {
+      fail("invalid writable workspace directory");
+    }
+    const { relative, source } = value;
+    if (typeof relative !== "string" || relative.length < 1 || relative.length > 240
+        || !/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(relative)) {
+      fail("invalid writable workspace directory");
+    }
+    const parts = relative.split("/");
+    if (parts.some(part => part === "." || part === "..")
+        || parts.some(part => part.toLowerCase() === ".git" || part.toLowerCase() === ".github")) {
+      fail("invalid writable workspace directory");
+    }
+    const expectedSource = path.join(workspaceHost, ...parts);
+    if (typeof source !== "string" || path.resolve(source) !== expectedSource) {
+      fail("invalid writable workspace directory");
+    }
+    for (const existing of relatives) {
+      if (relative === existing || relative.startsWith(`${existing}/`) || existing.startsWith(`${relative}/`)) {
+        fail("overlapping writable workspace directories");
+      }
+    }
+    relatives.push(relative);
+    return {
+      source: expectedSource,
+      target: `/workspace/${relative}`,
+    };
+  });
+
+  return { rootReadOnly: true, maskGit: true, mounts };
 }
 
 function transientLabels(deployment) {
@@ -133,6 +185,62 @@ function validateArtifactReceipt(receipt, workflow) {
   return { files: receipt.files, bytes: receipt.bytes, sha256: receipt.sha256 };
 }
 
+function validateSourceSnapshotHandle(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+      || Object.keys(value).sort().join(",") !== "id,receipt,sha"
+      || !EXECUTION_ID.test(value.id ?? "")
+      || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.sha ?? "")) {
+    fail(`invalid ${label} source snapshot`);
+  }
+  const receipt = value.receipt;
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)
+      || Object.getPrototypeOf(receipt) !== Object.prototype
+      || Object.keys(receipt).sort().join(",") !== "bytes,files,sha256"
+      || !Number.isInteger(receipt.files) || receipt.files < 1 || receipt.files > 10_000
+      || !Number.isInteger(receipt.bytes) || receipt.bytes < 1 || receipt.bytes > 100 * 1024 * 1024
+      || !/^[a-f0-9]{64}$/.test(receipt.sha256)) {
+    fail(`invalid ${label} source snapshot receipt`);
+  }
+  return Object.freeze({
+    id: value.id,
+    sha: value.sha,
+    receipt: Object.freeze({ files: receipt.files, bytes: receipt.bytes, sha256: receipt.sha256 }),
+  });
+}
+
+function validateSourceVerifierReceipt(value, { expectedSha, profile, suite, snapshot }) {
+  const expectedFields = suite === "candidate"
+    ? "candidateSha,evidence,profile,snapshot,status,suite"
+    : "candidateSha,evidence,profile,status,suite";
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+      || Object.keys(value).sort().join(",") !== expectedFields
+      || value.status !== "passed" || value.candidateSha !== expectedSha
+      || value.profile !== profile || value.suite !== suite
+      || !Array.isArray(value.evidence) || value.evidence.length < 1 || value.evidence.length > 600) {
+    fail(`source ${suite} verifier returned an invalid receipt`);
+  }
+  for (const evidence of value.evidence) {
+    if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)
+        || Object.getPrototypeOf(evidence) !== Object.prototype
+        || Object.keys(evidence).sort().join(",") !== "authority,command,outputSha256"
+        || !["trusted", "advisory"].includes(evidence.authority)
+        || typeof evidence.command !== "string" || !evidence.command || Buffer.byteLength(evidence.command) > 512
+        || !/^[a-f0-9]{64}$/.test(evidence.outputSha256)) {
+      fail(`source ${suite} verifier returned invalid evidence`);
+    }
+  }
+  if (suite === "candidate") {
+    if (!value.snapshot || !sameArtifact(value.snapshot, snapshot)) {
+      fail("source candidate verifier snapshot receipt did not match");
+    }
+  } else if (value.evidence.some(item => item.authority !== "trusted")) {
+    fail("source baseline verifier returned advisory evidence");
+  }
+  return value;
+}
+
 function sameArtifact(left, right) {
   return left.files === right.files && left.bytes === right.bytes && left.sha256 === right.sha256;
 }
@@ -149,19 +257,26 @@ export function agentCreateArgs({
   access,
   model,
   timeoutSeconds,
+  nameSuffix = `${role}-${step}`,
+  writeMounts,
 }) {
-  const name = containerName(deployment, `${role}-${step}`);
+  if (!EXECUTION_ID.test(nameSuffix)) fail("invalid agent execution name");
+  const workspaceMounts = writableWorkspaceMounts(workspaceHost, access, writeMounts);
+  const name = containerName(deployment, nameSuffix);
   return [
     "create",
     "--name", name,
     ...transientLabels(deployment),
     "--network", network,
     ...commonSandbox(),
+    "--ulimit", "fsize=8388608:8388608",
     "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
     "--tmpfs", "/home/node:rw,nosuid,nodev,size=512m,uid=1000,gid=1000",
     "--tmpfs", "/instructions:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000",
     "--env", "MONOLITH_GATEWAY_URL=http://gateway:8787/api/v1",
-    "--mount", bind(workspaceHost, "/workspace", access !== "write"),
+    "--mount", bind(workspaceHost, "/workspace", workspaceMounts.rootReadOnly),
+    ...(workspaceMounts.maskGit ? ["--mount", bind("/dev/null", "/workspace/.git", true)] : []),
+    ...workspaceMounts.mounts.flatMap(({ source, target }) => ["--mount", bind(source, target, false)]),
     "--mount", bind(handoffHost, "/handoff", false),
     "--mount", bind(promptHost, "/instructions/instructions.md", true),
     image,
@@ -207,6 +322,83 @@ export function proxyCreateArgs({ deployment, image, network, model }) {
     "--max-requests", "100",
     "--max-body-bytes", "2097152",
     "--timeout-seconds", "300",
+  ];
+}
+
+export function sourceVerifierCreateArgs({
+  deployment,
+  image,
+  snapshotHost,
+  baselineTestHost,
+  expectedSha,
+  expectedSnapshot,
+  profile,
+  suite,
+  timeoutSeconds,
+  nameSuffix,
+}) {
+  if (!NAME.test(deployment ?? "") || !EXECUTION_ID.test(nameSuffix ?? "")) {
+    fail("invalid source verifier identity");
+  }
+  if (!SAFE_IMAGE.test(image ?? "")) fail("invalid source verifier image");
+  const snapshotRoot = path.join("/var/lib/monolith/deployments", deployment, "snapshots");
+  if (typeof snapshotHost !== "string" || !path.isAbsolute(snapshotHost)
+      || !path.resolve(snapshotHost).startsWith(`${snapshotRoot}${path.sep}`)) {
+    fail("invalid source snapshot host path");
+  }
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(expectedSha ?? "")) {
+    fail("invalid source verifier SHA");
+  }
+  if (profile !== "monolith-repo-v1" || (suite !== "candidate" && suite !== "baseline")) {
+    fail("invalid source verification profile");
+  }
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 900) {
+    fail("invalid source verification timeout");
+  }
+  if (suite === "candidate") {
+    if (!expectedSnapshot || typeof expectedSnapshot !== "object" || Array.isArray(expectedSnapshot)
+        || Object.getPrototypeOf(expectedSnapshot) !== Object.prototype
+        || Object.keys(expectedSnapshot).sort().join(",") !== "bytes,files,sha256"
+        || !Number.isInteger(expectedSnapshot.files) || expectedSnapshot.files < 1 || expectedSnapshot.files > 10_000
+        || !Number.isInteger(expectedSnapshot.bytes) || expectedSnapshot.bytes < 1 || expectedSnapshot.bytes > 100 * 1024 * 1024
+        || !/^[a-f0-9]{64}$/.test(expectedSnapshot.sha256)) {
+      fail("invalid expected source snapshot");
+    }
+    if (baselineTestHost !== undefined) fail("candidate verification cannot mount baseline tests");
+  } else {
+    if (expectedSnapshot !== undefined) fail("baseline verification cannot accept a snapshot receipt");
+    if (typeof baselineTestHost !== "string" || !path.isAbsolute(baselineTestHost)
+        || !path.resolve(baselineTestHost).startsWith(`${snapshotRoot}${path.sep}`)
+        || path.basename(baselineTestHost) !== "test") {
+      fail("invalid baseline test snapshot path");
+    }
+  }
+
+  return [
+    "create",
+    "--name", containerName(deployment, nameSuffix),
+    ...transientLabels(deployment),
+    "--network", "none",
+    ...commonSandbox({ memory: "2g", cpus: "1.5", pids: "256" }),
+    "--ulimit", "fsize=8388608:8388608",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,uid=1000,gid=1000",
+    "--tmpfs", "/home/node:rw,nosuid,nodev,size=256m,uid=1000,gid=1000",
+    "--mount", bind(path.resolve(snapshotHost), "/workspace", true),
+    ...(suite === "baseline"
+      ? ["--mount", bind(path.resolve(baselineTestHost), "/workspace/test", true)]
+      : []),
+    image,
+    "source-verify",
+    "--workspace", "/workspace",
+    "--expected-sha", expectedSha,
+    "--profile", profile,
+    "--suite", suite,
+    "--timeout-seconds", String(timeoutSeconds),
+    ...(suite === "candidate" ? [
+      "--expected-files", String(expectedSnapshot.files),
+      "--expected-bytes", String(expectedSnapshot.bytes),
+      "--expected-snapshot-sha", expectedSnapshot.sha256,
+    ] : []),
   ];
 }
 
@@ -566,23 +758,48 @@ function parseLastJson(text, label) {
 }
 
 export class DockerRuntime {
-  constructor({ docker = "docker", image, deployment, hostRoot, key, model, port, publicUrl }) {
+  constructor({
+    docker = "docker",
+    image,
+    deployment,
+    hostRoot,
+    stateRoot = "/state",
+    key,
+    model,
+    port,
+    publicUrl,
+  }) {
     if (!NAME.test(deployment)) fail("invalid deployment name");
     if (!HOST_ROOT.test(hostRoot)) fail("invalid Monolith host root");
+    if (hostRoot !== `/var/lib/monolith/deployments/${deployment}`) {
+      fail("Monolith host root must match deployment");
+    }
+    if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) fail("invalid Monolith state root");
+    if (path.resolve(stateRoot) !== stateRoot) fail("Monolith state root must be canonical");
     if (!SAFE_IMAGE.test(image)) fail("invalid image reference");
     if (!MODEL.test(model)) fail("invalid model reference");
     if (typeof key !== "string" || !/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(key)) fail("invalid OpenRouter key");
-    if (!Number.isInteger(port) || port < 1_024 || port > 65_535) fail("invalid publication port");
-    const parsedUrl = new URL(publicUrl);
-    if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) fail("invalid public URL");
+    const publicationConfigured = port !== undefined || publicUrl !== undefined;
+    if (publicationConfigured && (!Number.isInteger(port) || port < 1_024 || port > 65_535)) {
+      fail("invalid publication port");
+    }
+    let parsedUrl;
+    if (publicationConfigured) {
+      if (port === undefined || publicUrl === undefined) fail("publication configuration is incomplete");
+      parsedUrl = new URL(publicUrl);
+      if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) fail("invalid public URL");
+    }
     this.docker = docker;
     this.image = image;
     this.deployment = deployment;
     this.hostRoot = hostRoot;
+    this.stateRoot = path.resolve(stateRoot);
     this.key = key;
     this.model = model;
-    this.port = port;
-    this.publicUrl = parsedUrl.toString().replace(/\/$/, "");
+    this.port = port ?? null;
+    this.publicUrl = parsedUrl?.toString().replace(/\/$/, "") ?? null;
+    this.controllerUid = typeof process.getuid === "function" ? process.getuid() : 0;
+    this.controllerGid = typeof process.getgid === "function" ? process.getgid() : 0;
     this.agentNetwork = containerName(deployment, "agents");
     this.egressNetwork = containerName(deployment, "egress");
     this.agentNetworkCreated = false;
@@ -733,18 +950,21 @@ export class DockerRuntime {
     return result.stdout.trim();
   }
 
-  async start({ deadlineAt } = {}) {
+  async start({ deadlineAt, bootstrap = true } = {}) {
+    if (typeof bootstrap !== "boolean") fail("bootstrap must be boolean");
     const deploymentDeadline = this.deploymentDeadline(deadlineAt);
     const bootstrapName = containerName(this.deployment, "bootstrap");
     try {
       await this.reconcileTransientResources(deploymentDeadline);
-      this.activeContainers.add(bootstrapName);
-      await this.commandWithin(bootstrapArgs({
-        deployment: this.deployment,
-        image: this.image,
-        workspaceHost: path.join(this.hostRoot, "workspace"),
-      }), { timeoutMs: 10 * 60 * 1_000 }, deploymentDeadline, "deployment");
-      this.activeContainers.delete(bootstrapName);
+      if (bootstrap) {
+        this.activeContainers.add(bootstrapName);
+        await this.commandWithin(bootstrapArgs({
+          deployment: this.deployment,
+          image: this.image,
+          workspaceHost: path.join(this.hostRoot, "workspace"),
+        }), { timeoutMs: 10 * 60 * 1_000 }, deploymentDeadline, "deployment");
+        this.activeContainers.delete(bootstrapName);
+      }
       this.agentNetworkCreated = true;
       await this.commandWithin([
         "network", "create", ...transientLabels(this.deployment), "--internal", this.agentNetwork,
@@ -787,9 +1007,96 @@ export class DockerRuntime {
   }
 
   async runRole({ role, step, attempt, access, prompt, timeoutSeconds, runDir, workspace }) {
+    void workspace;
+    return this.#runAgentExecution({
+      executionId: `${String(step).padStart(2, "0")}-${role}`,
+      containerSuffix: `${role}-${step}`,
+      attemptName: `${String(step).padStart(2, "0")}-${role}-${attempt}`,
+      role,
+      access,
+      prompt,
+      timeoutSeconds,
+      runDir,
+      workspaceHost: path.join(this.hostRoot, "workspace"),
+    });
+  }
+
+  async runAgentExecution({
+    executionId,
+    role,
+    attempt = 1,
+    access,
+    prompt,
+    timeoutSeconds,
+    runId,
+    workspaceId,
+    writeDirectories,
+  }) {
+    if (!EXECUTION_ID.test(executionId ?? "")) fail("invalid agent execution ID");
+    if (!Number.isInteger(attempt) || attempt < 1 || attempt > 999) fail("invalid agent execution attempt");
+    if (!RUN_ID.test(runId ?? "")) fail("invalid agent run ID");
+    if (!EXECUTION_ID.test(workspaceId ?? "")) fail("invalid agent workspace ID");
+    if (!Array.isArray(writeDirectories)) fail("invalid writable workspace directories");
+    const workspaceHost = path.join(this.hostRoot, "worktrees", runId, workspaceId);
+    const writeMounts = writeDirectories.map(relative => ({
+      relative,
+      source: typeof relative === "string" ? path.join(workspaceHost, ...relative.split("/")) : "",
+    }));
+    return this.#runAgentExecution({
+      executionId,
+      containerSuffix: executionId,
+      attemptName: `${executionId}-${attempt}`,
+      role,
+      access,
+      prompt,
+      timeoutSeconds,
+      runDir: path.join(this.stateRoot, runId),
+      workspaceHost,
+      writeMounts,
+    });
+  }
+
+  async #runAgentExecution({
+    executionId,
+    containerSuffix,
+    attemptName,
+    role,
+    access,
+    prompt,
+    timeoutSeconds,
+    runDir,
+    workspaceHost,
+    writeMounts,
+  }) {
     this.throwIfCancelled();
+    if (!NAME.test(role ?? "")) fail("invalid agent role");
+    if (access !== "read" && access !== "write") fail("invalid agent workspace access");
+    if (typeof prompt !== "string" || !prompt.trim() || Buffer.byteLength(prompt) > 256 * 1024) {
+      fail("invalid agent prompt");
+    }
+    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 10 || timeoutSeconds > 1_800) {
+      fail("invalid agent timeout");
+    }
+    const runName = path.basename(runDir);
+    if (!RUN_ID.test(runName)) fail("invalid agent run directory");
+    if (path.resolve(runDir) !== path.join(this.stateRoot, runName)) {
+      fail("agent run directory must match state root");
+    }
+    const [stateMetadata, runMetadata] = await Promise.all([
+      lstat(this.stateRoot).catch(() => null),
+      lstat(runDir).catch(() => null),
+    ]);
+    if (!stateMetadata?.isDirectory() || stateMetadata.isSymbolicLink()
+        || (stateMetadata.mode & 0o777) !== 0o700
+        || stateMetadata.uid !== this.controllerUid || stateMetadata.gid !== this.controllerGid) {
+      fail("Monolith state root must be a private regular directory");
+    }
+    if (!runMetadata?.isDirectory() || runMetadata.isSymbolicLink()
+        || (runMetadata.mode & 0o777) !== 0o700
+        || runMetadata.uid !== this.controllerUid || runMetadata.gid !== this.controllerGid) {
+      fail("agent run directory must be a private regular directory");
+    }
     const deadlineAt = this.phaseDeadline(timeoutSeconds, "role");
-    const attemptName = `${String(step).padStart(2, "0")}-${role}-${attempt}`;
     const internalAttempt = path.join(runDir, "attempts", attemptName);
     const internalHandoff = path.join(internalAttempt, "handoff");
     const hostAttempt = path.join(this.hostRoot, "runs", path.basename(runDir), "attempts", attemptName);
@@ -804,19 +1111,21 @@ export class DockerRuntime {
     const args = agentCreateArgs({
       deployment: this.deployment,
       role,
-      step,
+      step: 1,
       image: this.image,
       network: this.agentNetwork,
-      workspaceHost: path.join(this.hostRoot, "workspace"),
+      workspaceHost,
       handoffHost: hostHandoff,
       promptHost: hostPrompt,
       access,
       model: this.model,
       timeoutSeconds,
+      nameSuffix: containerSuffix,
+      writeMounts,
     });
     let containerId;
     let createAttempted = false;
-    const activeName = containerName(this.deployment, `${role}-${step}`);
+    const activeName = containerName(this.deployment, containerSuffix);
     const startedAt = Date.now();
     try {
       createAttempted = true;
@@ -863,13 +1172,100 @@ export class DockerRuntime {
     } finally {
       if (createAttempted) {
         await this.cleanupCommand(
-          ["rm", "-f", containerId ?? containerName(this.deployment, `${role}-${step}`)],
+          ["rm", "-f", containerId ?? containerName(this.deployment, containerSuffix)],
           this.cleanupDeadline(),
         );
       }
       this.activeContainers.delete(activeName);
       await rm(internalAttempt, { recursive: true, force: true });
     }
+  }
+
+  async verifySource({
+    runId,
+    expectedSha,
+    candidateSnapshot,
+    baseSnapshot,
+    profile,
+    timeoutSeconds = 900,
+  }) {
+    this.throwIfCancelled();
+    if (!RUN_ID.test(runId ?? "")) fail("invalid source verification run ID");
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(expectedSha ?? "")) {
+      fail("invalid source verification SHA");
+    }
+    if (profile !== "monolith-repo-v1") fail("invalid source verification profile");
+    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 2 || timeoutSeconds > 900) {
+      fail("invalid source verification timeout");
+    }
+    const candidate = validateSourceSnapshotHandle(candidateSnapshot, "candidate");
+    const base = validateSourceSnapshotHandle(baseSnapshot, "base");
+    if (candidate.sha !== expectedSha) fail("candidate snapshot does not match the expected SHA");
+    let boundedSeconds = timeoutSeconds;
+    if (this.deploymentDeadlineAt !== null) {
+      boundedSeconds = Math.min(
+        boundedSeconds,
+        Math.floor(remaining(this.deploymentDeadlineAt, "source verification") / 1_000),
+      );
+    }
+    if (boundedSeconds < 2) fail("source verification deadline exceeded");
+    const deadlineAt = Math.min(
+      Date.now() + boundedSeconds * 1_000,
+      this.deploymentDeadlineAt ?? Number.MAX_SAFE_INTEGER,
+    );
+    const candidateHost = path.join(this.hostRoot, "snapshots", runId, candidate.id);
+    const baselineTestsHost = path.join(this.hostRoot, "snapshots", runId, base.id, "test");
+
+    const runSuite = async suite => {
+      const nameSuffix = suite === "candidate" ? "source-candidate" : "source-baseline";
+      const name = containerName(this.deployment, nameSuffix);
+      const availableSeconds = Math.floor(remaining(deadlineAt, "source verification") / 1_000);
+      if (availableSeconds < 1) fail("source verification deadline exceeded");
+      const suiteSeconds = suite === "candidate"
+        ? Math.max(1, Math.min(Math.floor(boundedSeconds / 2), availableSeconds))
+        : availableSeconds;
+      let containerId;
+      this.activeContainers.add(name);
+      try {
+        const created = await this.commandWithin(sourceVerifierCreateArgs({
+          deployment: this.deployment,
+          image: this.image,
+          snapshotHost: candidateHost,
+          ...(suite === "baseline" ? { baselineTestHost: baselineTestsHost } : {}),
+          expectedSha,
+          ...(suite === "candidate" ? { expectedSnapshot: candidate.receipt } : {}),
+          profile,
+          suite,
+          timeoutSeconds: suiteSeconds,
+          nameSuffix,
+        }), {}, deadlineAt, "source verification");
+        containerId = created.stdout.trim();
+        const execution = await this.commandWithin(["start", "-ai", containerId], {
+          timeoutMs: suiteSeconds * 1_000,
+          maxOutputBytes: 256 * 1024,
+        }, deadlineAt, "source verification");
+        return validateSourceVerifierReceipt(
+          parseLastJson(execution.stdout, `source ${suite} verifier`),
+          { expectedSha, profile, suite, snapshot: candidate.receipt },
+        );
+      } finally {
+        await this.cleanupCommand(["rm", "-f", containerId ?? name], this.cleanupDeadline());
+        this.activeContainers.delete(name);
+      }
+    };
+
+    const candidateResult = await runSuite("candidate");
+    const baselineResult = await runSuite("baseline");
+    return Object.freeze({
+      status: "passed",
+      candidateSha: expectedSha,
+      profile,
+      snapshot: candidate.receipt,
+      evidence: Object.freeze([
+        ...candidateResult.evidence.map(item => Object.freeze({ ...item })),
+        ...baselineResult.evidence.map(item => Object.freeze({ ...item })),
+      ]),
+    });
   }
 
   async verify({ workflow, workspace, runDir, timeoutSeconds = 900 }) {
@@ -990,6 +1386,7 @@ export class DockerRuntime {
 
   async publish({ workflow, runDir, timeoutSeconds }) {
     this.throwIfCancelled();
+    if (this.port === null || this.publicUrl === null) fail("runtime publication is not configured");
     const deadlineAt = this.phaseDeadline(timeoutSeconds, "publication", 900);
     const runId = path.basename(runDir);
     if (!RUN_ID.test(runId)) fail("invalid publication run ID");

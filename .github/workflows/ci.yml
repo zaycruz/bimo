@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -34,6 +36,7 @@ jobs:
       - run: docker run --rm monolith-workflow:ci list --json
       - run: docker run --rm monolith-workflow:ci validate react-app --json
       - run: docker run --rm monolith-workflow:ci validate react-solo --json
+      - run: docker run --rm monolith-workflow:ci validate parallel-engineering-pod --json
       - name: Prove the baked React starter works offline
         run: |
           starter_volume="monolith-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

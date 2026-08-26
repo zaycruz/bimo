@@ -7,7 +7,8 @@ import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
 
-import { runController } from "../src/monolith.mjs";
+import { runController, runPodController } from "../src/monolith.mjs";
+import { loadPodTemplate } from "../src/pod-contract.mjs";
 import { loadWorkflow } from "../src/workflow.mjs";
 
 const execute = promisify(execFile);
@@ -51,6 +52,8 @@ function invoke(args, { input = "", env = process.env, timeoutMs = 15_000 } = {}
 
 const LOCAL_IMAGE_ID = `sha256:${"a".repeat(64)}`;
 const REMOTE_IMAGE_ID = `sha256:${"b".repeat(64)}`;
+const POD_BASE_SHA = "1".repeat(40);
+const POD_CANDIDATE_SHA = "2".repeat(40);
 const BASE_CONFIG = {
   Entrypoint: ["/app/bin/monolith"],
   Env: ["NODE_ENV=production"],
@@ -129,9 +132,56 @@ if (command[0] === "docker" && command[1] === "load") {
       templateDigest: envelope.templateDigest,
       image: envelope.image,
     });
+    const internalCommand = command.find(value => value === "internal-pod-run" || value === "internal-publish");
     if (process.env.MONOLITH_TEST_CONTROLLER === "conflict") {
       process.stderr.write("Conflict: controller name is already in use\\n");
       process.exitCode = 125;
+    } else if (process.env.MONOLITH_TEST_CONTROLLER === "pod-success" && internalCommand === "internal-pod-run") {
+      log({
+        tool: "pod-compute-envelope",
+        fields: Object.keys(envelope).sort(),
+        runId: envelope.runId,
+        repository: envelope.repository,
+        baseSha: envelope.baseSha,
+        targetBranch: envelope.targetBranch,
+      });
+      process.stdout.write(JSON.stringify({
+        status: "ready",
+        runId: envelope.runId,
+        baseSha: envelope.baseSha,
+        candidateSha: process.env.MONOLITH_TEST_POD_CANDIDATE,
+        branch: "monolith/" + envelope.runId,
+      }) + "\\n");
+    } else if (process.env.MONOLITH_TEST_CONTROLLER === "pod-success" && internalCommand === "internal-publish") {
+      log({
+        tool: "pod-publish-envelope",
+        fields: Object.keys(envelope).sort(),
+        runId: envelope.runId,
+        repository: envelope.repository,
+        baseSha: envelope.baseSha,
+        candidateSha: envelope.candidateSha,
+        targetBranch: envelope.targetBranch,
+        headBranch: envelope.headBranch,
+      });
+      process.stdout.write(JSON.stringify({
+        status: "completed",
+        runId: envelope.runId,
+        repository: envelope.repository,
+        targetBranch: envelope.targetBranch,
+        baseSha: envelope.baseSha,
+        candidateSha: envelope.candidateSha,
+        headBranch: envelope.headBranch,
+        publication: {
+          number: 42,
+          url: "https://github.com/zaycruz/monolith-v2/pull/42",
+          draft: true,
+          created: true,
+          headBranch: envelope.headBranch,
+          headSha: envelope.candidateSha,
+          targetBranch: envelope.targetBranch,
+          baseSha: envelope.baseSha,
+        },
+      }) + "\\n");
     } else {
       process.stdout.write(JSON.stringify({
         template: envelope.template,
@@ -144,8 +194,11 @@ if (command[0] === "docker" && command[1] === "load") {
 }
 `;
   const op = `#!/usr/bin/env node
-require("node:fs").appendFileSync(process.env.MONOLITH_TEST_LOG, JSON.stringify({ tool: "op" }) + "\\n");
-process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.MONOLITH_TEST_LOG, JSON.stringify({ tool: "op", reference: args[1] }) + "\\n");
+if (args[1].endsWith("/github")) process.stdout.write("github_pat_${"g".repeat(64)}\\n");
+else process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
 `;
   await Promise.all([
     writeFile(path.join(directory, "docker"), docker, { mode: 0o755 }),
@@ -164,6 +217,7 @@ process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
       MONOLITH_TEST_LOCAL_INSPECT: imageInspect(LOCAL_IMAGE_ID),
       MONOLITH_TEST_REMOTE_INSPECT: imageInspect(remoteImageId, { config: remoteConfig, layers: remoteLayers }),
       MONOLITH_TEST_CONTROLLER: controller,
+      MONOLITH_TEST_POD_CANDIDATE: POD_CANDIDATE_SHA,
     },
   };
 }
@@ -189,9 +243,35 @@ function deployArgs(taskFile) {
   ];
 }
 
-test("the installed CLI lists the packaged React workflow", async () => {
+function podDeployArgs(taskFile) {
+  return [
+    "deploy", "parallel-engineering-pod",
+    "--deployment", "pod-demo",
+    "--host", "example.invalid",
+    "--task-file", taskFile,
+    "--secret-ref", "op://Test/Monolith/openrouter",
+    "--github-secret-ref", "op://Test/Monolith/github",
+    "--repository", "https://github.com/zaycruz/monolith-v2.git",
+    "--base-sha", POD_BASE_SHA,
+    "--target-branch", "main",
+    "--image", "monolith-workflow:test",
+    "--json",
+  ];
+}
+
+test("the installed CLI lists the packaged workflows and fixed engineering pod", async () => {
   const result = await run("list", "--json");
-  assert.deepEqual(result.templates.map(template => template.name), ["react-app", "react-solo"]);
+  assert.deepEqual(result.templates.map(template => template.name), [
+    "parallel-engineering-pod",
+    "react-app",
+    "react-solo",
+  ]);
+  assert.ok(result.templates.some(template => (
+    template.name === "parallel-engineering-pod"
+      && template.kind === "engineering-pod"
+      && template.maxAttempts === 3
+      && template.roles.join(",") === "planner,engineering-a,engineering-b,qa-tests,checker,qa,testing"
+  )));
   assert.ok(result.templates.some(template => (
     template.name === "react-app"
       && template.maxSteps === 15
@@ -215,6 +295,14 @@ test("the installed CLI validates the packaged one-role workflow", async () => {
   const result = await run("validate", "react-solo", "--json");
   assert.equal(result.valid, true);
   assert.equal(result.template, "react-solo");
+  assert.match(result.digest, /^[a-f0-9]{64}$/);
+});
+
+test("the installed CLI validates the packaged fixed engineering pod", async () => {
+  const result = await run("validate", "parallel-engineering-pod", "--json");
+  assert.equal(result.valid, true);
+  assert.equal(result.kind, "engineering-pod");
+  assert.equal(result.template, "parallel-engineering-pod");
   assert.match(result.digest, /^[a-f0-9]{64}$/);
 });
 
@@ -268,6 +356,46 @@ test("internal-run rejects an invalid or mismatched template digest before Docke
   ], { input: JSON.stringify(envelope) });
   assert.equal(injection.code, 1);
   assert.match(injection.stderr, /controller envelope is invalid/);
+});
+
+test("internal-pod-run rejects a mismatched packaged template before Git or Docker", async () => {
+  const envelope = {
+    version: 1,
+    template: "parallel-engineering-pod",
+    templateDigest: "0".repeat(64),
+    deployment: "pod-demo",
+    task: "Implement the fixed pod.",
+    key: `sk-or-v1-${"k".repeat(32)}`,
+    model: "openrouter/deepseek/deepseek-v4-flash",
+    image: LOCAL_IMAGE_ID,
+    repository: "https://github.com/zaycruz/monolith-v2.git",
+    baseSha: POD_BASE_SHA,
+    targetBranch: "main",
+    runId: "pod-run-1",
+  };
+  const result = await invoke([
+    "internal-pod-run",
+    "--host-root", "/var/lib/monolith/deployments/pod-demo",
+  ], { input: JSON.stringify(envelope) });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /template digest does not match/);
+});
+
+test("internal-publish rejects publication bindings outside the fixed repository", async () => {
+  const result = await invoke(["internal-publish"], {
+    input: JSON.stringify({
+      version: 1,
+      runId: "pod-run-1",
+      repository: "https://github.com/attacker/repository.git",
+      targetBranch: "main",
+      baseSha: POD_BASE_SHA,
+      candidateSha: POD_CANDIDATE_SHA,
+      headBranch: "monolith/pod-run-1",
+      token: `github_pat_${"g".repeat(64)}`,
+    }),
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /publisher envelope is invalid/);
 });
 
 test("deploy rejects image shell syntax before local execution", async () => {
@@ -367,6 +495,74 @@ test("deploy accepts daemon-normalized Config, anchors transfer, and fails close
   assert.ok(controllerEnvelope.fields.includes("templateDigest"));
 });
 
+test("pod deploy computes without GitHub authority then publishes one exact draft PR in isolation", async t => {
+  const tools = await fakeDeployTools(t, { controller: "pod-success" });
+  const result = await invoke(podDeployArgs(tools.taskFile), { env: tools.env });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const response = JSON.parse(result.stdout);
+  assert.equal(response.status, "completed");
+  assert.equal(response.baseSha, POD_BASE_SHA);
+  assert.equal(response.candidateSha, POD_CANDIDATE_SHA);
+  assert.equal(response.publication.draft, true);
+  assert.equal(response.publication.url, "https://github.com/zaycruz/monolith-v2/pull/42");
+
+  const entries = await readCommandLog(tools.logFile);
+  const remoteCommands = entries.filter(entry => entry.tool === "ssh").map(entry => entry.command);
+  const compute = remoteCommands.find(command => command.includes("internal-pod-run"));
+  const publisher = remoteCommands.find(command => command.includes("internal-publish"));
+  assert.ok(compute, "compute controller was not launched");
+  assert.ok(publisher, "isolated publisher was not launched");
+  assert.equal(compute[compute.indexOf("--name") + 1], "monolith-pod-demo-controller");
+  assert.equal(publisher[publisher.indexOf("--name") + 1], "monolith-pod-demo-publisher");
+  assert.equal(remoteCommands.some(command => (
+    command[0] === "docker" && command[1] === "rm" && command.includes("monolith-pod-demo-publisher")
+  )), false);
+
+  const hostRoot = "/var/lib/monolith/deployments/pod-demo";
+  assert.ok(remoteCommands.some(command => command[0] === "mkdir"
+    && ["runs", "source", "worktrees", "snapshots"].every(directory => (
+      command.includes(`${hostRoot}/${directory}`)
+    ))));
+  for (const mount of [
+    "/var/run/docker.sock:/var/run/docker.sock:rw",
+    `${hostRoot}/runs:/state:rw`,
+    `${hostRoot}/source:/source:rw`,
+    `${hostRoot}/worktrees:/worktrees:rw`,
+    `${hostRoot}/snapshots:/snapshots:rw`,
+  ]) {
+    assert.ok(compute.includes(mount), `compute missing ${mount}`);
+  }
+  assert.ok(publisher.includes(`${hostRoot}/runs:/state:rw`));
+  assert.ok(publisher.includes(`${hostRoot}/source:/source:rw`));
+  assert.equal(publisher.some(value => value.includes("docker.sock")), false);
+  assert.equal(publisher.some(value => value.includes("worktrees") || value.includes("snapshots")), false);
+  assert.ok(publisher.includes("/run/monolith-publish:rw,nosuid,nodev,noexec,size=16m,mode=0700"));
+
+  const computeEnvelope = entries.find(entry => entry.tool === "pod-compute-envelope");
+  const publishEnvelope = entries.find(entry => entry.tool === "pod-publish-envelope");
+  assert.deepEqual(computeEnvelope.fields, [
+    "baseSha", "deployment", "image", "key", "model", "repository", "runId", "targetBranch",
+    "task", "template", "templateDigest", "version",
+  ]);
+  assert.deepEqual(publishEnvelope.fields, [
+    "baseSha", "candidateSha", "headBranch", "repository", "runId", "targetBranch", "token", "version",
+  ]);
+  assert.equal(computeEnvelope.runId, publishEnvelope.runId);
+  assert.equal(computeEnvelope.repository, "https://github.com/zaycruz/monolith-v2.git");
+  assert.equal(publishEnvelope.candidateSha, POD_CANDIDATE_SHA);
+
+  const openRouterIndex = entries.findIndex(entry => entry.tool === "op" && entry.reference.endsWith("/openrouter"));
+  const computeIndex = entries.indexOf(computeEnvelope);
+  const githubIndex = entries.findIndex(entry => entry.tool === "op" && entry.reference.endsWith("/github"));
+  const publishIndex = entries.indexOf(publishEnvelope);
+  assert.ok(openRouterIndex >= 0 && openRouterIndex < computeIndex);
+  assert.ok(computeIndex < githubIndex && githubIndex < publishIndex);
+  const serializedLog = JSON.stringify(entries);
+  assert.equal(serializedLog.includes(`sk-or-v1-${"k".repeat(32)}`), false);
+  assert.equal(serializedLog.includes(`github_pat_${"g".repeat(64)}`), false);
+});
+
 test("controller signal cancellation aborts runtime and prevents verify or publish", async t => {
   const temporary = await mkdtemp(path.join(tmpdir(), "monolith-controller-test-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
@@ -436,4 +632,76 @@ test("controller signal cancellation aborts runtime and prevents verify or publi
   assert.equal(deadlines[0], deadlines[1]);
   assert.equal(signalEmitter.listenerCount("SIGINT"), 0);
   assert.equal(signalEmitter.listenerCount("SIGTERM"), 0);
+});
+
+test("pod controller composition starts without app bootstrap and verifies only opaque snapshots", async () => {
+  const pod = await loadPodTemplate("parallel-engineering-pod", {
+    templateRoot: path.join(root, "templates"),
+  });
+  const loaded = { kind: "engineering-pod", ...pod };
+  const calls = [];
+  const runtime = {
+    imageDigest: async input => { calls.push(["image", input]); return REMOTE_IMAGE_ID; },
+    start: async input => { calls.push(["start", input]); },
+    verifySource: async input => {
+      calls.push(["verify", input]);
+      return { status: "passed", candidateSha: input.expectedSha, evidence: [] };
+    },
+    cancel: async () => { calls.push(["cancel"]); },
+    close: async () => { calls.push(["close"]); },
+  };
+  const source = {};
+  const store = {};
+  let podInput;
+  const result = await runPodController({
+    loaded,
+    envelope: {
+      task: "Implement the fixed pod.",
+      repository: "https://github.com/zaycruz/monolith-v2.git",
+      baseSha: "a".repeat(40),
+      targetBranch: "main",
+      runId: "pod-run-1",
+    },
+    runtime,
+    source,
+    store,
+    runId: "pod-run-1",
+    clockSource: () => 1_000,
+    signalEmitter: new EventEmitter(),
+    runPod: async input => {
+      podInput = input;
+      await input.verifyCandidate({
+        expectedSha: "b".repeat(40),
+        profile: "monolith-repo-v1",
+        timeoutSeconds: 60,
+        candidateSnapshot: {
+          id: "candidate-1",
+          sha: "b".repeat(40),
+          root: "/snapshots/pod-run-1/candidate-1",
+          receipt: { files: 3, bytes: 100, sha256: "c".repeat(64) },
+        },
+        baseSnapshot: {
+          id: "run-base",
+          sha: "a".repeat(40),
+          root: "/snapshots/pod-run-1/run-base",
+          receipt: { files: 2, bytes: 80, sha256: "d".repeat(64) },
+        },
+      });
+      return { status: "ready", runId: "pod-run-1", candidateSha: "b".repeat(40) };
+    },
+  });
+
+  assert.equal(result.status, "ready");
+  assert.equal(podInput.prompts.planner, pod.prompts.planner);
+  assert.equal(podInput.agents, runtime);
+  assert.equal(podInput.source, source);
+  assert.equal(podInput.store, store);
+  assert.deepEqual(calls.find(([name]) => name === "start")[1], {
+    deadlineAt: 7_201_000,
+    bootstrap: false,
+  });
+  const verification = calls.find(([name]) => name === "verify")[1];
+  assert.deepEqual(Object.keys(verification.candidateSnapshot).sort(), ["id", "receipt", "sha"]);
+  assert.deepEqual(Object.keys(verification.baseSnapshot).sort(), ["id", "receipt", "sha"]);
+  assert.equal(calls.at(-1)[0], "close");
 });

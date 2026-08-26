@@ -23,6 +23,7 @@ import {
   proxyCreateArgs,
   serverCreateArgs,
   snapshotDirectory,
+  sourceVerifierCreateArgs,
 } from "../src/docker-runtime.mjs";
 
 const IMAGE = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -73,7 +74,7 @@ function receiptFor(files) {
   return { files: Object.keys(files).length, bytes, sha256: hash.digest("hex") };
 }
 
-function createRuntime() {
+function createRuntime(overrides = {}) {
   return new DockerRuntime({
     image: IMAGE,
     deployment: "demo",
@@ -82,8 +83,55 @@ function createRuntime() {
     model: "openrouter/deepseek/deepseek-v4-flash",
     port: 8080,
     publicUrl: "https://thisismonolith.sh",
+    ...overrides,
   });
 }
+
+test("runtime host root is bound to its deployment name", () => {
+  assert.throws(
+    () => createRuntime({ hostRoot: "/var/lib/monolith/deployments/another" }),
+    /host root must match deployment/,
+  );
+  assert.throws(
+    () => createRuntime({ stateRoot: "/state/../state" }),
+    /state root must be canonical/,
+  );
+});
+
+test("legacy role execution rejects foreign and symlinked run directories before Docker", async t => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-run-root-"));
+  t.after(() => cleanupTemporary(temporary));
+  const stateRoot = path.join(temporary, "state");
+  const outside = path.join(temporary, "outside");
+  await mkdir(stateRoot, { mode: 0o700 });
+  await mkdir(outside, { mode: 0o700 });
+  await mkdir(path.join(outside, "run-1"), { mode: 0o700 });
+  await symlink(path.join(outside, "run-1"), path.join(stateRoot, "run-1"));
+  const runtime = createRuntime({ stateRoot });
+  let dockerCalls = 0;
+  runtime.command = async () => {
+    dockerCalls += 1;
+    return dockerResult();
+  };
+  const input = {
+    role: "qa",
+    step: 1,
+    attempt: 1,
+    access: "read",
+    prompt: "bounded prompt",
+    timeoutSeconds: 60,
+    workspace: "/ignored",
+  };
+  await assert.rejects(
+    runtime.runRole({ ...input, runDir: path.join(outside, "run-1") }),
+    /run directory must match state root/,
+  );
+  await assert.rejects(
+    runtime.runRole({ ...input, runDir: path.join(stateRoot, "run-1") }),
+    /run directory must be a private regular directory/,
+  );
+  assert.equal(dockerCalls, 0);
+});
 
 function mode(stat) {
   return stat.mode & 0o777;
@@ -129,6 +177,7 @@ test("agent containers use only the isolated agent network and external prompt m
   assert.match(rendered, /--read-only/);
   assert.match(rendered, /--cap-drop ALL/);
   assert.match(rendered, /no-new-privileges/);
+  assert.match(rendered, /--ulimit fsize=8388608:8388608/);
   assert.doesNotMatch(rendered, /--network container:|127\.0\.0\.1:8787|\.monolith-instructions/);
   assert.doesNotMatch(rendered, /OPENROUTER_API_KEY|sk-or-|docker\.sock|\/state|Users\/|\.ssh/);
 });
@@ -221,6 +270,32 @@ test("start bootstraps offline, creates two networks, and dual-homes only the pr
   assert.equal(runtime.key, null);
 });
 
+test("pod startup skips the React bootstrap but keeps the isolated credential gateway", async () => {
+  const runtime = new DockerRuntime({
+    image: IMAGE,
+    deployment: "demo",
+    hostRoot: "/var/lib/monolith/deployments/demo",
+    key: SECRET,
+    model: "openrouter/deepseek/deepseek-v4-flash",
+  });
+  const calls = [];
+  runtime.command = async args => {
+    calls.push(args);
+    if (args[0] === "create" && args.includes("proxy")) {
+      return dockerResult({ stdout: "proxy-id\n" });
+    }
+    return dockerResult();
+  };
+  runtime.startProxy = () => ({ kill() {} });
+
+  await runtime.start({ deadlineAt: futureDeadline(), bootstrap: false });
+
+  assert.equal(calls.some(args => args[0] === "run" && args.includes("bootstrap")), false);
+  assert(calls.some(args => args[0] === "network" && args[1] === "create" && args.includes("--internal")));
+  assert(calls.some(args => args[0] === "create" && args.includes("proxy")));
+  assert(calls.some(args => args[0] === "run" && args.includes("probe")));
+});
+
 test("close removes both deployment networks after removing the proxy", async () => {
   const runtime = createRuntime();
   const calls = [];
@@ -272,11 +347,11 @@ test("runRole never creates or deletes a workspace instruction placeholder", asy
   const workspace = path.join(temporary, "workspace");
   const runDir = path.join(temporary, "run-1");
   await mkdir(workspace);
-  await mkdir(runDir);
+  await mkdir(runDir, { mode: 0o700 });
   const preexisting = path.join(workspace, ".monolith-instructions.md");
   await writeFile(preexisting, "user-owned\n");
 
-  const runtime = createRuntime();
+  const runtime = createRuntime({ stateRoot: temporary });
   let createArgs;
   const calls = [];
   runtime.command = async (args) => {
@@ -303,6 +378,176 @@ test("runRole never creates or deletes a workspace instruction placeholder", asy
   assert.match(createArgs.join(" "), /dst=\/instructions\/instructions\.md,readonly/);
   assert.doesNotMatch(createArgs.join(" "), /\.monolith-instructions/);
   assert(calls.some(args => args.join(" ") === "rm -f monolith-demo-qa-1"));
+});
+
+test("runAgentExecution mounts one isolated pod worktree and rejects paths outside the deployment", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "monolith-runtime-pod-role-"));
+  t.after(() => cleanupTemporary(temporary));
+  const stateRoot = path.join(temporary, "state");
+  await mkdir(stateRoot, { mode: 0o700 });
+  await mkdir(path.join(stateRoot, "run-1"), { mode: 0o700 });
+
+  const runtime = createRuntime({ stateRoot });
+  let createArgs;
+  runtime.command = async args => {
+    if (args[0] === "create") {
+      createArgs = args;
+      throw new Error("stop before Docker create");
+    }
+    return dockerResult();
+  };
+
+  const workspaceHost = "/var/lib/monolith/deployments/demo/worktrees/run-1/attempt-1-engineering-a";
+  const ownedSource = `${workspaceHost}/src/owned`;
+  await assert.rejects(runtime.runAgentExecution({
+    executionId: "attempt-1-engineering-a",
+    role: "engineering-a",
+    attempt: 1,
+    access: "write",
+    prompt: "bounded pod prompt",
+    timeoutSeconds: 60,
+    runId: "run-1",
+    workspaceId: "attempt-1-engineering-a",
+    writeDirectories: ["src/owned"],
+  }), /stop before Docker create/);
+
+  assert.match(createArgs.join(" "), new RegExp(`src=${workspaceHost.replaceAll("/", "\\/")},dst=\\/workspace,readonly`));
+  assert.match(createArgs.join(" "), /src=\/dev\/null,dst=\/workspace\/\.git,readonly/);
+  assert.match(createArgs.join(" "), new RegExp(`src=${ownedSource.replaceAll("/", "\\/")},dst=\\/workspace\\/src\\/owned(?: |$)`));
+  assert.match(createArgs.join(" "), /--name monolith-demo-attempt-1-engineering-a/);
+
+  createArgs = undefined;
+  await assert.rejects(runtime.runAgentExecution({
+    executionId: "attempt-1-engineering-a",
+    role: "engineering-a",
+    attempt: 1,
+    access: "write",
+    prompt: "bounded pod prompt",
+    timeoutSeconds: 60,
+    runId: "run-1",
+    workspaceId: "attempt-1-engineering-a",
+  }), /invalid writable workspace directories/);
+  assert.equal(createArgs, undefined);
+
+  await assert.rejects(runtime.runAgentExecution({
+    executionId: "attempt-1-engineering-a",
+    role: "engineering-a",
+    attempt: 1,
+    access: "write",
+    prompt: "bounded pod prompt",
+    timeoutSeconds: 60,
+    runId: "../outside",
+    workspaceId: "attempt-1-engineering-a",
+    writeDirectories: ["src"],
+  }), /invalid agent run ID/);
+
+  await assert.rejects(runtime.runAgentExecution({
+    executionId: "attempt-1-engineering-a",
+    role: "engineering-a",
+    attempt: 1,
+    access: "write",
+    prompt: "bounded pod prompt",
+    timeoutSeconds: 60,
+    runId: "run-1",
+    workspaceId: "attempt-1-engineering-a",
+    writeDirectories: [".git"],
+  }), /invalid writable workspace directory/);
+});
+
+test("source verification containers receive only immutable snapshots and no controller authority", () => {
+  const receipt = { files: 12, bytes: 4_096, sha256: "c".repeat(64) };
+  const candidate = sourceVerifierCreateArgs({
+    deployment: "demo",
+    image: IMAGE,
+    snapshotHost: "/var/lib/monolith/deployments/demo/snapshots/run-1/candidate-1",
+    expectedSha: "d".repeat(40),
+    expectedSnapshot: receipt,
+    profile: "monolith-repo-v1",
+    suite: "candidate",
+    timeoutSeconds: 300,
+    nameSuffix: "source-candidate",
+  });
+  const baseline = sourceVerifierCreateArgs({
+    deployment: "demo",
+    image: IMAGE,
+    snapshotHost: "/var/lib/monolith/deployments/demo/snapshots/run-1/candidate-1",
+    baselineTestHost: "/var/lib/monolith/deployments/demo/snapshots/run-1/base/test",
+    expectedSha: "d".repeat(40),
+    profile: "monolith-repo-v1",
+    suite: "baseline",
+    timeoutSeconds: 300,
+    nameSuffix: "source-baseline",
+  });
+
+  const renderedCandidate = candidate.join(" ");
+  const renderedBaseline = baseline.join(" ");
+  assert.match(renderedCandidate, /--network none/);
+  assert.match(renderedCandidate, /dst=\/workspace,readonly/);
+  assert.match(renderedCandidate, /source-verify --workspace \/workspace/);
+  assert.match(renderedCandidate, /--expected-files 12 --expected-bytes 4096/);
+  assert.match(renderedCandidate, new RegExp(`--expected-snapshot-sha ${"c".repeat(64)}`));
+  assert.match(renderedBaseline, /dst=\/workspace\/test,readonly/);
+  for (const rendered of [renderedCandidate, renderedBaseline]) {
+    assert.doesNotMatch(rendered, /docker\.sock|dst=\/state|MONOLITH_GATEWAY|sk-or-v1|github_pat_/);
+  }
+});
+
+test("verifySource binds candidate and immutable-base evidence without mounting controller state", async () => {
+  const runtime = createRuntime();
+  const candidateReceipt = { files: 12, bytes: 4_096, sha256: "c".repeat(64) };
+  const calls = [];
+  runtime.command = async args => {
+    calls.push(args);
+    if (args[0] === "create") {
+      return dockerResult({ stdout: `${args.includes("monolith-demo-source-candidate") ? "candidate-id" : "baseline-id"}\n` });
+    }
+    if (args[0] === "start" && args.at(-1) === "candidate-id") {
+      return dockerResult({ stdout: `${JSON.stringify({
+        status: "passed",
+        candidateSha: "d".repeat(40),
+        profile: "monolith-repo-v1",
+        suite: "candidate",
+        snapshot: candidateReceipt,
+        evidence: [
+          { authority: "trusted", command: "node --check 1 source files", outputSha256: "e".repeat(64) },
+          { authority: "advisory", command: "npm test", outputSha256: "f".repeat(64) },
+        ],
+      })}\n` });
+    }
+    if (args[0] === "start" && args.at(-1) === "baseline-id") {
+      return dockerResult({ stdout: `${JSON.stringify({
+        status: "passed",
+        candidateSha: "d".repeat(40),
+        profile: "monolith-repo-v1",
+        suite: "baseline",
+        evidence: [
+          { authority: "trusted", command: "node --test 1 baseline files", outputSha256: "1".repeat(64) },
+        ],
+      })}\n` });
+    }
+    return dockerResult();
+  };
+
+  const receipt = await runtime.verifySource({
+    runId: "run-1",
+    expectedSha: "d".repeat(40),
+    candidateSnapshot: { id: "candidate-1", sha: "d".repeat(40), receipt: candidateReceipt },
+    baseSnapshot: { id: "base", sha: "a".repeat(40), receipt: { files: 10, bytes: 2_048, sha256: "b".repeat(64) } },
+    profile: "monolith-repo-v1",
+    timeoutSeconds: 600,
+  });
+
+  assert.equal(receipt.status, "passed");
+  assert.equal(receipt.candidateSha, "d".repeat(40));
+  assert.deepEqual(receipt.snapshot, candidateReceipt);
+  assert.equal(receipt.evidence.filter(item => item.authority === "trusted").length, 2);
+  assert.equal(receipt.evidence.filter(item => item.authority === "advisory").length, 1);
+  const creates = calls.filter(args => args[0] === "create");
+  assert.equal(creates.length, 2);
+  assert(creates.every(args => args.includes("--network") && args[args.indexOf("--network") + 1] === "none"));
+  assert(creates.every(args => !args.join(" ").includes("docker.sock") && !args.join(" ").includes("dst=/state")));
+  assert(calls.some(args => args.join(" ") === "rm -f candidate-id"));
+  assert(calls.some(args => args.join(" ") === "rm -f baseline-id"));
 });
 
 test("a lost network-create response reconciles the attempted deterministic network", async () => {
@@ -999,8 +1244,8 @@ test("cancelling a stalled role removes its exact active name and blocks verific
   const workspace = path.join(temporary, "workspace");
   const runDir = path.join(temporary, "run-1");
   await mkdir(workspace);
-  await mkdir(runDir);
-  const runtime = createRuntime();
+  await mkdir(runDir, { mode: 0o700 });
+  const runtime = createRuntime({ stateRoot: temporary });
   runtime.deploymentDeadlineAt = futureDeadline();
   const calls = [];
   let childSettled = false;

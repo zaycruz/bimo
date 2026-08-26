@@ -1,7 +1,7 @@
-# Monolith v0.2
+# Monolith v0.3
 
-Monolith deploys a predefined agent workflow to one Docker host. The complete
-workflow definition is deliberately small:
+Monolith deploys predefined agent work to one Docker host. v0.3 preserves the
+bounded sequential workflows and adds one fixed parallel engineering pod.
 
 **[Open the live agent-built demo](https://thisismonolith.pages.dev/).** It is
 the unchanged static artifact from the final `react-app` run on `pve-05`, not a
@@ -11,10 +11,11 @@ hosted Monolith control plane.
 template = workflow.json + one Markdown prompt per role
 ```
 
-The CLI validates that data, starts one temporary controller, and the controller
-launches one ephemeral role container at a time. There is no fleet service,
-manager agent, message bus, database, scheduler, or general-purpose graph
-engine.
+The CLI validates that data and starts one temporary controller. Sequential
+templates launch one ephemeral role container at a time; the engineering pod
+launches exactly three writers in parallel. There is no fleet service, manager
+daemon, general message bus, database, scheduler, or graph engine. The Planner
+is the pod's ephemeral manager role for one attempt.
 
 The bundled three-role workflow is:
 
@@ -37,7 +38,84 @@ Both templates use the same controller and deployment path. This is the
 Claude-workflow/state-machine idea deployed to Docker, not three continuously
 running pods.
 
-## The template contract
+## The fixed engineering pod
+
+`parallel-engineering-pod` is one product path, not a configurable DAG:
+
+```text
+Planner
+  -> engineering-a [src] ───────> checker ─┐
+  -> engineering-b [starters] ──> checker ─┼─> fixed-order integration
+  -> qa-tests [test] ────────────> checker ─┘
+  -> QA -> Testing -> monolith-repo-v1 -> source scan
+  -> isolated publisher -> draft pull request
+```
+
+This is the complete pod manifest:
+
+```json
+{
+  "version": 1,
+  "name": "parallel-engineering-pod",
+  "maxAttempts": 3,
+  "timeouts": {
+    "executionSeconds": 1200,
+    "attemptSeconds": 3600,
+    "workflowSeconds": 7200
+  },
+  "changes": {
+    "maxFiles": 200,
+    "maxBytes": 5242880
+  },
+  "writers": {
+    "engineering-a": {
+      "prompt": "roles/engineering.md",
+      "allowedWriteRoots": ["src"]
+    },
+    "engineering-b": {
+      "prompt": "roles/engineering.md",
+      "allowedWriteRoots": ["starters"]
+    },
+    "qa-tests": {
+      "prompt": "roles/qa-tests.md",
+      "allowedWriteRoots": ["test"]
+    }
+  },
+  "prompts": {
+    "planner": "roles/planner.md",
+    "checker": "roles/checker.md",
+    "qa": "roles/qa.md",
+    "testing": "roles/testing.md"
+  },
+  "verificationProfile": "monolith-repo-v1"
+}
+```
+
+JSON is intentional. Node parses it natively with `JSON.parse`, then Monolith
+applies an exact, data-only schema. That adds no YAML/TOML parser and avoids
+YAML aliases, tags, and implicit-type ambiguity. The manifest cannot add nodes,
+commands, images, providers, repositories, or environment variables.
+
+The Planner assigns non-overlapping paths inside the three fixed roots. Each
+path has one writer. The only cross-writer handoff is a bounded dependency from
+`engineering-a` to the still-running `engineering-b`: the controller validates
+the requested path and requirement IDs, resumes `engineering-b`, checks its new
+commit, then resumes `engineering-a` on the combined base. There is no general
+chat or mailbox.
+
+Every writer commit gets its own read-only checker. Any writer, checker,
+integration, QA, Testing, or verification failure discards the attempt and
+replans all three writers from the same immutable base, up to `maxAttempts`.
+The Planner, checker, QA, and Testing receipts are advisory model judgments.
+The separate `monolith-repo-v1` profile and source scan are controller-owned
+gates bound to the exact integrated commit.
+
+After those gates pass, compute stops. A separate publisher receives the GitHub
+credential, rechecks the allowlisted base and candidate SHAs, pushes the fixed
+`monolith/<run-id>` branch, and opens a draft pull request. It has no Docker
+socket, agent worktrees, snapshots, or OpenRouter key. It never merges.
+
+## The sequential workflow template contract
 
 Each template owns its JSON and prompts:
 
@@ -110,7 +188,7 @@ arbitrary environment variables. It declares bounded roles, transitions,
 timeouts, and static-output checks. Markdown prompts describe how each role
 should behave.
 
-## What happens during a deployment
+## What happens during a sequential deployment
 
 1. The local CLI validates the template, builds one `linux/amd64` image, and
    transfers that exact image over SSH.
@@ -157,8 +235,9 @@ Controller-owned verification is the separate fixed step described above.
 
 ## Install from GitHub
 
-Monolith v0.2 is not published to the npm registry. Download the release
-tarball, verify it, and install that exact file:
+The published v0.2 package contains the sequential workflows, not the v0.3 pod.
+It is not published to the npm registry. Download the release tarball, verify
+it, and install that exact file:
 
 ```bash
 curl --fail --location --remote-name \
@@ -171,7 +250,8 @@ monolith list --json
 monolith validate react-app
 ```
 
-To build the package from source instead:
+Until a v0.3 artifact replaces the evidence placeholder below, build the pod
+candidate from its source branch instead:
 
 ```bash
 git clone --depth 1 https://github.com/zaycruz/monolith-v2.git
@@ -179,7 +259,7 @@ cd monolith-v2
 npm ci
 npm test
 npm pack
-npm install --global ./monolith-workflow-0.2.0.tgz
+npm install --global ./monolith-workflow-0.3.0.tgz
 monolith --help
 ```
 
@@ -200,49 +280,85 @@ monolith list
 monolith list --json
 monolith validate react-app
 monolith validate react-solo --json
+monolith validate parallel-engineering-pod --json
 ```
 
 ### Deploy through `pve-05`
 
 `--proxmox` connects to the Proxmox node over SSH and runs Docker inside the
-selected LXC through `pct exec`. Replace every angle-bracket placeholder before
-running this example:
+selected LXC through `pct exec`. The verified demo target is the dedicated,
+unprivileged Docker LXC `113` on `pve-05`:
+
+```bash
+REPOSITORY='https://github.com/zaycruz/monolith-v2.git'
+BASE_SHA="$(git ls-remote --refs "$REPOSITORY" refs/heads/main | cut -f1)"
+
+monolith deploy parallel-engineering-pod \
+  --deployment pod-demo \
+  --proxmox root@pve-05 \
+  --vmid 113 \
+  --task-file examples/pod-assignment.md \
+  --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
+  --github-secret-ref 'op://VAULT/ITEM/GITHUB_TOKEN' \
+  --repository "$REPOSITORY" \
+  --base-sha "$BASE_SHA" \
+  --target-branch main \
+  --json
+```
+
+The pod accepts only that repository and `main`. `--base-sha` must be the exact
+40-character commit currently expected at `main`; publication fails closed if
+the branch moves. The two secret references must resolve to separate,
+least-privilege credentials.
+
+Read the pod's structured events using the run ID returned by deploy:
+
+```bash
+monolith logs \
+  --deployment pod-demo \
+  --proxmox root@pve-05 \
+  --vmid 113 \
+  --run <RUN_ID> \
+  --json
+```
+
+Deploy the sequential three-role workflow independently:
 
 ```bash
 monolith deploy react-app \
   --deployment fleet-demo \
   --proxmox root@pve-05 \
-  --vmid <DEDICATED_DOCKER_LXC_VMID> \
+  --vmid 113 \
   --task-file examples/fleet-demo.md \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
   --public-url 'http://<LXC_ADDRESS>:8080'
 ```
 
-Deploy the one-role template independently:
+Deploy the sequential one-role template independently:
 
 ```bash
 monolith deploy react-solo \
   --deployment solo-demo \
   --proxmox root@pve-05 \
-  --vmid <DEDICATED_DOCKER_LXC_VMID> \
+  --vmid 113 \
   --task-file examples/solo-demo.md \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
   --public-url 'http://<LXC_ADDRESS>:8081' \
   --port 8081
 ```
 
-Read the latest human log or one run's JSON events:
+Read the latest sequential human log or one run's JSON events:
 
 ```bash
 monolith logs \
   --deployment fleet-demo \
   --proxmox root@pve-05 \
-  --vmid <DEDICATED_DOCKER_LXC_VMID>
+  --vmid 113
 
 monolith logs \
   --deployment fleet-demo \
   --proxmox root@pve-05 \
-  --vmid <DEDICATED_DOCKER_LXC_VMID> \
+  --vmid 113 \
   --run <RUN_ID> \
   --json
 ```
@@ -266,13 +382,17 @@ monolith logs \
 ```
 
 Deploy accepts exactly one target (`--host`, or `--proxmox` with `--vmid`) and
-exactly one task source (`--task-file FILE` or `--task-stdin`). Required fields
-are `--deployment`, `--secret-ref`, and `--public-url`. Optional deploy flags are
-`--account`, `--port`, `--model`, `--image`, and `--json`. `logs` additionally
-accepts `--run`, `--image`, and `--json`.
+exactly one task source (`--task-file FILE` or `--task-stdin`). Every deployment
+requires `--deployment` and `--secret-ref`. Sequential workflows also require
+`--public-url`. The fixed pod instead requires `--github-secret-ref`, the fixed
+repository URL, an immutable `--base-sha`, and `--target-branch main`.
+
+Optional shared flags are `--account`, `--model`, `--image`, and `--json`;
+sequential deploys also accept `--port`. `logs` accepts `--run`, `--image`, and
+`--json`.
 
 Defaults are port `8080`, model `openrouter/deepseek/deepseek-v4-flash`, and
-image tag `monolith-workflow:0.2.0`. `--account` selects a 1Password account;
+image tag `monolith-workflow:0.3.0`. `--account` selects a 1Password account;
 `--json` requests machine-readable output.
 
 `--public-url` is only the address Monolith records and reports for the published
@@ -306,6 +426,26 @@ retained app read-only. Monolith performs automatic rollback only when replacing
 the current app fails; v0.2 has no user-facing rollback command or remote
 artifact backup.
 
+The fixed pod uses the same deployment root but keeps private run records under
+`runs/<run-id>/`, including `run.json`, `events.jsonl`, and per-attempt plans,
+writer results, gate receipts, and any bounded inbox entry. `source/`,
+`worktrees/`, and `snapshots/` are controller-owned temporary roots. Worktrees
+and snapshots are removed when compute stops; only the exact Git source needed
+for a publication-ready run crosses into the publisher, then it is removed after
+durable completion on a best-effort basis.
+
+Before creating a pod run, Monolith retains the newest 20 validated terminal
+run records. Active, malformed, or unsafe entries are never deleted
+automatically.
+
+A cooperative interruption cancels active agents, records failure, and cleans
+owned workspaces. An abrupt host or container loss can leave a `running` record
+and private temporary roots. The pod does not resume a partial Planner, writer,
+or checker attempt. Confirm no controller or publisher is active, preserve the
+run records for diagnosis, then recover only that dedicated deployment root
+before starting a new run. The internal publisher can reconcile an interrupted
+durable publication, but v0.3 has no general user-facing resume command.
+
 ## Security boundary
 
 - The OpenRouter key is resolved locally with `op read`, sent through SSH and
@@ -328,14 +468,28 @@ artifact backup.
   general-purpose Docker host.
 - Use a dedicated OpenRouter key with a provider-side spend cap and rate limit.
   The gateway's local request limits reduce exposure but are not a billing cap.
+- The pod resolves the GitHub credential only after compute passes. The isolated
+  publisher receives the private source and run state, but not the Docker socket,
+  worktrees, snapshots, or OpenRouter key. Use a dedicated single-repository
+  credential limited to branch push and pull-request creation.
+- A draft pull request is a review boundary, not an execution boundary. Opening
+  it triggers this repository's `pull_request` CI, which executes candidate code
+  on a GitHub-hosted runner. The workflow has a read-only repository token and no
+  repository secrets, environments, or self-hosted runner; candidate paths cannot
+  include `.github`, and checkout credentials are not persisted into the working
+  tree. Re-audit this boundary before adding secrets, write-capable CI tokens,
+  `pull_request_target`, `workflow_run`, self-hosted runners, or another
+  repository. Candidate code is still untrusted code executing on the ephemeral
+  GitHub-hosted runner.
 
 Never put a credential in a task, prompt, workflow file, repository file,
 `--public-url`, or deployment name.
 
 ## Scope and limitations
 
-- Roles are sequential ephemeral containers, not persistent pods and not
-  parallel workers.
+- `react-app` and `react-solo` remain sequential ephemeral workflows. The fixed
+  engineering pod runs exactly three parallel writers; it is not arbitrary
+  fan-out and none of its containers are persistent.
 - `react-app` and `react-solo` are two independent templates, but both use the
   same bundled React/npm starter and static-output verifier. This is not an
   arbitrary workload platform.
@@ -346,7 +500,7 @@ Never put a credential in a task, prompt, workflow file, repository file,
   `workspace/` and retrying; that recovery intentionally discards the partial
   workspace.
 - OpenRouter is the only provider. There is no provider discovery, marketplace,
-  manager hierarchy, inter-agent chat, or general graph runtime.
+  generic DAG, manager service, inter-agent chat, message bus, or graph runtime.
 - Deployment is Docker over SSH, directly or through Proxmox `pct exec`. There
   is no Helm, Terraform, Kubernetes scheduler, multi-host placement, HA, or
   autoscaling layer.
@@ -354,8 +508,16 @@ Never put a credential in a task, prompt, workflow file, repository file,
   restore the prior app on failure, but zero downtime is not guaranteed.
 - History and artifacts remain on one target host. There is no database, remote
   backup, or user-invoked rollback.
+- Pod publication stops at an isolated, draft pull request. It does not approve,
+  mark ready, merge, deploy, or delete the branch.
 
-## Release evidence
+## v0.3 release evidence
+
+> **RELEASE FINALIZER PLACEHOLDER:** replace this block with verified v0.3 test,
+> `pve-05`, publication, and draft-PR evidence before release. This documentation
+> draft makes no v0.3 live-run or test-count claim.
+
+## v0.2 release evidence
 
 Local verification on 2026-08-25: **82/82 automated tests passed**. The suite
 includes the QA/Testing failure transitions back to Engineering, deadline and

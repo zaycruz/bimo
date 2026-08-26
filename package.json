@@ -1,6 +1,6 @@
 {
   "name": "monolith-workflow",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Deploy bounded, auditable agent workflows as ephemeral Docker fleets.",
   "license": "UNLICENSED",
   "type": "module",
@@ -19,7 +19,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
   "engines": {
     "node": ">=22"

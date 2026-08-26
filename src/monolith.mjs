@@ -9,20 +9,31 @@ import path from "node:path";
 import process from "node:process";
 
 import { DockerRuntime } from "./docker-runtime.mjs";
+import { GitRuntime } from "./git-runtime.mjs";
+import { loadPodTemplate } from "./pod-contract.mjs";
+import { runEngineeringPod } from "./pod-controller.mjs";
+import { createPodRunStore, prunePodRuns } from "./pod-store.mjs";
+import { publishRun } from "./publish-run.mjs";
 import { loadWorkflow, runWorkflow } from "./workflow.mjs";
 
 const packageRoot = path.resolve(import.meta.dirname, "..");
 const templateRoot = path.join(packageRoot, "templates");
-const DEFAULT_IMAGE = "monolith-workflow:0.2.0";
+const DEFAULT_IMAGE = "monolith-workflow:0.3.0";
 const DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash";
+const POD_REPOSITORY = "https://github.com/zaycruz/monolith-v2.git";
+const POD_TARGET_BRANCH = "main";
+const PUBLISH_TIMEOUT_MS = 5 * 60 * 1_000;
 const IMAGE_TRANSFER_TIMEOUT_MS = 10 * 60 * 1_000;
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+const EXECUTION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const SSH_TARGET = /^(?:[a-z_][a-z0-9_-]*@)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
 const IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$/;
 const SECRET_REF = /^op:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+$/;
 const SHA256 = /^sha256:[a-f0-9]{64}$/;
 const TEMPLATE_DIGEST = /^[a-f0-9]{64}$/;
+const GIT_SHA = /^[a-f0-9]{40}$/;
+const GITHUB_TOKEN = /^(?:github_pat_[A-Za-z0-9_]{20,}|gh[psoru]_[A-Za-z0-9]{20,})$/;
 const IMAGE_CONFIG_FIELDS = [
   "Entrypoint", "Cmd", "Env", "User", "WorkingDir", "ExposedPorts",
   "Volumes", "Labels", "Healthcheck", "StopSignal", "Shell",
@@ -76,6 +87,7 @@ function execute(command, args, {
     const stderr = [];
     let bytes = 0;
     let timedOut = false;
+    let stdinFailed = false;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
@@ -100,11 +112,80 @@ function execute(command, args, {
         stderr: Buffer.concat(stderr).toString("utf8"),
       };
       if (timedOut) reject(new Error(`${command} timed out`));
+      else if (stdinFailed) reject(new Error(`${command} closed before consuming its bounded input`));
       else if (bytes > maxOutputBytes) reject(new Error(`${command} output exceeded ${maxOutputBytes} bytes`));
       else if (code !== 0) reject(new Error(`${command} exited ${code}: ${result.stderr.trim().slice(0, 1_000)}`));
       else resolve(result);
     });
-    if (input !== undefined) child.stdin.end(input);
+    if (input !== undefined) {
+      child.stdin.on("error", () => { stdinFailed = true; });
+      child.stdin.end(input);
+    }
+  });
+}
+
+function runPublisherGit({ command, args, env, signal, deadlineAt, maxOutputBytes }) {
+  if (command !== "git" || !Array.isArray(args) || args.some(value => typeof value !== "string")) {
+    fail("publisher requested an invalid Git command");
+  }
+  if (!Number.isSafeInteger(deadlineAt) || deadlineAt <= Date.now()) {
+    fail("publisher Git deadline is invalid");
+  }
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > 1024 * 1024) {
+    fail("publisher Git output limit is invalid");
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: packageRoot,
+      env,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+    let bytes = 0;
+    let terminalError;
+    let killTimer;
+    let settled = false;
+
+    const signalGroup = name => {
+      if (!Number.isInteger(child.pid)) return;
+      try { process.kill(-child.pid, name); } catch {}
+    };
+    const stop = error => {
+      terminalError ??= error;
+      signalGroup("SIGTERM");
+      killTimer ??= setTimeout(() => signalGroup("SIGKILL"), 250);
+    };
+    const collect = target => chunk => {
+      bytes += chunk.length;
+      if (bytes <= maxOutputBytes) target.push(chunk);
+      else stop(new Error(`publisher Git output exceeded ${maxOutputBytes} bytes`));
+    };
+    const abort = () => stop(new Error("publisher Git command aborted"));
+    const deadlineTimer = setTimeout(
+      () => stop(new Error("publisher Git command exceeded its deadline")),
+      Math.max(1, deadlineAt - Date.now()),
+    );
+
+    child.stdout.on("data", collect(stdout));
+    child.stderr.on("data", collect(stderr));
+    child.once("error", error => stop(error));
+    child.once("close", code => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadlineTimer);
+      clearTimeout(killTimer);
+      signal?.removeEventListener("abort", abort);
+      if (terminalError) reject(terminalError);
+      else resolve({
+        code: Number.isInteger(code) && code >= 0 ? code : 128,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      });
+    });
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
   });
 }
 
@@ -119,14 +200,54 @@ async function readStdin(maximumBytes) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+async function loadTemplate(name) {
+  const podManifest = path.join(templateRoot, name, "pod.json");
+  const podStat = await lstat(podManifest).catch(() => null);
+  if (podStat) {
+    if (!podStat.isFile() || podStat.isSymbolicLink()) fail(`template ${name} has an invalid pod.json`);
+    const loaded = await loadPodTemplate(name, { templateRoot });
+    return {
+      kind: "engineering-pod",
+      name: loaded.template.name,
+      digest: loaded.digest,
+      templateDigest: loaded.templateDigest,
+      template: loaded.template,
+      prompts: loaded.prompts,
+    };
+  }
+  const loaded = await loadWorkflow(name, { templateRoot });
+  return {
+    kind: "workflow",
+    name: loaded.workflow.name,
+    digest: loaded.digest,
+    templateDigest: loaded.templateDigest,
+    workflow: loaded.workflow,
+    prompts: loaded.prompts,
+  };
+}
+
 async function listTemplates() {
   const entries = await readdir(templateRoot, { withFileTypes: true });
   const templates = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     if (!entry.isDirectory() || !NAME.test(entry.name)) continue;
     try {
-      const loaded = await loadWorkflow(entry.name, { templateRoot });
-      templates.push({ name: loaded.workflow.name, roles: Object.keys(loaded.workflow.roles), maxSteps: loaded.workflow.maxSteps });
+      const loaded = await loadTemplate(entry.name);
+      if (loaded.kind === "workflow") {
+        templates.push({
+          kind: loaded.kind,
+          name: loaded.name,
+          roles: Object.keys(loaded.workflow.roles),
+          maxSteps: loaded.workflow.maxSteps,
+        });
+      } else {
+        templates.push({
+          kind: loaded.kind,
+          name: loaded.name,
+          roles: ["planner", "engineering-a", "engineering-b", "qa-tests", "checker", "qa", "testing"],
+          maxAttempts: loaded.template.maxAttempts,
+        });
+      }
     } catch {}
   }
   return templates;
@@ -305,23 +426,103 @@ async function resolveSecret(reference, account) {
   return secret;
 }
 
+function exactObject(value, fields, label) {
+  if (!isPlainObject(value)
+      || Object.keys(value).sort().join("\0") !== [...fields].sort().join("\0")) {
+    fail(`${label} has an invalid shape`);
+  }
+  return value;
+}
+
+function parseLastJson(stdout, label) {
+  const line = stdout.trim().split("\n").at(-1);
+  try {
+    return JSON.parse(line);
+  } catch {
+    fail(`${label} returned invalid JSON`);
+  }
+}
+
+function validatePodReady(value, expected) {
+  exactObject(value, ["status", "runId", "baseSha", "candidateSha", "branch"], "pod controller");
+  if (value.status !== "ready" || value.runId !== expected.runId
+      || value.baseSha !== expected.baseSha || !GIT_SHA.test(value.candidateSha ?? "")
+      || value.branch !== `monolith/${expected.runId}`) {
+    fail("pod controller returned an invalid ready receipt");
+  }
+  return value;
+}
+
+function validatePublishedPod(value, expected) {
+  exactObject(value, [
+    "status", "runId", "repository", "targetBranch", "baseSha", "candidateSha",
+    "headBranch", "publication",
+  ], "pod publisher");
+  if (value.status !== "completed" || value.runId !== expected.runId
+      || value.repository !== POD_REPOSITORY || value.targetBranch !== POD_TARGET_BRANCH
+      || value.baseSha !== expected.baseSha || value.candidateSha !== expected.candidateSha
+      || value.headBranch !== expected.branch) {
+    fail("pod publisher returned an invalid completion receipt");
+  }
+  const publication = value.publication;
+  if (!isPlainObject(publication)
+      || Object.keys(publication).some(key => ![
+        "baseSha", "created", "draft", "headBranch", "headSha", "number", "reconciled",
+        "targetBranch", "url",
+      ].includes(key))
+      || !Number.isSafeInteger(publication.number) || publication.number < 1
+      || publication.draft !== true || typeof publication.created !== "boolean"
+      || publication.baseSha !== expected.baseSha || publication.headSha !== expected.candidateSha
+      || publication.headBranch !== expected.branch || publication.targetBranch !== POD_TARGET_BRANCH
+      || !new RegExp(`^https://github\\.com/zaycruz/monolith-v2/pull/${publication.number}$`).test(publication.url ?? "")) {
+    fail("pod publisher returned an invalid draft pull request receipt");
+  }
+  return value;
+}
+
+async function resolveGitHubSecret(reference, account) {
+  if (!SECRET_REF.test(reference ?? "")) {
+    fail("--github-secret-ref must be a 1Password op:// reference");
+  }
+  const args = ["read", reference];
+  if (account) args.push("--account", account);
+  const result = await execute("op", args, { maxOutputBytes: 4 * 1024 });
+  const secret = result.stdout.trim();
+  if (!GITHUB_TOKEN.test(secret)) fail("1Password reference did not resolve to a GitHub token");
+  return secret;
+}
+
 async function deploy(template, options) {
-  exactOptions(options, [
+  const loaded = await loadTemplate(template);
+  const pod = loaded.kind === "engineering-pod";
+  exactOptions(options, pod ? [
+    "deployment", "proxmox", "host", "vmid", "task-file", "task-stdin",
+    "secret-ref", "github-secret-ref", "account", "repository", "base-sha",
+    "target-branch", "model", "image", "json",
+  ] : [
     "deployment", "proxmox", "host", "vmid", "task-file", "task-stdin",
     "secret-ref", "account", "public-url", "port", "model", "image", "json",
   ]);
   if (!NAME.test(options.deployment ?? "")) fail("--deployment must use lowercase letters, numbers, and dashes");
   const remote = target(options);
-  const loaded = await loadWorkflow(template, { templateRoot });
   const image = options.image ?? DEFAULT_IMAGE;
   if (!IMAGE.test(image)) fail("--image is invalid");
   const model = options.model ?? DEFAULT_MODEL;
   if (!/^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/.test(model)) fail("--model is invalid");
-  const port = Number(options.port ?? 8080);
-  if (!Number.isInteger(port) || port < 1_024 || port > 65_535) fail("--port must be from 1024 to 65535");
-  if (!options["public-url"]) fail("--public-url is required");
-  const publicUrl = new URL(options["public-url"]);
-  if (!['http:', 'https:'].includes(publicUrl.protocol) || publicUrl.username || publicUrl.password) fail("--public-url is invalid");
+  let port;
+  let publicUrl;
+  if (pod) {
+    if (options.repository !== POD_REPOSITORY) fail(`--repository must be ${POD_REPOSITORY}`);
+    if (!GIT_SHA.test(options["base-sha"] ?? "")) fail("--base-sha must be an exact 40-character Git SHA");
+    if (options["target-branch"] !== POD_TARGET_BRANCH) fail(`--target-branch must be ${POD_TARGET_BRANCH}`);
+    if (!options["github-secret-ref"]) fail("--github-secret-ref is required");
+  } else {
+    port = Number(options.port ?? 8080);
+    if (!Number.isInteger(port) || port < 1_024 || port > 65_535) fail("--port must be from 1024 to 65535");
+    if (!options["public-url"]) fail("--public-url is required");
+    publicUrl = new URL(options["public-url"]);
+    if (!['http:', 'https:'].includes(publicUrl.protocol) || publicUrl.username || publicUrl.password) fail("--public-url is invalid");
+  }
   if (Boolean(options["task-file"]) === Boolean(options["task-stdin"])) fail("use exactly one of --task-file or --task-stdin");
   const task = options["task-file"]
     ? await readFile(path.resolve(options["task-file"]), "utf8")
@@ -353,46 +554,146 @@ async function deploy(template, options) {
     await remoteExecute(remote, ["docker", "image", "tag", transferTag, image], { timeoutMs: 30_000 });
 
     const hostRoot = `/var/lib/monolith/deployments/${options.deployment}`;
-    await remoteExecute(remote, ["mkdir", "-p", `${hostRoot}/runs`, `${hostRoot}/workspace`]);
-    await remoteExecute(remote, ["chmod", "700", hostRoot, `${hostRoot}/runs`]);
-    await remoteExecute(remote, ["chown", "1000:0", `${hostRoot}/workspace`]);
-    await remoteExecute(remote, ["chmod", "770", `${hostRoot}/workspace`]);
+    if (pod) {
+      await remoteExecute(remote, [
+        "mkdir", "-p", `${hostRoot}/runs`, `${hostRoot}/source`,
+        `${hostRoot}/worktrees`, `${hostRoot}/snapshots`,
+      ]);
+      await remoteExecute(remote, [
+        "chmod", "700", hostRoot, `${hostRoot}/runs`, `${hostRoot}/source`,
+        `${hostRoot}/worktrees`, `${hostRoot}/snapshots`,
+      ]);
+      const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
+      let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
+      const computeEnvelope = JSON.stringify({
+        version: 1,
+        template: loaded.template.name,
+        templateDigest: loaded.templateDigest,
+        deployment: options.deployment,
+        task,
+        key: openRouterKey,
+        model,
+        image: remoteImage.imageId,
+        repository: POD_REPOSITORY,
+        baseSha: options["base-sha"],
+        targetBranch: POD_TARGET_BRANCH,
+        runId,
+      });
+      openRouterKey = "";
+      const controllerName = `monolith-${options.deployment}-controller`;
+      const compute = await remoteExecute(remote, [
+        "docker", "run", "--rm", "-i",
+        "--name", controllerName,
+        "--user", "0:0",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--pids-limit", "384",
+        "--memory", "2g",
+        "--cpus", "2",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
+        "--volume", "/var/run/docker.sock:/var/run/docker.sock:rw",
+        "--volume", `${hostRoot}/runs:/state:rw`,
+        "--volume", `${hostRoot}/source:/source:rw`,
+        "--volume", `${hostRoot}/worktrees:/worktrees:rw`,
+        "--volume", `${hostRoot}/snapshots:/snapshots:rw`,
+        remoteImage.imageId,
+        "internal-pod-run",
+        "--host-root", hostRoot,
+      ], {
+        input: computeEnvelope,
+        timeoutMs: (loaded.template.timeouts.workflowSeconds + 600) * 1_000,
+        maxOutputBytes: 512 * 1024,
+      });
+      const ready = validatePodReady(parseLastJson(compute.stdout, "pod controller"), {
+        runId,
+        baseSha: options["base-sha"],
+      });
 
-    const secret = await resolveSecret(options["secret-ref"], options.account);
-    const envelope = JSON.stringify({
-      version: 1,
-      template: loaded.workflow.name,
-      templateDigest: loaded.templateDigest,
-      deployment: options.deployment,
-      task,
-      key: secret,
-      model,
-      image: remoteImage.imageId,
-      port,
-      publicUrl: publicUrl.toString().replace(/\/$/, ""),
-    });
-    const controllerName = `monolith-${options.deployment}-controller`;
-    const result = await remoteExecute(remote, [
-      "docker", "run", "--rm", "-i",
-      "--name", controllerName,
-      "--user", "0:0",
-      "--read-only",
-      "--cap-drop", "ALL",
-      "--security-opt", "no-new-privileges",
-      "--pids-limit", "256",
-      "--memory", "1g",
-      "--cpus", "1",
-      "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
-      "--volume", "/var/run/docker.sock:/var/run/docker.sock:rw",
-      "--volume", `${hostRoot}/runs:/state:rw`,
-      "--volume", `${hostRoot}/workspace:/workspace:rw`,
-      remoteImage.imageId,
-      "internal-run",
-      "--host-root", hostRoot,
-    ], { input: envelope, timeoutMs: (loaded.workflow.timeouts.workflowSeconds + 600) * 1_000, maxOutputBytes: 512 * 1024 });
-    const response = JSON.parse(result.stdout.trim().split("\n").at(-1));
-    if (options.json) process.stdout.write(`${JSON.stringify(response)}\n`);
-    else process.stdout.write(`deployed ${response.template} as ${response.deployment}\nrun: ${response.runId}\nurl: ${response.url}\n`);
+      let githubToken = await resolveGitHubSecret(options["github-secret-ref"], options.account);
+      const publishEnvelope = JSON.stringify({
+        version: 1,
+        runId,
+        repository: POD_REPOSITORY,
+        targetBranch: POD_TARGET_BRANCH,
+        baseSha: ready.baseSha,
+        candidateSha: ready.candidateSha,
+        headBranch: ready.branch,
+        token: githubToken,
+      });
+      githubToken = "";
+      const publisher = await remoteExecute(remote, [
+        "docker", "run", "--rm", "-i",
+        "--name", `monolith-${options.deployment}-publisher`,
+        "--user", "0:0",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--pids-limit", "128",
+        "--memory", "512m",
+        "--cpus", "0.5",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32m",
+        "--tmpfs", "/run/monolith-publish:rw,nosuid,nodev,noexec,size=16m,mode=0700",
+        "--volume", `${hostRoot}/runs:/state:rw`,
+        "--volume", `${hostRoot}/source:/source:rw`,
+        remoteImage.imageId,
+        "internal-publish",
+      ], {
+        input: publishEnvelope,
+        timeoutMs: PUBLISH_TIMEOUT_MS + 60_000,
+        maxOutputBytes: 512 * 1024,
+      });
+      const response = validatePublishedPod(parseLastJson(publisher.stdout, "pod publisher"), ready);
+      if (options.json) process.stdout.write(`${JSON.stringify(response)}\n`);
+      else process.stdout.write(
+        `deployed ${loaded.template.name} as ${options.deployment}\nrun: ${response.runId}\nPR: ${response.publication.url} (draft)\n`,
+      );
+    } else {
+      await remoteExecute(remote, ["mkdir", "-p", `${hostRoot}/runs`, `${hostRoot}/workspace`]);
+      await remoteExecute(remote, ["chmod", "700", hostRoot, `${hostRoot}/runs`]);
+      await remoteExecute(remote, ["chown", "1000:0", `${hostRoot}/workspace`]);
+      await remoteExecute(remote, ["chmod", "770", `${hostRoot}/workspace`]);
+
+      const secret = await resolveSecret(options["secret-ref"], options.account);
+      const envelope = JSON.stringify({
+        version: 1,
+        template: loaded.workflow.name,
+        templateDigest: loaded.templateDigest,
+        deployment: options.deployment,
+        task,
+        key: secret,
+        model,
+        image: remoteImage.imageId,
+        port,
+        publicUrl: publicUrl.toString().replace(/\/$/, ""),
+      });
+      const controllerName = `monolith-${options.deployment}-controller`;
+      const result = await remoteExecute(remote, [
+        "docker", "run", "--rm", "-i",
+        "--name", controllerName,
+        "--user", "0:0",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--pids-limit", "256",
+        "--memory", "1g",
+        "--cpus", "1",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
+        "--volume", "/var/run/docker.sock:/var/run/docker.sock:rw",
+        "--volume", `${hostRoot}/runs:/state:rw`,
+        "--volume", `${hostRoot}/workspace:/workspace:rw`,
+        remoteImage.imageId,
+        "internal-run",
+        "--host-root", hostRoot,
+      ], {
+        input: envelope,
+        timeoutMs: (loaded.workflow.timeouts.workflowSeconds + 600) * 1_000,
+        maxOutputBytes: 512 * 1024,
+      });
+      const response = parseLastJson(result.stdout, "workflow controller");
+      if (options.json) process.stdout.write(`${JSON.stringify(response)}\n`);
+      else process.stdout.write(`deployed ${response.template} as ${response.deployment}\nrun: ${response.runId}\nurl: ${response.url}\n`);
+    }
   } finally {
     if (remoteTransferStarted) {
       await remoteExecute(remote, ["docker", "image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
@@ -448,6 +749,91 @@ export async function runController({
   }
 }
 
+function sourceSnapshotHandle(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || !EXECUTION_ID.test(value.id ?? "")
+      || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.sha ?? "")) {
+    fail(`${label} snapshot is invalid`);
+  }
+  const receipt = value.receipt;
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)
+      || !Number.isInteger(receipt.files) || !Number.isInteger(receipt.bytes)
+      || !/^[a-f0-9]{64}$/.test(receipt.sha256 ?? "")) {
+    fail(`${label} snapshot receipt is invalid`);
+  }
+  return {
+    id: value.id,
+    sha: value.sha,
+    receipt: { files: receipt.files, bytes: receipt.bytes, sha256: receipt.sha256 },
+  };
+}
+
+export async function runPodController({
+  loaded,
+  envelope,
+  runtime,
+  source,
+  store,
+  stateRoot = "/state",
+  runId = envelope?.runId,
+  clockSource = () => Date.now(),
+  signalEmitter = process,
+  runPod = runEngineeringPod,
+}) {
+  if (!loaded || loaded.kind !== "engineering-pod" || !loaded.template || !loaded.prompts) {
+    fail("loaded engineering pod is invalid");
+  }
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) fail("pod envelope is invalid");
+  if (!RUN_ID.test(runId ?? "")) fail("pod run ID is invalid");
+  if (typeof runPod !== "function") fail("pod controller runner is invalid");
+  let interrupted = false;
+  const stop = () => {
+    interrupted = true;
+    void runtime.cancel();
+    void source.cancel?.();
+  };
+  signalEmitter.once("SIGINT", stop);
+  signalEmitter.once("SIGTERM", stop);
+  try {
+    const clock = () => {
+      if (interrupted) fail("controller interrupted");
+      return clockSource();
+    };
+    const deadlineAt = clock() + (loaded.template.timeouts.workflowSeconds * 1_000);
+    await runtime.imageDigest({ deadlineAt });
+    await runtime.start({ deadlineAt, bootstrap: false });
+    if (interrupted) fail("controller interrupted");
+    return await runPod({
+      template: loaded.template,
+      prompts: loaded.prompts,
+      templateDigest: loaded.templateDigest,
+      assignment: { task: envelope.task },
+      repository: envelope.repository,
+      baseRevision: envelope.baseSha,
+      targetBranch: envelope.targetBranch,
+      runId,
+      stateRoot,
+      agents: runtime,
+      source,
+      store,
+      clock,
+      deadlineAt,
+      verifyCandidate: input => runtime.verifySource({
+        runId,
+        expectedSha: input.expectedSha,
+        candidateSnapshot: sourceSnapshotHandle(input.candidateSnapshot, "candidate"),
+        baseSnapshot: sourceSnapshotHandle(input.baseSnapshot, "base"),
+        profile: input.profile,
+        timeoutSeconds: input.timeoutSeconds,
+      }),
+    });
+  } finally {
+    signalEmitter.off("SIGINT", stop);
+    signalEmitter.off("SIGTERM", stop);
+    await runtime.close();
+  }
+}
+
 async function internalRun(options) {
   exactOptions(options, ["host-root"]);
   if (!/^\/var\/lib\/monolith\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) fail("--host-root is invalid");
@@ -478,6 +864,124 @@ async function internalRun(options) {
   envelope.key = null;
   const result = await runController({ loaded, envelope, runtime });
   process.stdout.write(`${JSON.stringify({ ...result, template: envelope.template, deployment: envelope.deployment })}\n`);
+}
+
+async function readJsonEnvelope(maximumBytes, fields, label) {
+  const raw = await readStdin(maximumBytes);
+  let envelope;
+  try { envelope = JSON.parse(raw); } catch { fail(`invalid ${label} envelope`); }
+  return exactObject(envelope, fields, `${label} envelope`);
+}
+
+async function internalPodRun(options) {
+  exactOptions(options, ["host-root"]);
+  if (!/^\/var\/lib\/monolith\/deployments\/[a-z][a-z0-9-]{0,31}$/.test(options["host-root"] ?? "")) {
+    fail("--host-root is invalid");
+  }
+  const envelope = await readJsonEnvelope(128 * 1024, [
+    "version", "template", "templateDigest", "deployment", "task", "key", "model", "image",
+    "repository", "baseSha", "targetBranch", "runId",
+  ], "pod controller");
+  if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "")
+      || options["host-root"] !== `/var/lib/monolith/deployments/${envelope.deployment}`
+      || envelope.template !== "parallel-engineering-pod"
+      || !TEMPLATE_DIGEST.test(envelope.templateDigest ?? "")
+      || typeof envelope.task !== "string" || !envelope.task.trim()
+      || Buffer.byteLength(envelope.task) > 64 * 1024
+      || !/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(envelope.key ?? "")
+      || !/^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/.test(envelope.model ?? "")
+      || !SHA256.test(envelope.image ?? "") || envelope.repository !== POD_REPOSITORY
+      || !GIT_SHA.test(envelope.baseSha ?? "") || envelope.targetBranch !== POD_TARGET_BRANCH
+      || !RUN_ID.test(envelope.runId ?? "")) {
+    fail("pod controller envelope is invalid");
+  }
+  const loaded = await loadTemplate(envelope.template);
+  if (loaded.kind !== "engineering-pod" || loaded.templateDigest !== envelope.templateDigest) {
+    fail("controller template digest does not match the locally validated template");
+  }
+  const allowedWriteRoots = Object.fromEntries(Object.entries(loaded.template.writers).map(
+    ([slot, writer]) => [slot, [...writer.allowedWriteRoots]],
+  ));
+  const source = new GitRuntime({
+    allowedRepositories: [POD_REPOSITORY],
+    allowedWriteRoots,
+    gitRoot: "/source",
+    worktreesRoot: "/worktrees",
+    snapshotsRoot: "/snapshots",
+    runId: envelope.runId,
+  });
+  await prunePodRuns({ stateRoot: "/state", keepTerminalRuns: 20 });
+  const store = await createPodRunStore({
+    stateRoot: "/state",
+    runId: envelope.runId,
+    assignment: {
+      task: envelope.task,
+      repository: envelope.repository,
+      baseSha: envelope.baseSha,
+      targetBranch: envelope.targetBranch,
+    },
+  });
+  const runtime = new DockerRuntime({
+    image: envelope.image,
+    deployment: envelope.deployment,
+    hostRoot: options["host-root"],
+    key: envelope.key,
+    model: envelope.model,
+  });
+  envelope.key = null;
+  try {
+    const result = await runPodController({
+      loaded,
+      envelope,
+      runtime,
+      source,
+      store,
+      runId: envelope.runId,
+    });
+    process.stdout.write(`${JSON.stringify({
+      status: result.status,
+      runId: result.runId,
+      baseSha: result.baseSha,
+      candidateSha: result.candidateSha,
+      branch: result.branch,
+    })}\n`);
+  } catch (error) {
+    await source.close({ retainForPublication: false }).catch(() => {});
+    await store.finish("failed", {
+      reason: (error instanceof Error ? error.message : String(error)).slice(0, 2_000),
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+async function internalPublish(options) {
+  exactOptions(options, []);
+  const envelope = await readJsonEnvelope(16 * 1024, [
+    "version", "runId", "repository", "targetBranch", "baseSha", "candidateSha",
+    "headBranch", "token",
+  ], "publisher");
+  if (envelope.version !== 1 || !RUN_ID.test(envelope.runId ?? "")
+      || envelope.repository !== POD_REPOSITORY || envelope.targetBranch !== POD_TARGET_BRANCH
+      || !GIT_SHA.test(envelope.baseSha ?? "") || !GIT_SHA.test(envelope.candidateSha ?? "")
+      || envelope.headBranch !== `monolith/${envelope.runId}`
+      || !GITHUB_TOKEN.test(envelope.token ?? "")) {
+    fail("publisher envelope is invalid");
+  }
+  const token = envelope.token;
+  envelope.token = null;
+  const result = await publishRun({
+    runId: envelope.runId,
+    stateRoot: "/state",
+    sourceGitDir: "/source/repository.git",
+    repository: envelope.repository,
+    targetBranch: envelope.targetBranch,
+    baseSha: envelope.baseSha,
+    candidateSha: envelope.candidateSha,
+    headBranch: envelope.headBranch,
+    token,
+    deadlineAt: Date.now() + PUBLISH_TIMEOUT_MS,
+  }, { gitRunner: runPublisherGit });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
 async function remoteLogs(options) {
@@ -527,6 +1031,7 @@ function usage() {
   monolith list [--json]
   monolith validate TEMPLATE [--json]
   monolith deploy TEMPLATE --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
+  monolith deploy parallel-engineering-pod --deployment NAME (--host HOST | --proxmox HOST --vmid ID) --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --repository ${POD_REPOSITORY} --base-sha SHA --target-branch main [--json]
   monolith logs --deployment NAME (--host HOST | --proxmox HOST --vmid ID) [--run ID] [--json]
 `;
 }
@@ -550,8 +1055,8 @@ export async function main(argv = process.argv.slice(2)) {
     const { positional, options } = parseOptions(rest, { booleans: ["json"] });
     exactOptions(options, ["json"]);
     if (positional.length !== 1) fail("validate requires one template name");
-    const loaded = await loadWorkflow(positional[0], { templateRoot });
-    const result = { valid: true, template: loaded.workflow.name, digest: loaded.digest };
+    const loaded = await loadTemplate(positional[0]);
+    const result = { valid: true, kind: loaded.kind, template: loaded.name, digest: loaded.digest };
     process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `valid template ${result.template} (${result.digest})\n`);
     return;
   }
@@ -571,6 +1076,18 @@ export async function main(argv = process.argv.slice(2)) {
     const { positional, options } = parseOptions(rest);
     if (positional.length) fail("internal-run accepts no positional arguments");
     await internalRun(options);
+    return;
+  }
+  if (command === "internal-pod-run") {
+    const { positional, options } = parseOptions(rest);
+    if (positional.length) fail("internal-pod-run accepts no positional arguments");
+    await internalPodRun(options);
+    return;
+  }
+  if (command === "internal-publish") {
+    const { positional, options } = parseOptions(rest);
+    if (positional.length) fail("internal-publish accepts no positional arguments");
+    await internalPublish(options);
     return;
   }
   if (command === "internal-logs") {

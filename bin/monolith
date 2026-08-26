@@ -1,22 +1,31 @@
 #!/usr/bin/env node
 
 const command = process.argv[2];
-const internal = new Map([
-  ["agent", "../src/agent.mjs"],
-  ["bootstrap", "../src/bootstrap.mjs"],
-  ["probe", "../src/probe.mjs"],
-  ["proxy", "../src/credential-proxy.mjs"],
-  ["serve", "../src/serve.mjs"],
-  ["verify", "../src/verify.mjs"],
-]);
-
-if (internal.has(command)) {
+if (command === "source-verify") {
   process.argv.splice(2, 1);
-  await import(internal.get(command));
-} else {
-  const { main } = await import("../src/monolith.mjs");
+  const { main } = await import("../src/source-verify.mjs");
   main().catch(error => {
-    process.stderr.write(`monolith: ${error.message}\n`);
+    process.stderr.write(`monolith source-verify: ${error.message}\n`);
     process.exitCode = 1;
   });
+} else {
+  const internal = new Map([
+    ["agent", "../src/agent.mjs"],
+    ["bootstrap", "../src/bootstrap.mjs"],
+    ["probe", "../src/probe.mjs"],
+    ["proxy", "../src/credential-proxy.mjs"],
+    ["serve", "../src/serve.mjs"],
+    ["verify", "../src/verify.mjs"],
+  ]);
+
+  if (internal.has(command)) {
+    process.argv.splice(2, 1);
+    await import(internal.get(command));
+  } else {
+    const { main } = await import("../src/monolith.mjs");
+    main().catch(error => {
+      process.stderr.write(`monolith: ${error.message}\n`);
+      process.exitCode = 1;
+    });
+  }
 }
