@@ -875,8 +875,8 @@ export class GitRuntime {
       }
       const writable = writeDirectories.some(directory => pathWithin(directory, relative));
       if (writable) {
-        await checked(deadlineAt, () => chown(full, this.#writerUid, this.#writerGid));
         await checked(deadlineAt, () => chmod(full, metadata.isDirectory() ? 0o755 : ((metadata.mode & 0o111) ? 0o755 : 0o644)));
+        await checked(deadlineAt, () => chown(full, this.#writerUid, this.#writerGid));
       } else {
         await checked(deadlineAt, () => chmod(full, metadata.isDirectory() ? 0o555 : ((metadata.mode & 0o111) ? 0o555 : 0o444)));
       }
