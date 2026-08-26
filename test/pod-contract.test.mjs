@@ -245,6 +245,17 @@ test("packaged prompts state the strict handoff fields and deterministic authori
   assert.doesNotMatch(loaded.prompts.testing, /"files"\s*:/);
 });
 
+test("the packaged Testing prompt never claims trusted verification already ran", async () => {
+  const loaded = await loadPodTemplate("parallel-engineering-pod", {
+    templateRoot: path.join(root, "templates"),
+  });
+
+  assert.match(loaded.prompts.testing, /has not run/i);
+  assert.match(loaded.prompts.testing, /only after/i);
+  assert.doesNotMatch(loaded.prompts.testing, /trusted (controller|verifier) results/i);
+  assert.doesNotMatch(loaded.prompts.testing, /Exact trusted verifier result/i);
+});
+
 test("an attempt is one complete fixed plan from the immutable run base", () => {
   const plan = attemptPlan();
   assert.equal(validateAttemptPlan(plan, {

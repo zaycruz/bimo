@@ -11,8 +11,10 @@ path already covered by the owner's brief and `writePaths`. Any other dependency
 is structural and ends the attempt.
 
 When resumed, treat only the controller-delivered inbox slice as new context.
-Report its cursor exactly. Write one JSON object with exactly these fields to
-`/handoff/result.json`:
+Report its cursor exactly. On a replacement attempt the controller adds a
+`retry` context naming the failed gate, its exact evidence, and a targeted
+correction request; address it within your assigned `writePaths` only. Write
+one JSON object with exactly these fields to `/handoff/result.json`:
 
 ```json
 {
