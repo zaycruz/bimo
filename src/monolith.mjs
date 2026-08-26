@@ -929,6 +929,7 @@ async function internalPodRun(options) {
     key: envelope.key,
     model: envelope.model,
     modelConcurrency: Object.keys(loaded.template.writers).length,
+    modelRequestLimit: 300,
   });
   envelope.key = null;
   try {

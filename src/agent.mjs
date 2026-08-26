@@ -3,11 +3,22 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { lstat, readFile, unlink } from "node:fs/promises";
+import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 const MODEL = /^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/;
 const MAX_OUTPUT_BYTES = 1_048_576;
+const MAX_DIAGNOSTIC_LINE_BYTES = 65_536;
 const INSTRUCTIONS_PATH = "/instructions/instructions.md";
+const DIAGNOSTIC_EVENT_TYPES = new Set([
+  "error",
+  "reasoning",
+  "step_finish",
+  "step_start",
+  "text",
+  "tool_use",
+]);
 
 function fail(message) {
   throw new Error(message);
@@ -28,6 +39,86 @@ function parseArgs(argv) {
   }
   if (!/^[a-z][a-z0-9-]{0,31}$/.test(options.role ?? "")) fail("--role is invalid");
   return { model: options.model, timeoutSeconds, role: options.role };
+}
+
+function findHttpStatus(value, depth = 0, budget = { visited: 0 }) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || depth > 4 || budget.visited >= 32) return null;
+  budget.visited += 1;
+  for (const key of ["status", "statusCode"]) {
+    const raw = value[key];
+    const status = typeof raw === "string" && /^\d{3}$/u.test(raw) ? Number(raw) : raw;
+    if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
+  }
+  for (const nested of Object.values(value)) {
+    const status = findHttpStatus(nested, depth + 1, budget);
+    if (status !== null) return status;
+  }
+  return null;
+}
+
+export function createOpenCodeDiagnostics() {
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let stdoutLine = "";
+  let discardingLine = false;
+  let finished = false;
+  const decoder = new TextDecoder("utf-8");
+  const eventCounts = new Map();
+  let errorStatus = null;
+  const recordEvent = line => {
+    if (!line || Buffer.byteLength(line) > MAX_DIAGNOSTIC_LINE_BYTES) return;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (!event || typeof event !== "object" || Array.isArray(event)
+        || !DIAGNOSTIC_EVENT_TYPES.has(event.type)) return;
+    eventCounts.set(event.type, (eventCounts.get(event.type) ?? 0) + 1);
+    if (event.type === "error") errorStatus = findHttpStatus(event.error);
+  };
+  return {
+    stdout(chunk) {
+      stdoutBytes += chunk.length;
+      let text = decoder.decode(chunk, { stream: true });
+      if (discardingLine) {
+        const newline = text.indexOf("\n");
+        if (newline === -1) return;
+        discardingLine = false;
+        text = text.slice(newline + 1);
+      }
+      const lines = `${stdoutLine}${text}`.split("\n");
+      stdoutLine = lines.pop() ?? "";
+      for (const line of lines) recordEvent(line);
+      if (Buffer.byteLength(stdoutLine) > MAX_DIAGNOSTIC_LINE_BYTES) {
+        stdoutLine = "";
+        discardingLine = true;
+      }
+    },
+    stderr(chunk) {
+      stderrBytes += chunk.length;
+    },
+    failure(code) {
+      if (finished) throw new Error("OpenCode diagnostics already finalized");
+      finished = true;
+      const finalLine = discardingLine ? "" : `${stdoutLine}${decoder.decode()}`;
+      if (finalLine) recordEvent(finalLine);
+      const exit = Number.isInteger(code) ? `agent exited ${code}` : "agent exited on signal";
+      const events = [...eventCounts.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([type, count]) => `${type}:${count}`)
+        .join(",");
+      return [
+        exit,
+        ...(events ? [`events=${events}`] : []),
+        ...(errorStatus === null ? [] : [`errorStatus=${errorStatus}`]),
+        `stdoutBytes=${stdoutBytes}`,
+        `stderrBytes=${stderrBytes}`,
+      ].join("; ");
+    },
+  };
 }
 
 function runOpenCode({ model, timeoutSeconds, role }) {
@@ -63,6 +154,7 @@ function runOpenCode({ model, timeoutSeconds, role }) {
     });
     const hash = createHash("sha256");
     let outputBytes = 0;
+    const diagnostics = createOpenCodeDiagnostics();
     let settled = false;
     let timedOut = false;
 
@@ -78,13 +170,15 @@ function runOpenCode({ model, timeoutSeconds, role }) {
     }, timeoutSeconds * 1_000);
     timer.unref();
 
-    const consume = chunk => {
+    const consume = (chunk, stream) => {
       outputBytes += chunk.length;
+      if (stream === "stdout") diagnostics.stdout(chunk);
+      else diagnostics.stderr(chunk);
       hash.update(chunk);
       if (outputBytes > MAX_OUTPUT_BYTES) terminate();
     };
-    child.stdout.on("data", consume);
-    child.stderr.on("data", consume);
+    child.stdout.on("data", chunk => consume(chunk, "stdout"));
+    child.stderr.on("data", chunk => consume(chunk, "stderr"));
     child.on("error", error => {
       if (settled) return;
       settled = true;
@@ -97,7 +191,7 @@ function runOpenCode({ model, timeoutSeconds, role }) {
       clearTimeout(timer);
       if (timedOut) reject(new Error(`agent timed out after ${timeoutSeconds} seconds`));
       else if (outputBytes > MAX_OUTPUT_BYTES) reject(new Error(`agent output exceeded ${MAX_OUTPUT_BYTES} bytes`));
-      else if (code !== 0) reject(new Error(`agent exited ${code}`));
+      else if (code !== 0) reject(new Error(diagnostics.failure(code)));
       else resolve({ outputSha256: hash.digest("hex"), outputBytes });
     });
   });
@@ -118,7 +212,15 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ status: "completed", ...result })}\n`);
 }
 
-main().catch(error => {
-  process.stderr.write(`monolith-agent: ${error.message}\n`);
-  process.exitCode = 1;
-});
+const invokedPath = process.argv[1]
+  ? pathToFileURL(path.resolve(process.argv[1])).href
+  : null;
+const invokedFromMonolith = process.argv[1]
+  ? path.basename(process.argv[1]) === "monolith"
+  : false;
+if (invokedPath === import.meta.url || invokedFromMonolith) {
+  main().catch(error => {
+    process.stderr.write(`monolith-agent: ${error.message}\n`);
+    process.exitCode = 1;
+  });
+}

@@ -263,6 +263,7 @@ test("start bootstraps offline, creates two networks, and dual-homes only the pr
   assert(agentNetwork.includes("monolith-demo-agents"));
   assert(egressNetwork.includes("monolith-demo-egress"));
   assert.equal(proxyCreate[proxyCreate.indexOf("--network") + 1], "monolith-demo-agents");
+  assert.equal(proxyCreate[proxyCreate.indexOf("--max-requests") + 1], "100");
   assert.deepEqual(networkConnect, ["network", "connect", "monolith-demo-egress", "proxy-id"]);
   assert(calls.some(args => args[0] === "start-attached" && args[1] === "proxy-id"));
   assert.equal(readinessProbe[readinessProbe.indexOf("--network") + 1], "monolith-demo-agents");
@@ -279,6 +280,7 @@ test("pod startup skips the React bootstrap but keeps the isolated credential ga
     key: SECRET,
     model: "openrouter/deepseek/deepseek-v4-flash",
     modelConcurrency: 3,
+    modelRequestLimit: 300,
   });
   const calls = [];
   runtime.command = async args => {
@@ -297,6 +299,7 @@ test("pod startup skips the React bootstrap but keeps the isolated credential ga
   const proxyCreate = calls.find(args => args[0] === "create" && args.includes("proxy"));
   assert(proxyCreate);
   assert.equal(proxyCreate[proxyCreate.indexOf("--max-concurrency") + 1], "3");
+  assert.equal(proxyCreate[proxyCreate.indexOf("--max-requests") + 1], "300");
   assert(calls.some(args => args[0] === "run" && args.includes("probe")));
 });
 

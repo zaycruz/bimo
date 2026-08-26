@@ -24,6 +24,7 @@ const NODE_UID = 1000;
 const NODE_GID = 1000;
 const PROXY_LIFETIME_SECONDS = 3_600;
 const MAX_MODEL_CONCURRENCY = 3;
+const MAX_MODEL_REQUESTS = 300;
 const MAX_SNAPSHOT_ENTRIES = 10_000;
 const MAX_SNAPSHOT_DEPTH = 64;
 const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
@@ -304,11 +305,23 @@ export function bootstrapArgs({ deployment, image, workspaceHost }) {
   ];
 }
 
-export function proxyCreateArgs({ deployment, image, network, model, modelConcurrency = 1 }) {
+export function proxyCreateArgs({
+  deployment,
+  image,
+  network,
+  model,
+  modelConcurrency = 1,
+  modelRequestLimit = 100,
+}) {
   if (!Number.isInteger(modelConcurrency)
       || modelConcurrency < 1
       || modelConcurrency > MAX_MODEL_CONCURRENCY) {
     fail("invalid model concurrency");
+  }
+  if (!Number.isInteger(modelRequestLimit)
+      || modelRequestLimit < 1
+      || modelRequestLimit > MAX_MODEL_REQUESTS) {
+    fail("invalid model request limit");
   }
   return [
     "create",
@@ -325,7 +338,7 @@ export function proxyCreateArgs({ deployment, image, network, model, modelConcur
     "--lifetime-seconds", String(PROXY_LIFETIME_SECONDS),
     "--port", "8787",
     "--model", model.replace(/^openrouter\//, ""),
-    "--max-requests", "100",
+    "--max-requests", String(modelRequestLimit),
     "--max-concurrency", String(modelConcurrency),
     "--max-body-bytes", "2097152",
     "--timeout-seconds", "300",
@@ -774,6 +787,7 @@ export class DockerRuntime {
     key,
     model,
     modelConcurrency = 1,
+    modelRequestLimit = 100,
     port,
     publicUrl,
   }) {
@@ -790,6 +804,11 @@ export class DockerRuntime {
         || modelConcurrency < 1
         || modelConcurrency > MAX_MODEL_CONCURRENCY) {
       fail("invalid model concurrency");
+    }
+    if (!Number.isInteger(modelRequestLimit)
+        || modelRequestLimit < 1
+        || modelRequestLimit > MAX_MODEL_REQUESTS) {
+      fail("invalid model request limit");
     }
     if (typeof key !== "string" || !/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(key)) fail("invalid OpenRouter key");
     const publicationConfigured = port !== undefined || publicUrl !== undefined;
@@ -810,6 +829,7 @@ export class DockerRuntime {
     this.key = key;
     this.model = model;
     this.modelConcurrency = modelConcurrency;
+    this.modelRequestLimit = modelRequestLimit;
     this.port = port ?? null;
     this.publicUrl = parsedUrl?.toString().replace(/\/$/, "") ?? null;
     this.controllerUid = typeof process.getuid === "function" ? process.getuid() : 0;
@@ -994,6 +1014,7 @@ export class DockerRuntime {
         network: this.agentNetwork,
         model: this.model,
         modelConcurrency: this.modelConcurrency,
+        modelRequestLimit: this.modelRequestLimit,
       }), {}, deploymentDeadline, "deployment");
       this.proxyId = created.stdout.trim();
       await this.commandWithin(["network", "connect", this.egressNetwork, this.proxyId], {}, deploymentDeadline, "deployment");
