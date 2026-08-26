@@ -439,6 +439,12 @@ test("fans out all three writers, checks exact results, and marks the tested can
   assert(calls
     .filter(call => call.type === "commit")
     .every(call => !Object.hasOwn(call.input, "receipt")));
+  const checkerViews = calls.filter(call => (
+    call.type === "read-view" && call.input.id.startsWith("c-")
+  ));
+  assert.equal(checkerViews.length, 3);
+  assert(checkerViews.every(call => call.input.id.length <= 64));
+  assert.equal(new Set(checkerViews.map(call => call.input.id)).size, checkerViews.length);
   assert.deepEqual(
     store.records.workResults.map(({ value }) => ({
       ownerSlot: value.ownerSlot,

@@ -296,7 +296,7 @@ export async function runEngineeringPod({
     previousInboxCursor = 0,
   }) => {
     const view = await source.createReadView({
-      id: `attempt-${attemptState.attempt}-checker-${workItem.ownerSlot}-${result.resultSha}`,
+      id: `c-${attemptState.attempt}-${workItem.ownerSlot}-${result.resultSha}`,
       sha: result.resultSha,
       deadlineAt: attemptState.deadlineAt,
     });
