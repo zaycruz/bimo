@@ -2,7 +2,7 @@
   "name": "bimo-workflow",
   "version": "0.5.0",
   "description": "Deploy bounded, auditable agent workflows as ephemeral Docker fleets.",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "type": "module",
   "bin": {
     "bimo": "bin/bimo"

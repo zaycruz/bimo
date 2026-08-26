@@ -256,9 +256,9 @@ host reachable through an already trusted, strict-host-key-checked SSH
 connection. `BIMO_PACKAGE_ROOT` makes every example below runnable from any
 working directory after the global install.
 
-This repository and package are `UNLICENSED`. Public source visibility does not
-grant an open-source license or general permission to use, copy, modify, or
-redistribute the code.
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
 
 ## CLI
 
