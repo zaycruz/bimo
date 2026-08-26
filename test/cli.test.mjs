@@ -384,6 +384,48 @@ test("the installed CLI lists the packaged workflows and fixed engineering pod",
   )));
 });
 
+test("bare bimo prints usage and exits 1, while the help aliases print usage and exit 0", async () => {
+  const bare = await invoke([]);
+  assert.equal(bare.code, 1);
+  assert.match(bare.stdout, /^usage:/);
+  assert.equal(bare.stderr, "");
+
+  for (const flag of ["--help", "-h"]) {
+    const result = await invoke([flag]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stdout, bare.stdout);
+    assert.equal(result.stderr, "");
+  }
+});
+
+test("--version prints the packaged version and exits 0", async () => {
+  const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+  const result = await invoke(["--version"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, `${manifest.version}\n`);
+  assert.equal(result.stderr, "");
+});
+
+test("organize and deploy require --deployment before validating its format", async () => {
+  const organizeBase = [
+    "organize", "--prompt", "Build a small status page.",
+    "--host", "example.invalid",
+    "--secret-ref", "op://Test/Bimo/openrouter",
+  ];
+  for (const [args, pattern] of [
+    [organizeBase, /--deployment is required/],
+    [[...organizeBase, "--deployment", "Organizer_Demo"],
+      /--deployment must use lowercase letters, numbers, and dashes/],
+    [["deploy", "react-app"], /--deployment is required/],
+    [["deploy", "react-app", "--deployment", "Fleet_Demo"],
+      /--deployment must use lowercase letters, numbers, and dashes/],
+  ]) {
+    const result = await invoke(args);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, pattern);
+  }
+});
+
 test("targets reports the working local Docker adapter and the two on-demand access adapters", async t => {
   const tools = await fakeDeployTools(t);
   const result = await invoke(["targets", "--json"], { env: tools.env });
