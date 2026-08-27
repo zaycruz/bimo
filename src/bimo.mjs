@@ -8,6 +8,7 @@ import {
   open,
   readFile,
   readdir,
+  rmdir,
 } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -65,6 +66,20 @@ const POD_DEPLOY_OPTIONS = [
   "--deployment", "--target", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
   "--secret-ref", "--github-secret-ref", "--repository", "--base-sha", "--target-branch",
 ];
+const ORGANIZE_OPTIONS = [
+  "prompt", "agents", "deployment", "target", "proxmox", "host", "vmid",
+  "secret-ref", "account", "model", "image", "json",
+];
+const DEPLOY_WORKFLOW_OPTIONS = [
+  "deployment", "target", "proxmox", "host", "vmid", "task-file", "task-stdin",
+  "secret-ref", "account", "public-url", "port", "model", "image", "json",
+];
+const DEPLOY_POD_OPTIONS = [
+  "deployment", "target", "proxmox", "host", "vmid", "task-file", "task-stdin",
+  "secret-ref", "github-secret-ref", "account", "repository", "base-sha",
+  "target-branch", "model", "image", "json",
+];
+const DEPLOY_OPTIONS = [...new Set([...DEPLOY_WORKFLOW_OPTIONS, ...DEPLOY_POD_OPTIONS])];
 const DEPLOYMENT_LAYOUTS = {
   workflow: ["runs", "workspace"],
   organizer: ["runs", "worktrees"],
@@ -83,7 +98,7 @@ function fail(message) {
   throw new Error(message);
 }
 
-function parseOptions(argv, { booleans = [] } = {}) {
+function parseOptions(argv, { booleans = [], allowed } = {}) {
   const options = {};
   const positional = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -94,6 +109,7 @@ function parseOptions(argv, { booleans = [] } = {}) {
     }
     const key = value.slice(2);
     if (Object.hasOwn(options, key)) fail(`duplicate option: --${key}`);
+    if (allowed && !allowed.includes(key)) fail(`unknown option: --${key}`);
     if (booleans.includes(key)) options[key] = true;
     else {
       const next = argv[index + 1];
@@ -108,6 +124,7 @@ function parseOptions(argv, { booleans = [] } = {}) {
 function parseOrganizerOptions(argv) {
   const options = {};
   const positional = [];
+  let agentFlag = "--agents";
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     const option = value === "-p" ? "--prompt" : value === "-n" ? "--agents" : value;
@@ -117,15 +134,17 @@ function parseOrganizerOptions(argv) {
     }
     const key = option.slice(2);
     if (Object.hasOwn(options, key)) fail(`duplicate option: --${key}`);
+    if (!ORGANIZE_OPTIONS.includes(key)) fail(`unknown option: --${key}`);
     if (key === "json") options[key] = true;
     else {
       const next = argv[index + 1];
       if (next === undefined) fail(`--${key} requires a value`);
       options[key] = next;
+      if (key === "agents") agentFlag = value;
       index += 1;
     }
   }
-  return { positional, options };
+  return { positional, options, agentFlag };
 }
 
 function exactOptions(options, allowed) {
@@ -646,6 +665,44 @@ async function prepareDeploymentState(target, image, hostRoot, layout) {
   }
 }
 
+// Best-effort cleanup after a run that failed before recording anything:
+// rmdir removes only empty directories, so recorded state is never touched.
+async function reapDeploymentState(target, hostRoot, layout) {
+  const directories = deploymentDirectories(layout).map(directory => `${hostRoot}/${directory}`);
+  if (target.kind === "local") {
+    for (const directory of [...directories, hostRoot]) {
+      await rmdir(directory).catch(() => {});
+    }
+    return;
+  }
+  await targetExecute(target, ["rmdir", ...directories, hostRoot], {
+    timeoutMs: 15_000,
+    maxOutputBytes: 4 * 1024,
+  }).catch(() => {});
+}
+
+// Read paths must not let Docker auto-create the bind-mounted state root.
+async function deploymentRunsExist(target, hostRoot) {
+  if (target.kind === "local") {
+    const stat = await lstat(path.join(hostRoot, "runs")).catch(() => null);
+    return Boolean(stat?.isDirectory() && !stat.isSymbolicLink());
+  }
+  return targetExecute(target, ["test", "-d", `${hostRoot}/runs`], {
+    timeoutMs: 15_000,
+    maxOutputBytes: 4 * 1024,
+  }).then(() => true, () => false);
+}
+
+// SIGINT detaches the CLI; the controller keeps running on the target.
+function armDetachNotice(deployment) {
+  const detach = () => {
+    process.stderr.write(`detaching; the run continues on the target — use bimo cancel --deployment ${deployment} to stop it\n`);
+    process.exit(130);
+  };
+  process.once("SIGINT", detach);
+  return () => process.off("SIGINT", detach);
+}
+
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     && Object.getPrototypeOf(value) === Object.prototype;
@@ -823,14 +880,7 @@ async function resolveGitHubSecret(reference, account) {
 async function deploy(template, options) {
   const loaded = await loadTemplate(template);
   const pod = loaded.kind === "engineering-pod";
-  exactOptions(options, pod ? [
-    "deployment", "target", "proxmox", "host", "vmid", "task-file", "task-stdin",
-    "secret-ref", "github-secret-ref", "account", "repository", "base-sha",
-    "target-branch", "model", "image", "json",
-  ] : [
-    "deployment", "target", "proxmox", "host", "vmid", "task-file", "task-stdin",
-    "secret-ref", "account", "public-url", "port", "model", "image", "json",
-  ]);
+  exactOptions(options, pod ? DEPLOY_POD_OPTIONS : DEPLOY_WORKFLOW_OPTIONS);
   if (!options.deployment) fail("--deployment is required");
   if (!NAME.test(options.deployment)) fail("--deployment must use lowercase letters, numbers, and dashes");
   const deploymentTarget = resolveDeploymentTarget(options);
@@ -861,10 +911,12 @@ async function deploy(template, options) {
 
   const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
   const progress = options.json ? null : new AbortController();
-  if (progress) process.stderr.write(`run: ${runId}\n`);
   const heartbeat = progress ? startRunHeartbeat({ runId }) : null;
+  const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  const disarmDetachNotice = armDetachNotice(options.deployment);
   let follower = null;
   let transferTag = null;
+  let stateLayout = null;
   try {
     let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
     let githubToken = pod
@@ -874,7 +926,6 @@ async function deploy(template, options) {
     const prepared = await prepareImage(deploymentTarget, image);
     const remoteImage = prepared.remoteImage;
     transferTag = prepared.transferTag;
-    const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
     if (progress) {
       heartbeat.setPhase("running controller");
       const readChunk = async ({ runId: current, after, signal }) => {
@@ -893,7 +944,9 @@ async function deploy(template, options) {
       }).catch(() => {});
     }
     if (pod) {
+      stateLayout = "pod";
       await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "pod");
+      if (progress) process.stderr.write(`run: ${runId}\n`);
       const computeEnvelope = JSON.stringify({
         version: 1,
         template: loaded.template.name,
@@ -980,7 +1033,9 @@ async function deploy(template, options) {
         `deployed ${loaded.template.name} as ${options.deployment}\nrun: ${response.runId}\nPR: ${response.publication.url} (draft)\n`,
       );
     } else {
+      stateLayout = "workflow";
       await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "workflow");
+      if (progress) process.stderr.write(`run: ${runId}\n`);
 
       const envelope = JSON.stringify({
         version: 1,
@@ -1023,7 +1078,11 @@ async function deploy(template, options) {
       if (options.json) process.stdout.write(`${JSON.stringify(response)}\n`);
       else process.stdout.write(`deployed ${response.template} as ${response.deployment}\nrun: ${response.runId}\nurl: ${response.url}\n`);
     }
+  } catch (error) {
+    if (stateLayout) await reapDeploymentState(deploymentTarget, hostRoot, stateLayout);
+    throw error;
   } finally {
+    disarmDetachNotice();
     progress?.abort();
     if (follower) await follower;
     heartbeat?.stop();
@@ -1031,11 +1090,8 @@ async function deploy(template, options) {
   }
 }
 
-async function organizeRemote(options) {
-  exactOptions(options, [
-    "prompt", "agents", "deployment", "target", "proxmox", "host", "vmid",
-    "secret-ref", "account", "model", "image", "json",
-  ]);
+async function organizeRemote(options, agentFlag = "--agents") {
+  exactOptions(options, ORGANIZE_OPTIONS);
   if (!options.deployment) fail("--deployment is required");
   if (!NAME.test(options.deployment)) {
     fail("--deployment must use lowercase letters, numbers, and dashes");
@@ -1043,7 +1099,7 @@ async function organizeRemote(options) {
   const deploymentTarget = resolveDeploymentTarget(options);
   const prompt = validateOrganizerPrompt(options.prompt);
   const agentsText = options.agents ?? "1";
-  if (!/^[1-3]$/u.test(agentsText)) fail("--agents must be an integer from 1 to 3");
+  if (!/^[1-3]$/u.test(agentsText)) fail(`${agentFlag} must be an integer from 1 to 3`);
   const agents = Number(agentsText);
   if (!options["secret-ref"]) fail("--secret-ref is required");
   const image = options.image ?? DEFAULT_IMAGE;
@@ -1055,17 +1111,18 @@ async function organizeRemote(options) {
 
   const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
   const progress = options.json ? null : new AbortController();
-  if (progress) process.stderr.write(`run: ${runId}\n`);
   const heartbeat = progress ? startRunHeartbeat({ runId }) : null;
+  const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  const disarmDetachNotice = armDetachNotice(options.deployment);
   let follower = null;
   let transferTag = null;
+  let stateLayout = null;
   try {
     let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
     heartbeat?.setPhase("preparing image");
     const prepared = await prepareImage(deploymentTarget, image, { retag: false });
     const remoteImage = prepared.remoteImage;
     transferTag = prepared.transferTag;
-    const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
     if (progress) {
       heartbeat.setPhase("running controller");
       const readChunk = async ({ runId: current, after, signal }) => {
@@ -1083,7 +1140,9 @@ async function organizeRemote(options) {
         },
       }).catch(() => {});
     }
+    stateLayout = "organizer";
     await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "organizer");
+    if (progress) process.stderr.write(`run: ${runId}\n`);
     const envelope = JSON.stringify({
       version: 1,
       deployment: options.deployment,
@@ -1133,7 +1192,11 @@ async function organizeRemote(options) {
       `accepted deploy options: ${response.handoff.acceptedOptions.join(", ")}`,
       "",
     ].join("\n"));
+  } catch (error) {
+    if (stateLayout) await reapDeploymentState(deploymentTarget, hostRoot, stateLayout);
+    throw error;
   } finally {
+    disarmDetachNotice();
     progress?.abort();
     if (follower) await follower;
     heartbeat?.stop();
@@ -1645,6 +1708,15 @@ async function remoteLogs(options) {
   if (!IMAGE.test(image)) fail("--image is invalid");
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
   await requireImagePresent(deploymentTarget, image, { preparing: Boolean(options.follow) });
+  if (!await deploymentRunsExist(deploymentTarget, hostRoot)) {
+    if (options.run) fail(`unknown run: ${runId}`);
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify({ deployment: options.deployment, run: null, events: [] })}\n`);
+    } else {
+      process.stdout.write(`no runs recorded for deployment ${options.deployment}\n`);
+    }
+    return;
+  }
   if (options.follow) {
     await followLogs(deploymentTarget, { hostRoot, image, runId, json: Boolean(options.json) });
     return;
@@ -1792,7 +1864,7 @@ async function summarizeRun(stateRoot, runId, { withLastEvent = false } = {}) {
   const phase = typeof record?.phase === "string" && record.phase.length <= 64 ? record.phase : null;
 
   let events = [];
-  if (!state) events = await readRunEvents(runDir, { wholeFile: true });
+  if (!state || attempts === null) events = await readRunEvents(runDir, { wholeFile: true });
   else if (withLastEvent) events = await readRunEvents(runDir, { wholeFile: false });
 
   if (!state) {
@@ -1809,7 +1881,15 @@ async function summarizeRun(stateRoot, runId, { withLastEvent = false } = {}) {
       0,
     );
   }
-  if (attempts === null) attempts = events.length ? 1 : 0;
+  if (attempts === null) {
+    // run.json recorded a state but no currentAttempt (organizer runs); derive
+    // attempts from the event log so runs and status agree on one value.
+    const derived = events.reduce(
+      (maximum, event) => (Number.isSafeInteger(event.attempt) ? Math.max(maximum, event.attempt) : maximum),
+      0,
+    );
+    attempts = derived > 0 ? derived : (events.length ? 1 : 0);
+  }
 
   return {
     id: runId,
@@ -1860,6 +1940,26 @@ async function internalRuns(argv) {
   }
 }
 
+function writeStatusPayload(payload, { json }) {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(payload)}\n`);
+    return;
+  }
+  const lines = [
+    `deployment: ${payload.deployment}`,
+    `run: ${payload.runId ?? "-"}`,
+    `state: ${payload.state}`,
+  ];
+  if (payload.phase) lines.push(`phase: ${payload.phase}`);
+  lines.push(`started: ${payload.startedAt ?? "-"}`);
+  lines.push(`finished: ${payload.finishedAt ?? "-"}`);
+  lines.push(`attempts: ${payload.attempts}`);
+  if (payload.lastEvent) {
+    lines.push(`last event: ${payload.lastEvent.type ?? "event"} at ${payload.lastEvent.timestamp ?? "-"}`);
+  }
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
 async function internalStatus(argv) {
   const { positional, options } = parseOptions(argv, { booleans: ["json"] });
   if (positional.length) fail("internal-status accepts no positional arguments");
@@ -1888,24 +1988,7 @@ async function internalStatus(argv) {
     const { id, ...rest } = summary;
     status = { runId: id, ...rest };
   }
-  const payload = { deployment: options.deployment, ...status };
-  if (options.json) {
-    process.stdout.write(`${JSON.stringify(payload)}\n`);
-    return;
-  }
-  const lines = [
-    `deployment: ${payload.deployment}`,
-    `run: ${payload.runId ?? "-"}`,
-    `state: ${payload.state}`,
-  ];
-  if (payload.phase) lines.push(`phase: ${payload.phase}`);
-  lines.push(`started: ${payload.startedAt ?? "-"}`);
-  lines.push(`finished: ${payload.finishedAt ?? "-"}`);
-  lines.push(`attempts: ${payload.attempts}`);
-  if (payload.lastEvent) {
-    lines.push(`last event: ${payload.lastEvent.type ?? "event"} at ${payload.lastEvent.timestamp ?? "-"}`);
-  }
-  process.stdout.write(`${lines.join("\n")}\n`);
+  writeStatusPayload({ deployment: options.deployment, ...status }, { json: Boolean(options.json) });
 }
 
 async function internalTail(argv) {
@@ -1967,6 +2050,12 @@ async function remoteRuns(options) {
   if (!IMAGE.test(image)) fail("--image is invalid");
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
   await requireImagePresent(deploymentTarget, image);
+  if (!await deploymentRunsExist(deploymentTarget, hostRoot)) {
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify({ deployment: options.deployment, runs: [] })}\n`);
+    }
+    return;
+  }
   const result = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, image, [
     "internal-runs",
     "--deployment", options.deployment,
@@ -1986,6 +2075,20 @@ async function remoteStatus(options) {
   if (!IMAGE.test(image)) fail("--image is invalid");
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
   await requireImagePresent(deploymentTarget, image);
+  if (!await deploymentRunsExist(deploymentTarget, hostRoot)) {
+    if (options.run) fail(`unknown run: ${runId}`);
+    writeStatusPayload({
+      deployment: options.deployment,
+      runId: null,
+      state: "none",
+      phase: null,
+      startedAt: null,
+      finishedAt: null,
+      attempts: 0,
+      lastEvent: null,
+    }, { json: Boolean(options.json) });
+    return;
+  }
   const result = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, image, [
     "internal-status",
     "--deployment", options.deployment,
@@ -2007,6 +2110,7 @@ async function remoteCancel(options) {
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
   if (runId !== null) {
     await requireImagePresent(deploymentTarget, image);
+    if (!await deploymentRunsExist(deploymentTarget, hostRoot)) fail(`unknown run: ${runId}`);
     const statusResult = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, image, [
       "internal-status",
       "--deployment", options.deployment,
@@ -2036,7 +2140,7 @@ async function remoteCancel(options) {
     return;
   }
   for (const name of signalled) {
-    process.stdout.write(`sent SIGTERM to ${name}; the run will finish as failed or cancelled\n`);
+    process.stdout.write(`sent SIGTERM to ${name}; the run will finish as failed with reason 'deployment cancelled'\n`);
   }
 }
 
@@ -2083,29 +2187,39 @@ async function remotePublish(options) {
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
   let githubToken = await resolveGitHubSecret(options["github-secret-ref"], options.account);
   await requireImagePresent(deploymentTarget, image);
+  if (!await deploymentRunsExist(deploymentTarget, hostRoot)) {
+    if (!options.run) fail("no latest run is recorded");
+    fail(`no publication-ready record found for run ${runId}`);
+  }
   const envelope = JSON.stringify({ version: 1, runId, token: githubToken });
   githubToken = "";
-  const publisher = await targetExecute(deploymentTarget, [
-    "docker", "run", "--pull=never", "--rm", "-i",
-    "--name", `bimo-${options.deployment}-publisher`,
-    "--user", "0:0",
-    "--read-only",
-    "--cap-drop", "ALL",
-    "--security-opt", "no-new-privileges",
-    "--pids-limit", "128",
-    "--memory", "512m",
-    "--cpus", "0.5",
-    "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32m",
-    "--tmpfs", "/run/bimo-publish:rw,nosuid,nodev,noexec,size=16m,mode=0700",
-    "--volume", `${hostRoot}/runs:/state:rw`,
-    "--volume", `${hostRoot}/source:/source:rw`,
-    image,
-    "internal-publish-resume",
-  ], {
-    input: envelope,
-    timeoutMs: PUBLISH_TIMEOUT_MS + 60_000,
-    maxOutputBytes: 512 * 1024,
-  });
+  const disarmDetachNotice = armDetachNotice(options.deployment);
+  let publisher;
+  try {
+    publisher = await targetExecute(deploymentTarget, [
+      "docker", "run", "--pull=never", "--rm", "-i",
+      "--name", `bimo-${options.deployment}-publisher`,
+      "--user", "0:0",
+      "--read-only",
+      "--cap-drop", "ALL",
+      "--security-opt", "no-new-privileges",
+      "--pids-limit", "128",
+      "--memory", "512m",
+      "--cpus", "0.5",
+      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32m",
+      "--tmpfs", "/run/bimo-publish:rw,nosuid,nodev,noexec,size=16m,mode=0700",
+      "--volume", `${hostRoot}/runs:/state:rw`,
+      "--volume", `${hostRoot}/source:/source:rw`,
+      image,
+      "internal-publish-resume",
+    ], {
+      input: envelope,
+      timeoutMs: PUBLISH_TIMEOUT_MS + 60_000,
+      maxOutputBytes: 512 * 1024,
+    });
+  } finally {
+    disarmDetachNotice();
+  }
   const response = validateResumedPublication(parseLastJson(publisher.stdout, "pod publisher"));
   if (options.json) process.stdout.write(`${JSON.stringify(response)}\n`);
   else process.stdout.write(`published ${response.runId}\nPR: ${response.publication.url} (draft)\n`);
@@ -2370,7 +2484,7 @@ async function doctor(options) {
           maxOutputBytes: 4 * 1024,
         }).catch(() => fail("reference is not readable"));
         if (!result.stdout.trim()) fail("reference resolved to an empty value");
-        return "reference is readable";
+        return "OpenRouter API key reference is readable";
       });
     } else {
       checks.push(Object.freeze({ name: "secret-ref", status: "skip", reason: "op CLI is unavailable" }));
@@ -2394,8 +2508,8 @@ const COMMAND_HELP = {
   list: "bimo list [--json]\n  List the installed workflow and pod templates.",
   targets: "bimo targets [--json]\n  Probe the local Docker daemon and list the built-in deployment targets.",
   validate: "bimo validate TEMPLATE [--json]\n  Validate one installed template and print its digest.",
-  organize: "bimo organize -p PROMPT [-n 1|2|3] --deployment NAME [target flags] --secret-ref op://VAULT/ITEM/FIELD [--json]\n  Plan a deployment with bounded organizer agents without deploying.",
-  deploy: "bimo deploy TEMPLATE --deployment NAME [target flags] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD [--json]\n  Deploy a template as a bounded Docker fleet.",
+  organize: "bimo organize -p PROMPT [-n 1|2|3] --deployment NAME [target flags] --secret-ref op://VAULT/ITEM/FIELD [--json]\n  Plan a deployment with bounded organizer agents without deploying. --secret-ref must resolve to an OpenRouter API key.",
+  deploy: "bimo deploy TEMPLATE --deployment NAME [target flags] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]\n  Deploy a template as a bounded Docker fleet. --secret-ref must resolve to an OpenRouter API key.",
   runs: "bimo runs --deployment NAME [target flags] [--json]\n  List recorded runs for a deployment from its durable state root.",
   status: "bimo status --deployment NAME [target flags] [--run ID] [--json]\n  Print the latest run state and last event for a deployment.",
   logs: "bimo logs --deployment NAME [target flags] [--run ID] [--json] [--follow]\n  Print a run log; --follow streams new events until interrupted.",
@@ -2444,7 +2558,7 @@ async function runCommand(argv) {
     process.stdout.write(usage());
     return;
   }
-  if (command === "--version") {
+  if (command === "--version" || command === "version") {
     const manifest = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
     process.stdout.write(`${manifest.version}\n`);
     return;
@@ -2454,18 +2568,16 @@ async function runCommand(argv) {
     return;
   }
   if (command === "list") {
-    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    const { positional, options } = parseOptions(rest, { booleans: ["json"], allowed: ["json"] });
     if (positional.length) fail("list accepts no positional arguments");
-    exactOptions(options, ["json"]);
     const templates = await listTemplates();
     if (options.json) process.stdout.write(`${JSON.stringify({ templates })}\n`);
     else templates.forEach(template => process.stdout.write(`${template.name}\t${template.roles.join(" -> ")}\n`));
     return;
   }
   if (command === "targets") {
-    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    const { positional, options } = parseOptions(rest, { booleans: ["json"], allowed: ["json"] });
     if (positional.length) fail("targets accepts no positional arguments");
-    exactOptions(options, ["json"]);
     const targets = await listDeploymentTargets();
     if (options.json) process.stdout.write(`${JSON.stringify({ targets })}\n`);
     else targets.forEach(target => process.stdout.write([
@@ -2478,8 +2590,7 @@ async function runCommand(argv) {
     return;
   }
   if (command === "validate") {
-    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
-    exactOptions(options, ["json"]);
+    const { positional, options } = parseOptions(rest, { booleans: ["json"], allowed: ["json"] });
     if (positional.length !== 1) fail("validate requires one template name");
     const loaded = await loadTemplate(positional[0]);
     const result = { valid: true, kind: loaded.kind, template: loaded.name, digest: loaded.digest };
@@ -2487,49 +2598,73 @@ async function runCommand(argv) {
     return;
   }
   if (command === "organize") {
-    const { positional, options } = parseOrganizerOptions(rest);
+    const { positional, options, agentFlag } = parseOrganizerOptions(rest);
     if (positional.length) fail("organize accepts no positional arguments");
-    await organizeRemote(options);
+    await organizeRemote(options, agentFlag);
     return;
   }
   if (command === "deploy") {
-    const { positional, options } = parseOptions(rest, { booleans: ["task-stdin", "json"] });
+    const { positional, options } = parseOptions(rest, {
+      booleans: ["task-stdin", "json"],
+      allowed: DEPLOY_OPTIONS,
+    });
     if (positional.length !== 1) fail("deploy requires one template name");
     await deploy(positional[0], options);
     return;
   }
   if (command === "logs") {
-    const { positional, options } = parseOptions(rest, { booleans: ["json", "follow"] });
+    const { positional, options } = parseOptions(rest, {
+      booleans: ["json", "follow"],
+      allowed: ["deployment", "target", "proxmox", "host", "vmid", "run", "image", "json", "follow"],
+    });
     if (positional.length) fail("logs accepts no positional arguments");
     await remoteLogs(options);
     return;
   }
   if (command === "runs") {
-    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    const { positional, options } = parseOptions(rest, {
+      booleans: ["json"],
+      allowed: ["deployment", "target", "proxmox", "host", "vmid", "image", "json"],
+    });
     if (positional.length) fail("runs accepts no positional arguments");
     await remoteRuns(options);
     return;
   }
   if (command === "status") {
-    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    const { positional, options } = parseOptions(rest, {
+      booleans: ["json"],
+      allowed: ["deployment", "target", "proxmox", "host", "vmid", "run", "image", "json"],
+    });
     if (positional.length) fail("status accepts no positional arguments");
     await remoteStatus(options);
     return;
   }
   if (command === "doctor") {
-    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    const { positional, options } = parseOptions(rest, {
+      booleans: ["json"],
+      allowed: ["deployment", "target", "proxmox", "host", "vmid", "secret-ref", "account", "json"],
+    });
     if (positional.length) fail("doctor accepts no positional arguments");
     await doctor(options);
     return;
   }
   if (command === "cancel") {
-    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    const { positional, options } = parseOptions(rest, {
+      booleans: ["json"],
+      allowed: ["deployment", "target", "proxmox", "host", "vmid", "run", "image", "json"],
+    });
     if (positional.length) fail("cancel accepts no positional arguments");
     await remoteCancel(options);
     return;
   }
   if (command === "publish") {
-    const { positional, options } = parseOptions(rest, { booleans: ["json"] });
+    const { positional, options } = parseOptions(rest, {
+      booleans: ["json"],
+      allowed: [
+        "deployment", "target", "proxmox", "host", "vmid", "run",
+        "github-secret-ref", "account", "image", "json",
+      ],
+    });
     if (positional.length) fail("publish accepts no positional arguments");
     await remotePublish(options);
     return;

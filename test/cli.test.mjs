@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -174,8 +174,10 @@ const separator = command.indexOf("--");
 const runtimeCommand = separator === -1 ? command : command.slice(separator + 1);
 const log = value => fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify(value) + "\\n");
 log({ tool: "ssh", args, command });
-if (runtimeCommand[0] === "true" || runtimeCommand[0] === "test") {
+if (runtimeCommand[0] === "true") {
   process.exit(0);
+} else if (runtimeCommand[0] === "test") {
+  process.exit(process.env.BIMO_TEST_STATE_MISSING ? 1 : 0);
 } else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "kill") {
   const name = runtimeCommand[runtimeCommand.length - 1];
   log({ tool: "docker-kill", name });
@@ -211,6 +213,10 @@ if (runtimeCommand[0] === "true" || runtimeCommand[0] === "test") {
     && runtimeCommand.includes("internal-logs")) {
   process.stdout.write("");
 } else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "run") {
+  if (process.env.BIMO_TEST_CONTROLLER === "hang") {
+    process.stdin.resume();
+    setTimeout(() => process.exit(0), 30_000);
+  } else {
   let raw = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", chunk => { raw += chunk; });
@@ -340,6 +346,7 @@ if (runtimeCommand[0] === "true" || runtimeCommand[0] === "test") {
       }) + "\\n");
     }
   });
+  }
 }
 `;
   const op = `#!/usr/bin/env node
@@ -795,6 +802,7 @@ test("organize transfers content-verified image without retagging and runs one e
   assert.equal(localCleanup.length, 1);
   assert.ok(remoteCommands.indexOf(remoteCleanup[0]) > remoteCommands.indexOf(remoteRun));
   assert.ok(localCommands.indexOf(localCleanup[0]) > localCommands.findIndex(command => command[0] === "save"));
+  assert.equal(remoteCommands.some(command => command[0] === "rmdir"), false);
 });
 
 test("organize explicit and root prompt aliases preserve short/long option parity", async t => {
@@ -1596,6 +1604,10 @@ test("doctor checks ssh targets and credential readability without printing secr
   const secret = `sk-or-v1-${"k".repeat(32)}`;
   assert.equal(result.stdout.includes(secret), false);
   assert.equal(JSON.stringify(await readCommandLog(tools.logFile)).includes(secret), false);
+  assert.match(
+    report.checks.find(check => check.name === "secret-ref").reason,
+    /OpenRouter API key/,
+  );
 });
 
 test("doctor checks proxmox reachability, guest status, and in-guest docker", async t => {
@@ -1741,7 +1753,7 @@ test("run progress streams bounded event lines and tolerates a missing run", asy
   assert.deepEqual(phases, ["run.started", "gate.finished"]);
 });
 
-test("organize prints the run ID on stderr before long work in human mode", async t => {
+test("organize prints the run ID on stderr once the run starts in human mode", async t => {
   const tools = await fakeDeployTools(t, { controller: "organize-success" });
   const args = organizeArgs("Build a small status page.", 1).filter(value => value !== "--json");
   const result = await invoke(args, { env: tools.env });
@@ -2146,10 +2158,15 @@ test("internal-logs prints a friendly empty state when no runs are recorded", as
 
 test("nested docker error prefixes collapse to one bimo prefix per boundary", async t => {
   const tools = await fakeDeployTools(t);
+  const home = await realpath(await mkdtemp(path.join(tmpdir(), "bimo-home-test-")));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await mkdir(path.join(home, ".local", "share", "bimo", "deployments", "fleet-demo", "runs"), {
+    recursive: true,
+  });
   const payload = "bimo: docker exited 1: bimo-agent: agent exited 1; errorStatus=401";
   const result = await invoke([
     "logs", "--deployment", "fleet-demo", "--image", "bimo-workflow:test", "--json",
-  ], { env: { ...tools.env, BIMO_TEST_READ_FAIL: payload } });
+  ], { env: { ...tools.env, HOME: home, BIMO_TEST_READ_FAIL: payload } });
   assert.equal(result.code, 1);
   assert.equal(
     result.stderr,
@@ -2189,4 +2206,307 @@ test("internal-publish-resume names the run when no publication-ready record exi
   assert.equal(missing.code, 1);
   assert.match(missing.stderr,
     /no publication-ready record found for run 20240909000000-ffff9999/);
+});
+
+test("organize and deploy print no run ID when the run never starts", async t => {
+  const tools = await fakeDeployTools(t);
+  const env = { ...tools.env, BIMO_TEST_OP_FAIL: "1" };
+  const organize = await invoke(
+    organizeArgs("Build a small status page.").filter(value => value !== "--json"),
+    { env },
+  );
+  assert.equal(organize.code, 1);
+  assert.match(organize.stderr, /failed to resolve --secret-ref via 1Password/);
+  assert.doesNotMatch(organize.stderr, /^run: /m);
+
+  const deploy = await invoke(deployArgs(tools.taskFile).filter(value => value !== "--json"), { env });
+  assert.equal(deploy.code, 1);
+  assert.match(deploy.stderr, /failed to resolve --secret-ref via 1Password/);
+  assert.doesNotMatch(deploy.stderr, /^run: /m);
+
+  const commands = await readCommandLog(tools.logFile);
+  assert.equal(commands.some(entry => (entry.command ?? entry.args ?? [])[0] === "rmdir"), false);
+});
+
+test("runs and status agree on attempts for a run recorded without currentAttempt", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "bimo-state-organizer-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const runId = "20240101000000-dddd4444";
+  await mkdir(path.join(directory, runId));
+  await writeFile(path.join(directory, runId, "run.json"), `${JSON.stringify({
+    version: 1,
+    runId,
+    type: "organizer",
+    status: "completed",
+    promptSha256: "a".repeat(64),
+    agents: 1,
+    startedAt: "2024-01-01T00:00:00.000Z",
+    finishedAt: "2024-01-01T00:05:00.000Z",
+  }, null, 2)}\n`);
+  await writeFile(path.join(directory, runId, "events.jsonl"), [
+    JSON.stringify({
+      version: 1, sequence: 1, timestamp: "2024-01-01T00:00:00.000Z", runId, type: "run.started",
+    }),
+    JSON.stringify({
+      version: 1, sequence: 2, timestamp: "2024-01-01T00:05:00.000Z", runId,
+      type: "run.completed", template: "react-app", templateDigest: "b".repeat(64),
+    }),
+  ].join("\n") + "\n");
+  await writeFile(path.join(directory, "latest"), `${runId}\n`);
+
+  const runs = await invoke(["internal-runs", "--state-root", directory, "--deployment", "demo", "--json"]);
+  assert.equal(runs.code, 0, runs.stderr);
+  assert.equal(JSON.parse(runs.stdout).runs[0].attempts, 1);
+
+  const status = await invoke([
+    "internal-status", "--state-root", directory, "--deployment", "demo", "--json",
+  ]);
+  assert.equal(status.code, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).attempts, 1);
+});
+
+test("an unknown option without a value reports unknown, not a missing value", async t => {
+  const tools = await fakeDeployTools(t);
+  for (const [args, pattern] of [
+    [["deploy", "react-app", "--bogus"], /unknown option: --bogus/],
+    [["organize", "-p", "Build a small status page.", "--bogus"], /unknown option: --bogus/],
+    [["logs", "--deployment", "fleet-demo", "--bogus"], /unknown option: --bogus/],
+    [["runs", "--deployment", "fleet-demo", "--bogus"], /unknown option: --bogus/],
+    [["status", "--deployment", "fleet-demo", "--bogus"], /unknown option: --bogus/],
+    [["doctor", "--bogus"], /unknown option: --bogus/],
+    [["cancel", "--deployment", "fleet-demo", "--bogus"], /unknown option: --bogus/],
+    [["publish", "--deployment", "fleet-demo", "--bogus"], /unknown option: --bogus/],
+    [["status", "--deployment"], /--deployment requires a value/],
+  ]) {
+    const result = await invoke(args, { env: tools.env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, pattern);
+  }
+  assert.deepEqual(await readCommandLog(tools.logFile), []);
+});
+
+test("the -n range error names the flag the user typed", async t => {
+  const tools = await fakeDeployTools(t);
+  const common = [
+    "--deployment", "organizer-demo", "--host", "example.invalid",
+    "--secret-ref", "op://Test/Bimo/openrouter",
+  ];
+  const short = await invoke([
+    "organize", "-p", "Build a small status page.", "-n", "5", ...common,
+  ], { env: tools.env });
+  assert.equal(short.code, 1);
+  assert.match(short.stderr, /-n must be an integer from 1 to 3/);
+
+  const long = await invoke([
+    "organize", "--prompt", "Build a small status page.", "--agents", "5", ...common,
+  ], { env: tools.env });
+  assert.equal(long.code, 1);
+  assert.match(long.stderr, /--agents must be an integer from 1 to 3/);
+  assert.deepEqual(await readCommandLog(tools.logFile), []);
+});
+
+test("bimo version aliases --version and exits 0", async () => {
+  const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+  const result = await invoke(["version"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, `${manifest.version}\n`);
+  assert.equal(result.stderr, "");
+});
+
+test("organize and deploy help name the OpenRouter key and deploy shows --public-url", async () => {
+  const deploy = await invoke(["help", "deploy"]);
+  assert.equal(deploy.code, 0, deploy.stderr);
+  assert.match(deploy.stdout, /--public-url URL/);
+  assert.match(deploy.stdout, /--secret-ref must resolve to an OpenRouter API key/);
+
+  const organize = await invoke(["help", "organize"]);
+  assert.equal(organize.code, 0, organize.stderr);
+  assert.match(organize.stdout, /--secret-ref must resolve to an OpenRouter API key/);
+});
+
+test("failed deploy and organize reap the empty deployment state they prepared", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke(deployArgs(tools.taskFile), { env: tools.env });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /controller name is already in use/);
+  const remoteCommands = (await readCommandLog(tools.logFile))
+    .filter(entry => entry.tool === "ssh")
+    .map(entry => entry.command);
+  const hostRoot = "/var/lib/bimo/deployments/fleet-demo";
+  const controllerIndex = remoteCommands.findIndex(command => command.includes("internal-run"));
+  const reapIndex = remoteCommands.findIndex(command => command[0] === "rmdir");
+  assert.ok(controllerIndex >= 0, "controller was not launched");
+  assert.ok(reapIndex > controllerIndex, "empty deployment state was not reaped");
+  assert.deepEqual(remoteCommands[reapIndex], [
+    "rmdir", `${hostRoot}/runs`, `${hostRoot}/workspace`, hostRoot,
+  ]);
+});
+
+test("a failed organize reaps the empty deployment state it prepared", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke(organizeArgs("Build a small status page."), { env: tools.env });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /controller name is already in use/);
+  const remoteCommands = (await readCommandLog(tools.logFile))
+    .filter(entry => entry.tool === "ssh")
+    .map(entry => entry.command);
+  const hostRoot = "/var/lib/bimo/deployments/organizer-demo";
+  const controllerIndex = remoteCommands.findIndex(command => command.includes("internal-organize"));
+  const reapIndex = remoteCommands.findIndex(command => command[0] === "rmdir");
+  assert.ok(controllerIndex >= 0, "controller was not launched");
+  assert.ok(reapIndex > controllerIndex, "empty deployment state was not reaped");
+  assert.deepEqual(remoteCommands[reapIndex], [
+    "rmdir", `${hostRoot}/runs`, `${hostRoot}/worktrees`, hostRoot,
+  ]);
+});
+
+test("read commands report an absent deployment without creating state on the target", async t => {
+  const tools = await fakeDeployTools(t);
+  const env = { ...tools.env, BIMO_TEST_STATE_MISSING: "1" };
+  const runId = "20240101000000-abcd1234";
+
+  const runs = await invoke([
+    "runs", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test", "--json",
+  ], { env });
+  assert.equal(runs.code, 0, runs.stderr);
+  assert.deepEqual(JSON.parse(runs.stdout), { deployment: "fleet-demo", runs: [] });
+
+  const status = await invoke([
+    "status", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test", "--json",
+  ], { env });
+  assert.equal(status.code, 0, status.stderr);
+  assert.deepEqual(JSON.parse(status.stdout), {
+    deployment: "fleet-demo", runId: null, state: "none", phase: null,
+    startedAt: null, finishedAt: null, attempts: 0, lastEvent: null,
+  });
+
+  const statusRun = await invoke([
+    "status", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--run", runId, "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(statusRun.code, 1);
+  assert.match(statusRun.stderr, new RegExp(`unknown run: ${runId}`));
+
+  const logs = await invoke([
+    "logs", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(logs.code, 0, logs.stderr);
+  assert.equal(logs.stdout, "no runs recorded for deployment fleet-demo\n");
+
+  const logsRun = await invoke([
+    "logs", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--run", runId, "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(logsRun.code, 1);
+  assert.match(logsRun.stderr, new RegExp(`unknown run: ${runId}`));
+
+  const follow = await invoke([
+    "logs", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test", "--follow",
+  ], { env });
+  assert.equal(follow.code, 0, follow.stderr);
+  assert.equal(follow.stdout, "no runs recorded for deployment fleet-demo\n");
+
+  const cancel = await invoke([
+    "cancel", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--run", runId, "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(cancel.code, 1);
+  assert.match(cancel.stderr, new RegExp(`unknown run: ${runId}`));
+
+  const publish = await invoke([
+    "publish", "--deployment", "pod-demo", "--host", "example.invalid",
+    "--run", runId, "--github-secret-ref", "op://Test/Bimo publisher/github",
+    "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(publish.code, 1);
+  assert.match(publish.stderr, new RegExp(`no publication-ready record found for run ${runId}`));
+
+  const publishLatest = await invoke([
+    "publish", "--deployment", "pod-demo", "--host", "example.invalid",
+    "--github-secret-ref", "op://Test/Bimo publisher/github", "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(publishLatest.code, 1);
+  assert.match(publishLatest.stderr, /no latest run is recorded/);
+
+  const internals = (await readCommandLog(tools.logFile))
+    .filter(entry => entry.tool === "ssh")
+    .map(entry => entry.command)
+    .filter(command => command.some(value => value.startsWith("internal-")));
+  assert.deepEqual(internals, []);
+});
+
+test("local read commands report an absent deployment without creating state directories", async t => {
+  const tools = await fakeDeployTools(t);
+  const home = await realpath(await mkdtemp(path.join(tmpdir(), "bimo-home-test-")));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const env = { ...tools.env, HOME: home };
+
+  const logs = await invoke([
+    "logs", "--deployment", "fleet-demo", "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(logs.code, 0, logs.stderr);
+  assert.equal(logs.stdout, "no runs recorded for deployment fleet-demo\n");
+
+  const runs = await invoke([
+    "runs", "--deployment", "fleet-demo", "--image", "bimo-workflow:test", "--json",
+  ], { env });
+  assert.equal(runs.code, 0, runs.stderr);
+  assert.deepEqual(JSON.parse(runs.stdout), { deployment: "fleet-demo", runs: [] });
+
+  const status = await invoke([
+    "status", "--deployment", "fleet-demo", "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(status.code, 0, status.stderr);
+  assert.match(status.stdout, /state: none/);
+
+  assert.equal((await readdir(home)).includes(".local"), false);
+});
+
+test("cancel pins the terminal vocabulary of a cancelled run", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke([
+    "cancel", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test",
+  ], { env: { ...tools.env, BIMO_TEST_KILL: "bimo-fleet-demo-controller" } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(
+    result.stdout,
+    "sent SIGTERM to bimo-fleet-demo-controller;"
+      + " the run will finish as failed with reason 'deployment cancelled'\n",
+  );
+});
+
+test("SIGINT to an attached deploy detaches with a cancel hint and exit 130", async t => {
+  const tools = await fakeDeployTools(t, { controller: "hang" });
+  const child = spawn(process.execPath, [cli, ...deployArgs(tools.taskFile)], {
+    cwd: root,
+    env: tools.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(() => child.kill("SIGKILL"));
+  const stdout = [];
+  const stderr = [];
+  child.stdout.on("data", chunk => stdout.push(chunk));
+  child.stderr.on("data", chunk => stderr.push(chunk));
+  const deadline = Date.now() + 10_000;
+  let launched = false;
+  while (Date.now() < deadline && !launched) {
+    const log = await readFile(tools.logFile, "utf8").catch(() => "");
+    launched = log.includes("internal-run");
+    if (!launched) await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(launched, "controller was not launched");
+  child.kill("SIGINT");
+  const code = await new Promise(resolve => child.on("close", resolve));
+  assert.equal(code, 130);
+  assert.equal(Buffer.concat(stdout).toString("utf8"), "");
+  assert.equal(
+    Buffer.concat(stderr).toString("utf8"),
+    "detaching; the run continues on the target"
+      + " — use bimo cancel --deployment fleet-demo to stop it\n",
+  );
 });
