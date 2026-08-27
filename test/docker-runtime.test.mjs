@@ -203,6 +203,51 @@ test("only Engineering receives a writable shared workspace", () => {
   assert.doesNotMatch(args.join(" "), /dst=\/workspace,readonly/);
 });
 
+test("every container run or create is pinned to the local image with --pull=never", () => {
+  const receipt = { files: 12, bytes: 4_096, sha256: "c".repeat(64) };
+  const cases = [
+    bootstrapArgs({ ...common, workspaceHost: "/var/lib/bimo/deployments/demo/workspace" }),
+    proxyCreateArgs({
+      ...common,
+      network: "bimo-demo-agents",
+      model: "openrouter/deepseek/deepseek-v4-flash",
+    }),
+    agentCreateArgs({
+      ...common,
+      role: "qa",
+      step: 2,
+      network: "bimo-demo-agents",
+      workspaceHost: "/var/lib/bimo/deployments/demo/workspace",
+      handoffHost: "/var/lib/bimo/deployments/demo/runs/run-1/attempts/qa/handoff",
+      promptHost: "/var/lib/bimo/deployments/demo/runs/run-1/attempts/qa/instructions.md",
+      access: "read",
+      model: "openrouter/deepseek/deepseek-v4-flash",
+      timeoutSeconds: 1200,
+    }),
+    serverCreateArgs({
+      ...common,
+      outputHost: "/var/lib/bimo/deployments/demo/runs/run-1/artifact",
+      port: 8080,
+    }),
+    sourceVerifierCreateArgs({
+      deployment: "demo",
+      hostRoot: "/var/lib/bimo/deployments/demo",
+      image: IMAGE,
+      snapshotHost: "/var/lib/bimo/deployments/demo/snapshots/run-1/candidate-1",
+      expectedSha: "d".repeat(40),
+      expectedSnapshot: receipt,
+      profile: "bimo-repo-v1",
+      suite: "candidate",
+      timeoutSeconds: 300,
+      nameSuffix: "source-candidate",
+    }),
+  ];
+  for (const args of cases) {
+    assert.ok(["run", "create"].includes(args[0]));
+    assert.equal(args[1], "--pull=never");
+  }
+});
+
 test("bootstrap is fixed, offline, and receives only the writable workspace", () => {
   const args = bootstrapArgs({
     ...common,
@@ -210,7 +255,7 @@ test("bootstrap is fixed, offline, and receives only the writable workspace", ()
   });
   const rendered = args.join(" ");
 
-  assert.deepEqual(args.slice(0, 4), ["run", "--rm", "--name", "bimo-demo-bootstrap"]);
+  assert.deepEqual(args.slice(0, 4), ["run", "--pull=never", "--rm", "--name"]);
   assert.match(rendered, /--label dev\.ascii\.bimo\.deployment=demo/);
   assert.match(rendered, /--label dev\.ascii\.bimo\.transient=true/);
   assert.match(rendered, /--network none --read-only/);
@@ -262,8 +307,8 @@ test("start bootstraps offline, creates two networks, and dual-homes only the pr
   const networkConnect = calls.find(args => args[0] === "network" && args[1] === "connect");
   const readinessProbe = calls.find(args => args[0] === "run" && args.includes("probe"));
   assert.deepEqual(bootstrap.slice(0, 4), [
-    "run", "--rm", "--name", "bimo-demo-bootstrap", "--network", "none",
-  ].slice(0, 4));
+    "run", "--pull=never", "--rm", "--name",
+  ]);
   assert(agentNetwork.includes("bimo-demo-agents"));
   assert(egressNetwork.includes("bimo-demo-egress"));
   assert.equal(proxyCreate[proxyCreate.indexOf("--network") + 1], "bimo-demo-agents");

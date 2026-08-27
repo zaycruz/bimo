@@ -22,9 +22,9 @@ if (command === "source-verify") {
     process.argv.splice(2, 1);
     await import(internal.get(command));
   } else {
-    const { main } = await import("../src/bimo.mjs");
+    const { main, collapseBimoPrefixes } = await import("../src/bimo.mjs");
     main().catch(error => {
-      process.stderr.write(`bimo: ${error.message}\n`);
+      process.stderr.write(`bimo: ${collapseBimoPrefixes(error.message)}\n`);
       process.exitCode = 1;
     });
   }

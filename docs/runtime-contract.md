@@ -27,7 +27,11 @@ express one, the adapter fails closed; it does not silently degrade.
    for the runtime, and prove identity after transfer: Bimo today builds for
    the target platform, transfers with `docker save`/`load`, and compares
    content fingerprints on both sides (`prepareImage` in `src/bimo.mjs`).
-   The runtime never pulls a mutable reference at run time.
+   The runtime never pulls a mutable reference at run time: every
+   `docker run`/`create` is pinned with `--pull=never`, and the read paths
+   (`logs`, `runs`, `status`, `cancel`, `publish`) preflight local image
+   presence and fail closed with a build hint instead of letting Docker
+   attempt an implicit pull.
 2. **Provision the deployment environment.** Create the isolated internal
    network, the separate egress network, and the run-scoped credential
    gateway, then health-probe the gateway before any agent starts

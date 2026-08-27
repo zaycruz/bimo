@@ -104,6 +104,7 @@ async function fakeDeployTools(t, {
   remotePlatform = "linux/amd64",
   localArchitecture = "amd64",
   controller = "conflict",
+  missingOp = false,
 } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "bimo-cli-test-"));
   const logFile = path.join(directory, "commands.jsonl");
@@ -118,7 +119,12 @@ fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify({ tool: "docker", ar
 const log = value => fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify(value) + "\\n");
 if (args[0] === "context" && args[1] === "inspect") process.stdout.write(process.env.BIMO_TEST_DOCKER_ENDPOINT + "\\n");
 else if (args[0] === "version") process.stdout.write("linux/arm64\\n");
-else if (args[0] === "image" && args[1] === "inspect") process.stdout.write(process.env.BIMO_TEST_LOCAL_INSPECT + "\\n");
+else if (args[0] === "image" && args[1] === "inspect") {
+  if (process.env.BIMO_TEST_IMAGE_MISSING) {
+    process.stderr.write("Error response from daemon: No such image: " + args[args.length - 1] + "\\n");
+    process.exitCode = 1;
+  } else process.stdout.write(process.env.BIMO_TEST_LOCAL_INSPECT + "\\n");
+}
 else if (args[0] === "save") process.stdout.write("fake-image-archive");
 else if (args[0] === "kill") {
   const name = args[args.length - 1];
@@ -129,6 +135,10 @@ else if (args[0] === "kill") {
   }
 }
 else if (args[0] === "run") {
+  if (process.env.BIMO_TEST_READ_FAIL && args.includes("internal-logs")) {
+    process.stderr.write(process.env.BIMO_TEST_READ_FAIL + "\\n");
+    process.exitCode = 1;
+  } else {
   const internalCommand = args.find(value => value === "internal-prepare" || value === "internal-run");
   if (internalCommand === "internal-prepare") process.stdout.write("prepared\\n");
   else {
@@ -151,6 +161,7 @@ else if (args[0] === "run") {
         url: envelope.publicUrl,
       }) + "\\n");
     });
+  }
   }
 }
 `;
@@ -191,7 +202,11 @@ if (runtimeCommand[0] === "true" || runtimeCommand[0] === "test") {
   process.stdin.resume();
   process.stdin.on("end", () => process.stdout.write("Loaded image\\n"));
 } else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "image" && runtimeCommand[2] === "inspect") {
-  process.stdout.write(process.env.BIMO_TEST_REMOTE_INSPECT + "\\n");
+  if (process.env.BIMO_TEST_IMAGE_MISSING) {
+    process.stderr.write("Error response from daemon: No such image: "
+      + runtimeCommand[runtimeCommand.length - 1] + "\\n");
+    process.exitCode = 1;
+  } else process.stdout.write(process.env.BIMO_TEST_REMOTE_INSPECT + "\\n");
 } else if (runtimeCommand[0] === "docker" && runtimeCommand[1] === "run"
     && runtimeCommand.includes("internal-logs")) {
   process.stdout.write("");
@@ -212,6 +227,10 @@ if (runtimeCommand[0] === "true" || runtimeCommand[0] === "test") {
     if (process.env.BIMO_TEST_CONTROLLER === "conflict") {
       process.stderr.write("Conflict: controller name is already in use\\n");
       process.exitCode = 125;
+    } else if (process.env.BIMO_TEST_CONTROLLER === "publish-resume-missing"
+      && internalCommand === "internal-publish-resume") {
+      process.stderr.write("bimo: no publication-ready record found for run " + envelope.runId + "\\n");
+      process.exitCode = 1;
     } else if (process.env.BIMO_TEST_CONTROLLER === "pod-success" && internalCommand === "internal-pod-run") {
       log({
         tool: "pod-compute-envelope",
@@ -329,6 +348,10 @@ const args = process.argv.slice(2);
 if (args[0] === "--version") process.stdout.write("2.30.0\\n");
 else {
   fs.appendFileSync(process.env.BIMO_TEST_LOG, JSON.stringify({ tool: "op", reference: args[1] }) + "\\n");
+  if (process.env.BIMO_TEST_OP_FAIL) {
+    process.stderr.write("[ERROR] 2026/01/01 00:00:00 You are not currently signed in; run \`op signin\` first\\n");
+    process.exit(1);
+  }
   if (args[1].endsWith("/github")) process.stdout.write("github_pat_${"g".repeat(64)}\\n");
   else process.stdout.write("sk-or-v1-${"k".repeat(32)}\\n");
 }
@@ -336,7 +359,7 @@ else {
   await Promise.all([
     writeFile(path.join(directory, "docker"), docker, { mode: 0o755 }),
     writeFile(path.join(directory, "ssh"), ssh, { mode: 0o755 }),
-    writeFile(path.join(directory, "op"), op, { mode: 0o755 }),
+    ...(missingOp ? [] : [writeFile(path.join(directory, "op"), op, { mode: 0o755 })]),
   ]);
   t.after(() => rm(directory, { recursive: true, force: true }));
 
@@ -623,7 +646,7 @@ test("explicit Proxmox LXC target wraps Docker with pct exec", async t => {
 
   assert.equal(result.code, 0, result.stderr);
   const entries = await readCommandLog(tools.logFile);
-  const invocation = entries.find(entry => entry.tool === "ssh");
+  const invocation = entries.find(entry => entry.tool === "ssh" && entry.command.includes("internal-logs"));
   assert.deepEqual(invocation.command.slice(0, 5), ["pct", "exec", "212", "--", "docker"]);
   assert.ok(invocation.command.includes("internal-logs"));
 });
@@ -719,7 +742,7 @@ test("organize transfers content-verified image without retagging and runs one e
   const remoteRun = remoteCommands.find(command => command[0] === "docker" && command[1] === "run");
   const hostRoot = "/var/lib/bimo/deployments/organizer-demo";
   assert.deepEqual(remoteRun, [
-    "docker", "run", "--rm", "-i",
+    "docker", "run", "--pull=never", "--rm", "-i",
     "--name", "bimo-organizer-demo-controller",
     "--user", "0:0",
     "--read-only",
@@ -997,7 +1020,7 @@ test("deploy rejects image shell syntax before local execution", async () => {
   }
 });
 
-test("deploy rejects changed transferred image content before remote retag or secret resolution", async t => {
+test("deploy rejects changed transferred image content before remote retag", async t => {
   const cases = [
     ["RootFS", { remoteLayers: [`sha256:${"e".repeat(64)}`] }],
     ["Config", { remoteConfig: { ...BASE_CONFIG, Cmd: ["changed-command"] } }],
@@ -1018,7 +1041,9 @@ test("deploy rejects changed transferred image content before remote retag or se
       assert.ok(remoteCommands.some(command => command[0] === "docker" && command[1] === "image" && command[2] === "inspect"));
       assert.equal(remoteCommands.some(command => command[0] === "docker" && command[1] === "image" && command[2] === "tag"), false);
       assert.equal(remoteCommands.some(command => command[0] === "docker" && command[1] === "run"), false);
-      assert.equal(commands.some(entry => entry.tool === "op"), false);
+      const opIndex = commands.findIndex(entry => entry.tool === "op");
+      const buildIndex = commands.findIndex(entry => entry.tool === "docker" && entry.args[0] === "build");
+      assert.ok(opIndex >= 0 && buildIndex >= 0 && opIndex < buildIndex);
       assert.ok(remoteCommands.some(command => command.join(" ") === `docker image rm -f ${transferTag}`));
       assert.ok(localCommands.some(command => command.join(" ") === `image rm -f ${transferTag}`));
     });
@@ -1131,11 +1156,13 @@ test("pod deploy computes without GitHub authority then publishes one exact draf
   assert.equal(publishEnvelope.candidateSha, POD_CANDIDATE_SHA);
 
   const openRouterIndex = entries.findIndex(entry => entry.tool === "op" && entry.reference.endsWith("/openrouter"));
-  const computeIndex = entries.indexOf(computeEnvelope);
   const githubIndex = entries.findIndex(entry => entry.tool === "op" && entry.reference.endsWith("/github"));
+  const buildIndex = entries.findIndex(entry => entry.tool === "docker" && entry.args[0] === "build");
+  const computeIndex = entries.indexOf(computeEnvelope);
   const publishIndex = entries.indexOf(publishEnvelope);
-  assert.ok(openRouterIndex >= 0 && openRouterIndex < computeIndex);
-  assert.ok(computeIndex < githubIndex && githubIndex < publishIndex);
+  assert.ok(openRouterIndex >= 0 && githubIndex >= 0 && buildIndex >= 0);
+  assert.ok(openRouterIndex < buildIndex && githubIndex < buildIndex);
+  assert.ok(buildIndex < computeIndex && computeIndex < publishIndex);
   const serializedLog = JSON.stringify(entries);
   assert.equal(serializedLog.includes(`sk-or-v1-${"k".repeat(32)}`), false);
   assert.equal(serializedLog.includes(`github_pat_${"g".repeat(64)}`), false);
@@ -1921,7 +1948,7 @@ test("internal-publish-resume fails closed without durable publication evidence"
     input: resumeEnvelope(runId),
   });
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /run has no unique publication\.ready record/);
+  assert.match(result.stderr, new RegExp(`no publication-ready record found for run ${runId}`));
 
   for (const [input, pattern] of [
     [{ version: 1, runId, token: "not-a-token" }, /publisher resume envelope is invalid/],
@@ -1944,4 +1971,222 @@ test("help covers the cancel and publish commands", async () => {
   const usageText = await invoke(["help"]);
   assert.match(usageText.stdout, /^ {2}bimo cancel --deployment NAME/m);
   assert.match(usageText.stdout, /^ {2}bimo publish --deployment NAME/m);
+});
+
+test("read containers pass --pull=never and preflight image presence before running", async t => {
+  const tools = await fakeDeployTools(t);
+  const runsPayload = `${JSON.stringify({ deployment: "fleet-demo", runs: [] })}\n`;
+  const result = await invoke([
+    "runs", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test", "--json",
+  ], { env: { ...tools.env, BIMO_TEST_RUNS_OUTPUT: runsPayload } });
+  assert.equal(result.code, 0, result.stderr);
+
+  const commands = (await readCommandLog(tools.logFile))
+    .filter(entry => entry.tool === "ssh")
+    .map(entry => entry.command);
+  const inspect = commands.find(command => (
+    command[0] === "docker" && command[1] === "image" && command[2] === "inspect"
+  ));
+  const read = commands.find(command => command.includes("internal-runs"));
+  assert.ok(inspect, "image-presence preflight did not run");
+  assert.ok(read.includes("--pull=never"));
+  assert.ok(commands.indexOf(inspect) < commands.indexOf(read));
+});
+
+test("every docker run the CLI builds is pinned with --pull=never", async t => {
+  const tools = await fakeDeployTools(t, { controller: "pod-success" });
+  const result = await invoke(podDeployArgs(tools.taskFile), { env: tools.env });
+  assert.equal(result.code, 0, result.stderr);
+
+  const commands = (await readCommandLog(tools.logFile))
+    .filter(entry => entry.tool === "ssh")
+    .map(entry => entry.command);
+  const runs = commands.filter(command => command[0] === "docker" && command[1] === "run");
+  assert.ok(runs.length >= 2, "expected controller and publisher runs");
+  for (const command of runs) {
+    assert.ok(command.includes("--pull=never"), `missing --pull=never: ${command.join(" ")}`);
+  }
+});
+
+test("logs reports a missing image without pulling or leaking the docker-login hint", async t => {
+  const tools = await fakeDeployTools(t);
+  const env = { ...tools.env, BIMO_TEST_IMAGE_MISSING: "1" };
+
+  const remote = await invoke([
+    "logs", "--deployment", "fleet-demo", "--host", "example.invalid", "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(remote.code, 1);
+  assert.match(remote.stderr,
+    /bimo image bimo-workflow:test is not built on the target yet; run bimo deploy first/);
+  assert.doesNotMatch(remote.stderr, /docker login|pull access denied/i);
+
+  const follow = await invoke([
+    "logs", "--deployment", "fleet-demo", "--host", "example.invalid",
+    "--image", "bimo-workflow:test", "--follow",
+  ], { env });
+  assert.equal(follow.code, 1);
+  assert.match(follow.stderr, /the run is still preparing its image/);
+  assert.doesNotMatch(follow.stderr, /docker login|pull access denied/i);
+
+  const local = await invoke([
+    "logs", "--deployment", "fleet-demo", "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(local.code, 1);
+  assert.match(local.stderr, /bimo image bimo-workflow:test is not built locally yet/);
+  assert.doesNotMatch(local.stderr, /docker login|pull access denied/i);
+
+  const commands = (await readCommandLog(tools.logFile))
+    .filter(entry => entry.tool === "ssh" || entry.tool === "docker");
+  assert.equal(commands.some(entry => {
+    const command = entry.command ?? entry.args;
+    return command.includes("internal-logs") || command.includes("internal-tail");
+  }), false);
+});
+
+test("deploy and organize resolve --secret-ref before any image build", async t => {
+  const deployTools = await fakeDeployTools(t);
+  const deployResult = await invoke(deployArgs(deployTools.taskFile), { env: deployTools.env });
+  assert.equal(deployResult.code, 1);
+  const deployEntries = await readCommandLog(deployTools.logFile);
+  const deployOp = deployEntries.findIndex(entry => entry.tool === "op");
+  const deployBuild = deployEntries.findIndex(entry => (
+    entry.tool === "docker" && entry.args[0] === "build"
+  ));
+  assert.ok(deployOp >= 0 && deployBuild >= 0 && deployOp < deployBuild);
+
+  const organizeTools = await fakeDeployTools(t, { controller: "organize-success" });
+  const organizeResult = await invoke(organizeArgs("Build a small status page."), {
+    env: organizeTools.env,
+  });
+  assert.equal(organizeResult.code, 0, organizeResult.stderr);
+  const organizeEntries = await readCommandLog(organizeTools.logFile);
+  const organizeOp = organizeEntries.findIndex(entry => entry.tool === "op");
+  const organizeBuild = organizeEntries.findIndex(entry => (
+    entry.tool === "docker" && entry.args[0] === "build"
+  ));
+  assert.ok(organizeOp >= 0 && organizeBuild >= 0 && organizeOp < organizeBuild);
+});
+
+test("deploy, organize, and publish report a missing 1Password CLI before any Docker work", async t => {
+  const tools = await fakeDeployTools(t, { missingOp: true });
+  const env = {
+    ...tools.env,
+    PATH: `${path.dirname(tools.taskFile)}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+  };
+
+  const deployResult = await invoke(deployArgs(tools.taskFile), { env });
+  assert.equal(deployResult.code, 1);
+  assert.match(deployResult.stderr,
+    /1Password CLI \(`op`\) not found; it is required to resolve --secret-ref/);
+  assert.match(deployResult.stderr, /1password\.com/);
+  assert.doesNotMatch(deployResult.stderr, /ENOENT/);
+
+  const organizeResult = await invoke(organizeArgs("Build a small status page."), { env });
+  assert.equal(organizeResult.code, 1);
+  assert.match(organizeResult.stderr,
+    /1Password CLI \(`op`\) not found; it is required to resolve --secret-ref/);
+
+  const publishResult = await invoke([
+    "publish", "--deployment", "pod-demo", "--host", "example.invalid",
+    "--github-secret-ref", "op://Test/Bimo publisher/github", "--image", "bimo-workflow:test",
+  ], { env });
+  assert.equal(publishResult.code, 1);
+  assert.match(publishResult.stderr,
+    /1Password CLI \(`op`\) not found; it is required to resolve --github-secret-ref/);
+
+  const entries = await readCommandLog(tools.logFile);
+  assert.equal(entries.some(entry => entry.tool === "docker" || entry.tool === "ssh"), false);
+});
+
+test("doctor reports a missing 1Password CLI as a bounded check failure", async t => {
+  const tools = await fakeDeployTools(t, { missingOp: true });
+  const env = {
+    ...tools.env,
+    PATH: `${path.dirname(tools.taskFile)}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+  };
+  const result = await invoke(["doctor", "--secret-ref", "op://Test/Bimo/key", "--json"], { env });
+  assert.equal(result.code, 1);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.ok, false);
+  const opCheck = report.checks.find(check => check.name === "op-cli");
+  assert.equal(opCheck.status, "fail");
+  assert.match(opCheck.reason, /1Password CLI \(`op`\) not found/);
+  assert.doesNotMatch(opCheck.reason, /ENOENT/);
+  assert.equal(report.checks.find(check => check.name === "secret-ref").status, "skip");
+});
+
+test("an unauthenticated 1Password CLI keeps its guidance under one bimo framing line", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke(deployArgs(tools.taskFile), {
+    env: { ...tools.env, BIMO_TEST_OP_FAIL: "1" },
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /^bimo: failed to resolve --secret-ref via 1Password: /);
+  assert.match(result.stderr, /op signin/);
+  const entries = await readCommandLog(tools.logFile);
+  assert.equal(entries.some(entry => entry.tool === "docker" && entry.args[0] === "build"), false);
+});
+
+test("internal-logs prints a friendly empty state when no runs are recorded", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "bimo-state-empty-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  const text = await invoke(["internal-logs", "--state-root", directory, "--deployment", "demo"]);
+  assert.equal(text.code, 0, text.stderr);
+  assert.equal(text.stdout, "no runs recorded for deployment demo\n");
+  assert.equal(text.stderr, "");
+
+  const json = await invoke([
+    "internal-logs", "--state-root", directory, "--deployment", "demo", "--json",
+  ]);
+  assert.equal(json.code, 0, json.stderr);
+  assert.deepEqual(JSON.parse(json.stdout), { deployment: "demo", run: null, events: [] });
+});
+
+test("nested docker error prefixes collapse to one bimo prefix per boundary", async t => {
+  const tools = await fakeDeployTools(t);
+  const payload = "bimo: docker exited 1: bimo-agent: agent exited 1; errorStatus=401";
+  const result = await invoke([
+    "logs", "--deployment", "fleet-demo", "--image", "bimo-workflow:test", "--json",
+  ], { env: { ...tools.env, BIMO_TEST_READ_FAIL: payload } });
+  assert.equal(result.code, 1);
+  assert.equal(
+    result.stderr,
+    `bimo: docker exited 1: ${payload.slice("bimo: ".length)}\n`,
+  );
+  const receipt = JSON.parse(result.stdout);
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.error.command, "logs");
+  assert.equal(receipt.error.message, `docker exited 1: ${payload.slice("bimo: ".length)}`);
+});
+
+test("publish --json reports a run without a publication-ready record as a structured failure", async t => {
+  const tools = await fakeDeployTools(t, { controller: "publish-resume-missing" });
+  const runId = "20240101000000-abcd1234";
+  const result = await invoke([
+    "publish", "--deployment", "pod-demo", "--run", runId,
+    "--host", "example.invalid",
+    "--github-secret-ref", "op://Test/Bimo publisher/github",
+    "--image", "bimo-workflow:test", "--json",
+  ], { env: tools.env });
+  assert.equal(result.code, 1);
+  const receipt = JSON.parse(result.stdout);
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.error.command, "publish");
+  assert.equal(receipt.error.message, `ssh exited 1: no publication-ready record found for run ${runId}`);
+  assert.equal(
+    result.stderr,
+    `bimo: ssh exited 1: no publication-ready record found for run ${runId}\n`,
+  );
+});
+
+test("internal-publish-resume names the run when no publication-ready record exists", async t => {
+  const { directory } = await fakePublicationStore(t, { ready: false });
+  const missing = await invoke(["internal-publish-resume", "--state-root", directory], {
+    input: resumeEnvelope("20240909000000-ffff9999"),
+  });
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr,
+    /no publication-ready record found for run 20240909000000-ffff9999/);
 });
