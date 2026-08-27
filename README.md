@@ -1,40 +1,252 @@
-# Bimo v0.5
+# Bimo
 
-Bimo deploys predefined agent work to a local or remote Docker-compatible
-target. v0.5 adds a default local target and one closed target seam to the
-bounded sequential workflows, fixed parallel engineering pod, and isolated
-organizer agents introduced in v0.4.
-
-```text
-template = workflow.json + one Markdown prompt per role
-```
-
-The CLI validates that data and starts one temporary controller. Sequential
-templates launch one ephemeral role container at a time; the engineering pod
-launches exactly three writers in parallel. There is no fleet service, manager
-daemon, general message bus, database, scheduler, or graph engine. The Planner
-is the pod's ephemeral manager role for one attempt.
-
-The bundled three-role workflow is:
+Bimo is a local agent factory. It deploys bounded, auditable agent workflows
+as ephemeral Docker fleets, on your hardware. You supply a task and a
+credential reference; Bimo runs the work in short-lived, sandboxed role
+containers, gates the result with controller-owned deterministic verification,
+and serves only verified output. When the run ends, the fleet is gone. There
+is no fleet service, manager daemon, general message bus, database, scheduler,
+or graph engine.
 
 ```text
-Engineering [read/write] --completed--> QA [read-only] --passed--> Testing [read-only]
-          ^                              |                              |
-          +----------- failed -----------+                              |
-          +------------------------- failed ----------------------------+
-
-Testing --passed--> deterministic verifier --> read-only snapshot --> static app
+template = one JSON manifest + one Markdown prompt per role
 ```
 
-The package also includes `react-solo`, a separate one-role template:
+Three templates ship in the package:
+
+| Template | Kind | Roles | Start here when |
+| --- | --- | --- | --- |
+| `react-solo` | workflow | `engineering` (maxSteps 1) | You want the simplest proof: one role, one verified artifact |
+| `react-app` | workflow | `engineering` → `qa` → `testing` (maxSteps 15) | You want the gated pipeline with review loops |
+| `parallel-engineering-pod` | engineering-pod | planner, two engineers, qa-tests, checker, qa, testing (maxAttempts 3) | You want the full pod: three parallel writers on a real repository, ending in a draft pull request |
+
+The fastest path to value is the quickstart below: install, preflight with
+`bimo doctor`, deploy `react-solo`. In the v0.6.0 clean-room dogfood sessions,
+a bare machine reached a served site in about six minutes.
+
+## Quickstart: five minutes to a served site
+
+Prerequisites on the operator machine: Node.js 22+, a local Docker daemon
+(`linux/amd64` or `linux/arm64` over a Unix socket), and the 1Password CLI
+with an OpenRouter API key stored in a vault.
+
+### 1. Install
+
+Bimo is not published to the npm registry. Download the v0.6.0 release
+tarball and checksum, verify the exact file, then install it globally:
+
+```bash
+curl --fail --location --remote-name \
+  https://github.com/zaycruz/bimo/releases/download/v0.6.0/bimo-workflow-0.6.0.tgz
+curl --fail --location --remote-name \
+  https://github.com/zaycruz/bimo/releases/download/v0.6.0/bimo-workflow-0.6.0.tgz.sha256
+
+# macOS
+shasum --algorithm 256 --check bimo-workflow-0.6.0.tgz.sha256
+# Linux
+sha256sum --check bimo-workflow-0.6.0.tgz.sha256
+
+npm install --global ./bimo-workflow-0.6.0.tgz
+```
+
+The tarball is platform-independent Node.js, so the same download serves
+macOS and Linux on any architecture. Set
+`BIMO_PACKAGE_ROOT="$(npm root --global)/bimo-workflow"` to run the packaged
+examples below from any working directory.
+
+### 2. Confirm the installed templates
+
+```bash
+bimo list --json
+```
+
+```json
+{"templates":[{"kind":"engineering-pod","name":"parallel-engineering-pod","roles":["planner","engineering-a","engineering-b","qa-tests","checker","qa","testing"],"maxAttempts":3},{"kind":"workflow","name":"react-app","roles":["engineering","qa","testing"],"maxSteps":15},{"kind":"workflow","name":"react-solo","roles":["engineering"],"maxSteps":1}]}
+```
+
+### 3. Preflight the machine
+
+```bash
+bimo doctor --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY'
+```
 
 ```text
-Engineering [read/write] --> deterministic verifier --> read-only snapshot --> static app
+PASS docker: ready (linux/amd64)
+PASS state-root: writable (~/.local/share/bimo/deployments)
+PASS disk: 98204 MiB free
+PASS op-cli: op 2.32.0
+PASS secret-ref: OpenRouter API key reference is readable
 ```
 
-Both templates use the same controller and deployment path. This is the
-Claude-workflow/state-machine idea deployed to Docker, not three continuously
-running pods.
+`doctor` reports pass, fail, or skip per check and exits non-zero on any
+failure, so it is safe to script.
+
+### 4. Plan the task with organizer agents
+
+`organize` is a read-only planning step: independent organizer agents vote on
+which installed template fits your prompt. It never deploys anything.
+
+```bash
+bimo organize -p "Build a small React page that shows a task list." \
+  -n 1 \
+  --deployment quickstart-plan \
+  --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
+  --json
+```
+
+The output is a plan receipt: the prompt SHA-256, the votes, the selected
+digest-bound template, and the names of the deploy options that template
+accepts. Organizers cannot add commands, targets, credentials, repositories,
+images, or models. See [the organizer how-to](docs/organize.md).
+
+### 5. Deploy react-solo
+
+```bash
+bimo deploy react-solo \
+  --deployment solo-demo \
+  --task-file "$(npm root --global)/bimo-workflow/examples/solo-demo.md" \
+  --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
+  --public-url 'http://127.0.0.1:8080'
+```
+
+The CLI prints the run ID to stderr as soon as it exists, streams run events
+there, and emits a heartbeat every 30 seconds during quiet phases:
+
+```text
+run: 20260827041812-9f31c2ab
+run 20260827041812-9f31c2ab: still working (preparing image, 30s elapsed)
+run 20260827041812-9f31c2ab: still working (running controller, 61s elapsed)
+```
+
+On success — about 91 seconds wall-clock in the dogfood sessions — stdout
+carries the receipt:
+
+```text
+deployed react-solo as solo-demo
+run: 20260827041812-9f31c2ab
+url: http://127.0.0.1:8080/
+```
+
+Before that receipt prints, a separate no-network verifier ran `npm test`,
+`npm run build`, and `npm run smoke`, enforced file and byte limits, rejected
+symlinks, and performed its own HTTP marker probe. Only verified output is
+copied to an immutable per-run snapshot and served. Open the URL.
+
+What just happened: one ephemeral role container ran with a read-only root
+filesystem, no direct network egress, and no credential in its environment;
+the OpenRouter key stayed inside a run-scoped credential gateway. The
+container is already removed. The [security boundary](#security-boundary)
+section has the full posture.
+
+## Runtimes and targets
+
+One runtime ships today: Docker. Three built-in target access paths decide
+where its commands execute and where durable run state lives:
+
+| Target | Command execution | State root | Selection |
+| --- | --- | --- | --- |
+| `local` | Active local Docker context over a Unix socket | `~/.local/share/bimo/deployments/<name>` | Default, or `--target local` |
+| `ssh` | Docker over strict, batch-mode SSH | `/var/lib/bimo/deployments/<name>` | `--target ssh --host HOST` |
+| `proxmox-lxc` | `pct exec VMID -- docker ...` over strict, batch-mode SSH | `/var/lib/bimo/deployments/<name>` in the LXC | `--target proxmox-lxc --proxmox HOST --vmid ID` |
+
+The runtime matrix beyond Docker — podman, Apple `container`, Proxmox API
+provisioning, native LXC, Firecracker, and Seatbelt — is designed, not
+shipped. [The runtime contract](docs/runtime-contract.md) defines the
+operations an adapter must implement, the security invariants it may not
+weaken, and the fixed rollout order. Each adapter lands as a built-in behind
+the closed registry only after its end-to-end deploy, log, cancel, and
+cleanup evidence exists. [The target boundary](docs/targets.md) explains why
+this is deliberately not a plugin system yet.
+
+## Templates
+
+Each template is one directory holding one JSON manifest and one Markdown
+prompt per role:
+
+```text
+templates/
+├── parallel-engineering-pod/
+│   ├── pod.json
+│   └── roles/
+│       ├── planner.md
+│       ├── engineering.md
+│       ├── qa-tests.md
+│       ├── checker.md
+│       ├── qa.md
+│       └── testing.md
+├── react-app/
+│   ├── workflow.json
+│   └── roles/
+│       ├── engineering.md
+│       ├── qa.md
+│       └── testing.md
+└── react-solo/
+    ├── workflow.json
+    └── roles/
+        └── engineering.md
+```
+
+A manifest cannot contain commands, images, executables, provider keys, or
+arbitrary environment variables. It declares bounded roles, transitions,
+timeouts, and static-output checks; the Markdown prompts describe how each
+role should behave. Every load computes one SHA-256 digest over the manifest
+and prompts; deploy carries that digest into the controller, so one changed
+byte stops the run before Docker or Git work begins.
+
+The three bundled templates are reusable starting points, not a ceiling. The
+supported customization path is a fork: edit or add template directories in a
+private copy of the package, rebuild the image so the same bytes are baked
+in, and deploy with `--image`. Templates stay data-only — no executable
+plugins, hooks, or template-supplied code, now or as a roadmap commitment.
+The exact boundary — what a template may declare, how it is validated and
+digest-bound, what an operator may customize, and what is explicitly not
+promised — is defined in [the template boundary](docs/templates.md).
+
+## What happens during a sequential deployment
+
+1. The local CLI validates the template, builds one image for the target
+   daemon's architecture, and transfers that exact image (over SSH for remote
+   targets) with a content-fingerprint check on both sides.
+2. A temporary controller runs on the target with the Docker socket, the shared
+   workspace, and the run-history directory.
+3. The controller starts only the active role. Engineering receives the shared
+   workspace read/write; QA and Testing receive it read-only. The role container
+   is removed when its attempt ends.
+4. A valid role receipt selects the next declared transition. A QA or Testing
+   `failed` receipt returns `react-app` to Engineering, bounded by `maxSteps` and
+   the whole-workflow deadline.
+5. After a transition reaches `done`, a separate no-network verifier runs
+   `npm test`, `npm run build`, and `npm run smoke`, enforces file and byte
+   limits, rejects symlinks, and performs its own HTTP marker probe with
+   image-baked server code.
+6. Only verified output is copied to an immutable per-run snapshot. The
+   controller probes a candidate before replacing the current app. If the final
+   replacement fails, it restores the previous app container.
+
+The `workflowSeconds` deadline begins before image inspection and bootstrap and
+covers gateway startup, every role, verification, and publication. Cancellation
+aborts active Docker commands before cleanup. Cleanup and rollback use a short,
+separate bounded margin so deadline expiry does not strand an attempted
+replacement.
+
+### Receipts are not verification
+
+Every role must write `/handoff/result.json` with exactly these fields:
+
+```json
+{
+  "outcome": "passed",
+  "what": "What the role did",
+  "why": "Why it reached this outcome",
+  "evidence": ["What it observed"],
+  "files": []
+}
+```
+
+The controller validates the shape, size, paths, and allowed outcome before the
+receipt can move the workflow. The prose and evidence remain agent-reported.
+They are useful handoff and audit context, but they do not prove the build.
+Controller-owned verification is the separate fixed step described above.
 
 ## The fixed engineering pod
 
@@ -113,163 +325,6 @@ credential, rechecks the allowlisted base and candidate SHAs, pushes the fixed
 `bimo/<run-id>` branch, and opens a draft pull request. It has no Docker
 socket, agent worktrees, snapshots, or OpenRouter key. It never merges.
 
-## The sequential workflow template contract
-
-Each template owns its JSON and prompts:
-
-```text
-templates/
-├── react-app/
-│   ├── workflow.json
-│   └── roles/
-│       ├── engineering.md
-│       ├── qa.md
-│       └── testing.md
-└── react-solo/
-    ├── workflow.json
-    └── roles/
-        └── engineering.md
-```
-
-This is the complete bundled `react-app` manifest:
-
-```json
-{
-  "version": 1,
-  "name": "react-app",
-  "start": "engineering",
-  "maxSteps": 15,
-  "timeouts": {
-    "stepSeconds": 1200,
-    "workflowSeconds": 3600
-  },
-  "roles": {
-    "engineering": {
-      "prompt": "roles/engineering.md",
-      "write": true,
-      "on": {
-        "completed": "qa"
-      }
-    },
-    "qa": {
-      "prompt": "roles/qa.md",
-      "write": false,
-      "on": {
-        "passed": "testing",
-        "failed": "engineering"
-      }
-    },
-    "testing": {
-      "prompt": "roles/testing.md",
-      "write": false,
-      "on": {
-        "passed": "done",
-        "failed": "engineering"
-      }
-    }
-  },
-  "output": {
-    "directory": "dist",
-    "maxFiles": 500,
-    "maxBytes": 10485760,
-    "smoke": {
-      "path": "/",
-      "status": 200,
-      "contains": "BIMO_DEMO_READY"
-    }
-  }
-}
-```
-
-The manifest cannot contain commands, images, executables, provider keys, or
-arbitrary environment variables. It declares bounded roles, transitions,
-timeouts, and static-output checks. Markdown prompts describe how each role
-should behave. The exact boundary — what a template may declare, how it is
-validated and digest-bound, what an operator may customize, and what is
-explicitly not promised — is defined in
-[the template boundary](docs/templates.md).
-
-## What happens during a sequential deployment
-
-1. The local CLI validates the template, builds one `linux/amd64` image, and
-   transfers that exact image over SSH.
-2. A temporary controller runs on the target with the Docker socket, the shared
-   workspace, and the run-history directory.
-3. The controller starts only the active role. Engineering receives the shared
-   workspace read/write; QA and Testing receive it read-only. The role container
-   is removed when its attempt ends.
-4. A valid role receipt selects the next declared transition. A QA or Testing
-   `failed` receipt returns `react-app` to Engineering, bounded by `maxSteps` and
-   the whole-workflow deadline.
-5. After a transition reaches `done`, a separate no-network verifier runs
-   `npm test`, `npm run build`, and `npm run smoke`, enforces file and byte
-   limits, rejects symlinks, and performs its own HTTP marker probe with
-   image-baked server code.
-6. Only verified output is copied to an immutable per-run snapshot. The
-controller probes a candidate before replacing the current app. If the final
-replacement fails, it restores the previous app container.
-
-The `workflowSeconds` deadline begins before image inspection and bootstrap and
-covers gateway startup, every role, verification, and publication. Cancellation
-aborts active Docker commands before cleanup. Cleanup and rollback use a short,
-separate bounded margin so deadline expiry does not strand an attempted
-replacement.
-
-### Receipts are not verification
-
-Every role must write `/handoff/result.json` with exactly these fields:
-
-```json
-{
-  "outcome": "passed",
-  "what": "What the role did",
-  "why": "Why it reached this outcome",
-  "evidence": ["What it observed"],
-  "files": []
-}
-```
-
-The controller validates the shape, size, paths, and allowed outcome before the
-receipt can move the workflow. The prose and evidence remain agent-reported.
-They are useful handoff and audit context, but they do not prove the build.
-Controller-owned verification is the separate fixed step described above.
-
-## Install from GitHub
-
-Bimo is not published to the npm registry. Download the v0.6.0 release
-tarball and checksum, verify the exact file, then install it locally:
-
-```bash
-curl --fail --location --remote-name \
-  https://github.com/zaycruz/bimo/releases/download/v0.6.0/bimo-workflow-0.6.0.tgz
-curl --fail --location --remote-name \
-  https://github.com/zaycruz/bimo/releases/download/v0.6.0/bimo-workflow-0.6.0.tgz.sha256
-
-# macOS
-shasum --algorithm 256 --check bimo-workflow-0.6.0.tgz.sha256
-# Linux
-sha256sum --check bimo-workflow-0.6.0.tgz.sha256
-
-npm install --global ./bimo-workflow-0.6.0.tgz
-bimo list --json
-bimo validate parallel-engineering-pod
-BIMO_PACKAGE_ROOT="$(npm root --global)/bimo-workflow"
-test -f "$BIMO_PACKAGE_ROOT/docs/organize.md"
-test -f "$BIMO_PACKAGE_ROOT/examples/pod-assignment.md"
-```
-
-The tarball is platform-independent Node.js, so the same download serves
-macOS and Linux on any architecture. The operator machine needs Node.js 22+,
-Docker, SSH, the 1Password CLI, and `jq` for the plan-display examples. The
-target must be an amd64 or arm64 Linux Docker host reachable through an
-already trusted, strict-host-key-checked SSH connection. `BIMO_PACKAGE_ROOT`
-makes every example below runnable from any working directory after the
-global install.
-
-## License
-
-Apache-2.0. See [LICENSE](LICENSE).
-
 ## CLI
 
 List and validate the installed templates:
@@ -342,26 +397,11 @@ bimo publish --deployment pod-demo --host deploy@docker-host.example \
 
 ### Deploy locally
 
-With Docker available, no target flags are required. On this Mac, for example,
-the `local` adapter uses the active Colima Docker daemon and builds the image for
-the daemon's native `linux/arm64` platform:
-
-```bash
-BIMO_PACKAGE_ROOT="${BIMO_PACKAGE_ROOT:-$(npm root --global)/bimo-workflow}"
-
-bimo deploy react-solo \
-  --deployment solo-local \
-  --task-file "$BIMO_PACKAGE_ROOT/examples/solo-demo.md" \
-  --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
-  --public-url 'http://127.0.0.1:8080'
-
-bimo logs --deployment solo-local
-```
-
-`--target local` is the equivalent explicit form. Local state lives under
-`~/.local/share/bimo/deployments/<deployment>/`. Local deployment still uses
-Linux containers and a Docker socket; it does not silently substitute macOS
-Seatbelt or Apple's `container` runtime.
+Local Docker is the default target, so the quickstart deploy needed no target
+flags. `--target local` is the equivalent explicit form. Local state lives
+under `~/.local/share/bimo/deployments/<deployment>/`. Local deployment still
+uses Linux containers and a Docker socket; it does not silently substitute
+macOS Seatbelt or Apple's `container` runtime.
 
 ### Organize a prompt with agents
 
@@ -573,7 +613,7 @@ records against target-host root.
 Each successful verification creates a separate artifact snapshot that Bimo
 treats as immutable: it is created once, permission-locked, and mounted by the
 retained app read-only. Bimo performs automatic rollback only when replacing
-the current app fails; v0.5 has no user-facing rollback command or remote
+the current app fails; v0.6.0 has no user-facing rollback command or remote
 artifact backup.
 
 The fixed pod uses the same deployment root but keeps private run records under
@@ -594,7 +634,7 @@ and private temporary roots. The pod does not resume a partial Planner, writer,
 or checker attempt. Confirm no controller or publisher is active, preserve the
 run records for diagnosis, then recover only that dedicated deployment root
 before starting a new run. The internal publisher can reconcile an interrupted
-durable publication, but v0.5 has no general user-facing resume command.
+durable publication, but v0.6.0 has no general user-facing resume command.
 
 ## Security boundary
 
@@ -666,14 +706,18 @@ Never put a credential in a task, prompt, workflow file, repository file,
 - History and artifacts remain on one target host. There is no database, remote
   backup, or user-invoked rollback.
 - Organizer audit runs are retained on the target and are not automatically
-  pruned in v0.5.
+  pruned in v0.6.0.
 - Pod publication stops at an isolated, draft pull request. It does not approve,
   mark ready, merge, deploy, or delete the branch.
 
-## v0.5 verification
+## Release verification
 
 The release gate runs the full Node test suite, package manifest verification,
 Docker image build, all template validations, and the bundled starter offline
 test, build, and smoke commands. The Bimo brand contract also rejects any
 legacy product identifier in the shipped package. Exact results are attached to
 the tagged release and its exact-SHA GitHub Actions run.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
