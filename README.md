@@ -326,7 +326,11 @@ stdout while the human message stays on stderr.
 
 `cancel` sends SIGTERM to the deployment's running controller (or publisher)
 container on the target; the in-container controller cancels active work and
-finishes the run durably. `publish` resumes an interrupted pod publication
+finishes the run durably. Interrupting the CLI itself with Ctrl+C does not
+cancel the run: the CLI prints a detach notice, exits 130, and the run
+continues on the target — use `cancel` to stop it. A cancelled run finishes
+as `failed` with reason `deployment cancelled`; there is no distinct
+`cancelled` state. `publish` resumes an interrupted pod publication
 from the durable `publication.ready` record — replaying an already completed
 publication returns its receipt with zero new side effects.
 
