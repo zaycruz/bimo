@@ -504,10 +504,15 @@ bimo deploy parallel-engineering-pod \
   --json
 ```
 
-The pod accepts only that repository and `main`. `--base-sha` must be the exact
-40-character commit currently expected at `main`; publication fails closed if
-the branch moves. The two secret references must resolve to separate,
-least-privilege credentials.
+`--repository` and `--target-branch` are operator inputs (they default to the
+Bimo repository and `main` when omitted). The pod works on any GitHub
+repository whose layout its verification profile understands: a Node.js
+project with sources under `src/`, baseline tests in `test/*.test.mjs`, and an
+`npm test` script. `--base-sha` must be the exact 40-character commit
+currently expected at the target branch; publication fails closed if the
+branch moves. The two secret references must resolve to separate,
+least-privilege credentials, and the GitHub token must have content and
+pull-request access to the target repository.
 
 Read the pod's structured events using the run ID returned by deploy:
 
@@ -592,8 +597,9 @@ The older `--host` and `--proxmox ... --vmid ...` forms remain aliases. Target
 options cannot be mixed. Deploy also accepts exactly one task source
 (`--task-file FILE` or `--task-stdin`). Every deployment
 requires `--deployment` and `--secret-ref`. Sequential workflows also require
-`--public-url`. The fixed pod instead requires `--github-secret-ref`, the fixed
-repository URL, an immutable `--base-sha`, and `--target-branch main`.
+`--public-url`. The pod instead requires `--github-secret-ref` and an immutable
+`--base-sha`; `--repository` and `--target-branch` are optional and default to
+the Bimo repository and `main`.
 
 Optional shared flags are `--account`, `--model`, `--image`, `--agent-runtime`,
 and `--json`; sequential deploys also accept `--port`. `logs` accepts `--run`,
