@@ -443,6 +443,7 @@ export async function runWorkflow({
   publish,
   runId = randomUUID(),
   model = "unspecified",
+  agentRuntime = "unspecified",
   imageDigest = "unspecified",
   now = () => new Date(),
   clock = () => Date.now(),
@@ -501,6 +502,7 @@ export async function runWorkflow({
     taskSha256: digest(task),
     previousRunId: previous.previousRunId,
     model,
+    agentRuntime,
     imageDigest,
   });
 

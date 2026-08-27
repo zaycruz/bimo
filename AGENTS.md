@@ -54,6 +54,9 @@ All three must pass before opening a PR, including for docs-only changes.
 - [docs/runtime-contract.md](docs/runtime-contract.md) — the bounded
   runtime contract a second adapter must satisfy, and the security
   invariants it may not weaken.
+- [docs/agent-runtimes.md](docs/agent-runtimes.md) — the closed
+  agent-runtime registry (`opencode`), the adapter contract a second
+  agent runtime must satisfy, and the invariants it may not weaken.
 - [docs/templates.md](docs/templates.md) — the data-only template
   boundary: manifest schema, digest binding, customization path, and
   non-promises.

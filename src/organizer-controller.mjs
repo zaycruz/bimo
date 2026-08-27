@@ -138,6 +138,7 @@ export async function runOrganizerController({
   catalog,
   baseInstructions,
   model,
+  agentRuntime = "unspecified",
   runtime,
   stateRoot = "/state",
   worktreesRoot = "/worktrees",
@@ -187,6 +188,7 @@ export async function runOrganizerController({
       promptSha256,
       agents: validated.agents,
       model,
+      agentRuntime,
       imageDigest,
     });
     await runtime.start({ deadlineAt, bootstrap: false });

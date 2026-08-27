@@ -176,6 +176,7 @@ test("agent containers use only the isolated agent network and external prompt m
 
   assert.match(rendered, /--network bimo-demo-agents/);
   assert.match(rendered, /BIMO_GATEWAY_URL=http:\/\/gateway:8787\/api\/v1/);
+  assert.match(rendered, /--env BIMO_AGENT_RUNTIME=opencode/);
   assert.match(rendered, /dst=\/workspace,readonly/);
   assert.match(rendered, /instructions\.md,dst=\/instructions\/instructions\.md,readonly/);
   assert.match(rendered, /--read-only/);
@@ -184,6 +185,29 @@ test("agent containers use only the isolated agent network and external prompt m
   assert.match(rendered, /--ulimit fsize=8388608:8388608/);
   assert.doesNotMatch(rendered, /--network container:|127\.0\.0\.1:8787|\.bimo-instructions/);
   assert.doesNotMatch(rendered, /OPENROUTER_API_KEY|sk-or-|docker\.sock|\/state|Users\/|\.ssh/);
+});
+
+test("agent containers pin the selected agent runtime next to the gateway env", () => {
+  const base = {
+    ...common,
+    role: "qa",
+    step: 2,
+    network: "bimo-demo-agents",
+    workspaceHost: "/var/lib/bimo/deployments/demo/workspace",
+    handoffHost: "/var/lib/bimo/deployments/demo/runs/run-1/attempts/qa/handoff",
+    promptHost: "/var/lib/bimo/deployments/demo/runs/run-1/attempts/qa/instructions.md",
+    access: "read",
+    model: "openrouter/deepseek/deepseek-v4-flash",
+    timeoutSeconds: 1200,
+  };
+  const args = agentCreateArgs({ ...base, agentRuntime: "opencode" });
+  const gatewayIndex = args.indexOf("BIMO_GATEWAY_URL=http://gateway:8787/api/v1");
+  assert.ok(gatewayIndex > 0);
+  assert.deepEqual(args.slice(gatewayIndex + 1, gatewayIndex + 3), [
+    "--env", "BIMO_AGENT_RUNTIME=opencode",
+  ]);
+  assert.throws(() => agentCreateArgs({ ...base, agentRuntime: "bogus" }), /unknown agent runtime/);
+  assert.throws(() => createRuntime({ agentRuntime: "bogus" }), /unknown agent runtime/);
 });
 
 test("only Engineering receives a writable shared workspace", () => {
