@@ -236,21 +236,21 @@ Controller-owned verification is the separate fixed step described above.
 
 ## Install from GitHub
 
-Bimo is not published to the npm registry. Download the v0.5.0 release
+Bimo is not published to the npm registry. Download the v0.6.0 release
 tarball and checksum, verify the exact file, then install it locally:
 
 ```bash
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/bimo/releases/download/v0.5.0/bimo-workflow-0.5.0.tgz
+  https://github.com/zaycruz/bimo/releases/download/v0.6.0/bimo-workflow-0.6.0.tgz
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/bimo/releases/download/v0.5.0/bimo-workflow-0.5.0.tgz.sha256
+  https://github.com/zaycruz/bimo/releases/download/v0.6.0/bimo-workflow-0.6.0.tgz.sha256
 
 # macOS
-shasum --algorithm 256 --check bimo-workflow-0.5.0.tgz.sha256
+shasum --algorithm 256 --check bimo-workflow-0.6.0.tgz.sha256
 # Linux
-sha256sum --check bimo-workflow-0.5.0.tgz.sha256
+sha256sum --check bimo-workflow-0.6.0.tgz.sha256
 
-npm install --global ./bimo-workflow-0.5.0.tgz
+npm install --global ./bimo-workflow-0.6.0.tgz
 bimo list --json
 bimo validate parallel-engineering-pod
 BIMO_PACKAGE_ROOT="$(npm root --global)/bimo-workflow"
@@ -534,7 +534,7 @@ sequential deploys also accept `--port`. `logs` accepts `--run`, `--image`, and
 `--json`.
 
 Defaults are port `8080`, model `openrouter/deepseek/deepseek-v4-flash`, and
-image tag `bimo-workflow:0.5.0`. `--account` selects a 1Password account;
+image tag `bimo-workflow:0.6.0`. `--account` selects a 1Password account;
 `--json` requests machine-readable output.
 
 Quote each `op://` reference as one shell argument. Vault, item, and field names

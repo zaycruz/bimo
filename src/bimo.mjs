@@ -39,7 +39,7 @@ import { loadWorkflow, runWorkflow } from "./workflow.mjs";
 const packageRoot = path.resolve(import.meta.dirname, "..");
 const templateRoot = path.join(packageRoot, "templates");
 const organizerInstructionsPath = path.join(packageRoot, "etc", "organizer", "organizer.md");
-const DEFAULT_IMAGE = "bimo-workflow:0.5.0";
+const DEFAULT_IMAGE = "bimo-workflow:0.6.0";
 const DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash";
 const POD_REPOSITORY = "https://github.com/zaycruz/bimo.git";
 const POD_TARGET_BRANCH = "main";
