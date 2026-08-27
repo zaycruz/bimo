@@ -308,8 +308,12 @@ bimo help doctor
 ```
 
 `logs --follow` replays the run's events from the start and then polls for new
-ones until interrupted. `bimo help COMMAND` (or `bimo COMMAND --help`) prints a
-command-specific synopsis; bare `bimo help` keeps the full usage.
+ones until interrupted. With no recorded runs, `logs` prints `no runs recorded
+for deployment NAME` and exits 0. If the workflow image is not built on the
+target yet, the read commands report that (and a still-preparing run under
+`--follow`) instead of attempting a pull. `bimo help COMMAND` (or `bimo
+COMMAND --help`) prints a command-specific synopsis; bare `bimo help` keeps
+the full usage.
 
 ### Progress, cancel, and resume
 
@@ -531,7 +535,9 @@ image tag `bimo-workflow:0.5.0`. `--account` selects a 1Password account;
 
 Quote each `op://` reference as one shell argument. Vault, item, and field names
 may contain literal spaces; Bimo passes the validated reference directly to
-`op read` without invoking a shell.
+`op read` without invoking a shell. Secret references are resolved before any
+image build work, so a missing or unauthenticated 1Password CLI fails fast
+with an install hint instead of a raw spawn error.
 
 `--public-url` is only the address Bimo records and reports for the published
 port. Bimo does not create DNS records, TLS certificates, firewall rules,

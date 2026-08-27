@@ -268,6 +268,7 @@ export function agentCreateArgs({
   const name = containerName(deployment, nameSuffix);
   return [
     "create",
+    "--pull=never",
     "--name", name,
     ...transientLabels(deployment),
     "--network", network,
@@ -293,6 +294,7 @@ export function agentCreateArgs({
 export function bootstrapArgs({ deployment, image, workspaceHost }) {
   return [
     "run",
+    "--pull=never",
     "--rm",
     "--name", containerName(deployment, "bootstrap"),
     ...transientLabels(deployment),
@@ -326,6 +328,7 @@ export function proxyCreateArgs({
   }
   return [
     "create",
+    "--pull=never",
     "--interactive",
     "--name", containerName(deployment, "gateway"),
     ...transientLabels(deployment),
@@ -402,6 +405,7 @@ export function sourceVerifierCreateArgs({
 
   return [
     "create",
+    "--pull=never",
     "--name", containerName(deployment, nameSuffix),
     ...transientLabels(deployment),
     "--network", "none",
@@ -441,6 +445,7 @@ export function serverCreateArgs({
 }) {
   return [
     "create",
+    "--pull=never",
     "--name", containerName(deployment, nameSuffix),
     ...(transient ? transientLabels(deployment) : []),
     ...(restart ? ["--restart", "unless-stopped"] : []),
@@ -1030,7 +1035,7 @@ export class DockerRuntime {
       this.key = null;
       for (let attempt = 0; attempt < 30; attempt += 1) {
         const probe = await this.commandWithin([
-          "run", "--rm", "--network", this.agentNetwork,
+          "run", "--pull=never", "--rm", "--network", this.agentNetwork,
           ...transientLabels(this.deployment),
           ...commonSandbox({ memory: "64m", cpus: "0.25", pids: "32" }),
           "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=16m",
@@ -1337,6 +1342,7 @@ export class DockerRuntime {
       this.activeContainers.add(name);
       const created = await this.commandWithin([
         "create",
+        "--pull=never",
         "--name", name,
         ...transientLabels(this.deployment),
         "--network", "none",

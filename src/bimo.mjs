@@ -564,6 +564,22 @@ async function cleanupTransferredImage(target, transferTag) {
   await execute("docker", ["image", "rm", "-f", transferTag], { timeoutMs: 30_000 }).catch(() => {});
 }
 
+async function requireImagePresent(target, image, { preparing = false } = {}) {
+  const missing = await targetExecute(target, ["docker", "image", "inspect", image], {
+    timeoutMs: 15_000,
+    maxOutputBytes: 4 * 1024,
+  }).then(() => false, error => {
+    if (/no such image/i.test(error instanceof Error ? error.message : String(error))) return true;
+    throw error;
+  });
+  if (!missing) return;
+  const where = target.kind === "local" ? "locally" : "on the target";
+  if (preparing) {
+    fail(`bimo image ${image} is not built ${where} yet; the run is still preparing its image`);
+  }
+  fail(`bimo image ${image} is not built ${where} yet; run bimo deploy first`);
+}
+
 async function validateLocalStateChain(home, hostRoot, { allowMissing }) {
   const relative = path.relative(home, hostRoot);
   if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
@@ -596,7 +612,7 @@ async function prepareLocalState(target, image, hostRoot, layout) {
   deploymentDirectories(layout);
   await ensureLocalStateRoot(target, hostRoot);
   await targetExecute(target, [
-    "docker", "run", "--rm",
+    "docker", "run", "--pull=never", "--rm",
     "--user", "0:0",
     "--network", "none",
     "--read-only",
@@ -683,12 +699,24 @@ function parseImageInspect(raw, label) {
   };
 }
 
-async function resolveSecret(reference, account) {
-  if (!SECRET_REF.test(reference)) fail("--secret-ref must be a 1Password op:// reference");
+async function opRead(reference, account, flag) {
   const args = ["read", reference];
   if (account) args.push("--account", account);
-  const result = await execute("op", args, { maxOutputBytes: 4 * 1024 });
-  const secret = result.stdout.trim();
+  let result;
+  try {
+    result = await execute("op", args, { maxOutputBytes: 4 * 1024 });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      fail(`1Password CLI (\`op\`) not found; it is required to resolve ${flag} (install: https://developer.1password.com/docs/cli/get-started/)`);
+    }
+    fail(`failed to resolve ${flag} via 1Password: ${errorReceiptMessage(error)}`);
+  }
+  return result.stdout.trim();
+}
+
+async function resolveSecret(reference, account) {
+  if (!SECRET_REF.test(reference)) fail("--secret-ref must be a 1Password op:// reference");
+  const secret = await opRead(reference, account, "--secret-ref");
   if (!/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(secret)) fail("1Password reference did not resolve to an OpenRouter key");
   return secret;
 }
@@ -787,10 +815,7 @@ async function resolveGitHubSecret(reference, account) {
   if (!SECRET_REF.test(reference ?? "")) {
     fail("--github-secret-ref must be a 1Password op:// reference");
   }
-  const args = ["read", reference];
-  if (account) args.push("--account", account);
-  const result = await execute("op", args, { maxOutputBytes: 4 * 1024 });
-  const secret = result.stdout.trim();
+  const secret = await opRead(reference, account, "--github-secret-ref");
   if (!GITHUB_TOKEN.test(secret)) fail("1Password reference did not resolve to a GitHub token");
   return secret;
 }
@@ -841,6 +866,10 @@ async function deploy(template, options) {
   let follower = null;
   let transferTag = null;
   try {
+    let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
+    let githubToken = pod
+      ? await resolveGitHubSecret(options["github-secret-ref"], options.account)
+      : null;
     heartbeat?.setPhase("preparing image");
     const prepared = await prepareImage(deploymentTarget, image);
     const remoteImage = prepared.remoteImage;
@@ -865,7 +894,6 @@ async function deploy(template, options) {
     }
     if (pod) {
       await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "pod");
-      let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
       const computeEnvelope = JSON.stringify({
         version: 1,
         template: loaded.template.name,
@@ -883,7 +911,7 @@ async function deploy(template, options) {
       openRouterKey = "";
       const controllerName = `bimo-${options.deployment}-controller`;
       const compute = await targetExecute(deploymentTarget, [
-        "docker", "run", "--rm", "-i",
+        "docker", "run", "--pull=never", "--rm", "-i",
         "--name", controllerName,
         "--user", "0:0",
         "--read-only",
@@ -913,7 +941,6 @@ async function deploy(template, options) {
         baseSha: options["base-sha"],
       });
 
-      let githubToken = await resolveGitHubSecret(options["github-secret-ref"], options.account);
       const publishEnvelope = JSON.stringify({
         version: 1,
         runId,
@@ -927,7 +954,7 @@ async function deploy(template, options) {
       githubToken = "";
       heartbeat?.setPhase("publishing");
       const publisher = await targetExecute(deploymentTarget, [
-        "docker", "run", "--rm", "-i",
+        "docker", "run", "--pull=never", "--rm", "-i",
         "--name", `bimo-${options.deployment}-publisher`,
         "--user", "0:0",
         "--read-only",
@@ -955,14 +982,13 @@ async function deploy(template, options) {
     } else {
       await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "workflow");
 
-      const secret = await resolveSecret(options["secret-ref"], options.account);
       const envelope = JSON.stringify({
         version: 1,
         template: loaded.workflow.name,
         templateDigest: loaded.templateDigest,
         deployment: options.deployment,
         task,
-        key: secret,
+        key: openRouterKey,
         model,
         image: remoteImage.imageId,
         port,
@@ -971,7 +997,7 @@ async function deploy(template, options) {
       });
       const controllerName = `bimo-${options.deployment}-controller`;
       const result = await targetExecute(deploymentTarget, [
-        "docker", "run", "--rm", "-i",
+        "docker", "run", "--pull=never", "--rm", "-i",
         "--name", controllerName,
         "--user", "0:0",
         "--read-only",
@@ -1034,6 +1060,7 @@ async function organizeRemote(options) {
   let follower = null;
   let transferTag = null;
   try {
+    let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
     heartbeat?.setPhase("preparing image");
     const prepared = await prepareImage(deploymentTarget, image, { retag: false });
     const remoteImage = prepared.remoteImage;
@@ -1057,7 +1084,6 @@ async function organizeRemote(options) {
       }).catch(() => {});
     }
     await prepareDeploymentState(deploymentTarget, remoteImage.imageId, hostRoot, "organizer");
-    let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
     const envelope = JSON.stringify({
       version: 1,
       deployment: options.deployment,
@@ -1070,7 +1096,7 @@ async function organizeRemote(options) {
     });
     openRouterKey = "";
     const result = await targetExecute(deploymentTarget, [
-      "docker", "run", "--rm", "-i",
+      "docker", "run", "--pull=never", "--rm", "-i",
       "--name", `bimo-${options.deployment}-controller`,
       "--user", "0:0",
       "--read-only",
@@ -1494,9 +1520,10 @@ async function internalPublishResume(options) {
     runId = (await readFile(path.join(stateRoot, "latest"), "utf8").catch(() => "")).trim();
     if (!RUN_ID.test(runId)) fail("no latest run is recorded");
   }
-  const store = await openPodRunStore({ stateRoot, runId });
+  const store = await openPodRunStore({ stateRoot, runId })
+    .catch(() => fail(`no publication-ready record found for run ${runId}`));
   const ready = store.events.filter(event => event.type === "publication.ready");
-  if (ready.length !== 1) fail("run has no unique publication.ready record");
+  if (ready.length !== 1) fail(`no publication-ready record found for run ${runId}`);
   const { repository, targetBranch, baseSha, candidateSha, headBranch } = ready[0];
   if (repository !== POD_REPOSITORY || targetBranch !== POD_TARGET_BRANCH
       || !GIT_SHA.test(baseSha ?? "") || !GIT_SHA.test(candidateSha ?? "")
@@ -1617,12 +1644,13 @@ async function remoteLogs(options) {
   const image = options.image ?? DEFAULT_IMAGE;
   if (!IMAGE.test(image)) fail("--image is invalid");
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  await requireImagePresent(deploymentTarget, image, { preparing: Boolean(options.follow) });
   if (options.follow) {
     await followLogs(deploymentTarget, { hostRoot, image, runId, json: Boolean(options.json) });
     return;
   }
   const result = await targetExecute(deploymentTarget, [
-    "docker", "run", "--rm", "--read-only", "--network", "none",
+    "docker", "run", "--pull=never", "--rm", "--read-only", "--network", "none",
     "--user", "0:0",
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges",
@@ -1632,6 +1660,7 @@ async function remoteLogs(options) {
     "--volume", `${hostRoot}/runs:/state:ro`,
     image,
     "internal-logs",
+    "--deployment", options.deployment,
     "--run", runId,
     ...(options.json ? ["--json"] : []),
   ], { maxOutputBytes: 2 * 1024 * 1024 });
@@ -1641,11 +1670,23 @@ async function remoteLogs(options) {
 async function internalLogs(argv) {
   const { positional, options } = parseOptions(argv, { booleans: ["json"] });
   if (positional.length) fail("internal-logs accepts no positional arguments");
-  exactOptions(options, ["run", "json"]);
+  exactOptions(options, ["deployment", "run", "state-root", "json"]);
+  if (!NAME.test(options.deployment ?? "")) fail("--deployment is invalid");
+  const stateRoot = internalStateRoot(options);
   let runId = options.run ?? "latest";
-  if (runId === "latest") runId = (await readFile("/state/latest", "utf8")).trim();
+  if (runId === "latest") {
+    runId = (await readFile(path.join(stateRoot, "latest"), "utf8").catch(() => "")).trim();
+    if (!runId) {
+      if (options.json) {
+        process.stdout.write(`${JSON.stringify({ deployment: options.deployment, run: null, events: [] })}\n`);
+      } else {
+        process.stdout.write(`no runs recorded for deployment ${options.deployment}\n`);
+      }
+      return;
+    }
+  }
   if (!RUN_ID.test(runId)) fail("invalid run ID");
-  const runDir = path.join("/state", runId);
+  const runDir = path.join(stateRoot, runId);
   const stat = await lstat(runDir).catch(() => null);
   if (!stat?.isDirectory() || stat.isSymbolicLink()) fail(`unknown run: ${runId}`);
   const targetPath = path.join(runDir, options.json ? "events.jsonl" : "CHANGELOG.md");
@@ -1904,7 +1945,7 @@ async function internalTail(argv) {
 
 function stateReadArgs(hostRoot, image, internalArgs) {
   return [
-    "docker", "run", "--rm", "--read-only", "--network", "none",
+    "docker", "run", "--pull=never", "--rm", "--read-only", "--network", "none",
     "--user", "0:0",
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges",
@@ -1925,6 +1966,7 @@ async function remoteRuns(options) {
   const image = options.image ?? DEFAULT_IMAGE;
   if (!IMAGE.test(image)) fail("--image is invalid");
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  await requireImagePresent(deploymentTarget, image);
   const result = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, image, [
     "internal-runs",
     "--deployment", options.deployment,
@@ -1943,6 +1985,7 @@ async function remoteStatus(options) {
   const image = options.image ?? DEFAULT_IMAGE;
   if (!IMAGE.test(image)) fail("--image is invalid");
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
+  await requireImagePresent(deploymentTarget, image);
   const result = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, image, [
     "internal-status",
     "--deployment", options.deployment,
@@ -1963,6 +2006,7 @@ async function remoteCancel(options) {
   if (!IMAGE.test(image)) fail("--image is invalid");
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
   if (runId !== null) {
+    await requireImagePresent(deploymentTarget, image);
     const statusResult = await targetExecute(deploymentTarget, stateReadArgs(hostRoot, image, [
       "internal-status",
       "--deployment", options.deployment,
@@ -2038,10 +2082,11 @@ async function remotePublish(options) {
   if (!IMAGE.test(image)) fail("--image is invalid");
   const hostRoot = deploymentRootForTarget(deploymentTarget, options.deployment);
   let githubToken = await resolveGitHubSecret(options["github-secret-ref"], options.account);
+  await requireImagePresent(deploymentTarget, image);
   const envelope = JSON.stringify({ version: 1, runId, token: githubToken });
   githubToken = "";
   const publisher = await targetExecute(deploymentTarget, [
-    "docker", "run", "--rm", "-i",
+    "docker", "run", "--pull=never", "--rm", "-i",
     "--name", `bimo-${options.deployment}-publisher`,
     "--user", "0:0",
     "--read-only",
@@ -2305,6 +2350,11 @@ async function doctor(options) {
       const result = await execute("op", ["--version"], {
         timeoutMs: 15_000,
         maxOutputBytes: 4 * 1024,
+      }).catch(error => {
+        if (error?.code === "ENOENT") {
+          fail("1Password CLI (`op`) not found; it is required to resolve --secret-ref (install: https://developer.1password.com/docs/cli/get-started/)");
+        }
+        throw error;
       });
       const version = result.stdout.trim();
       if (!/^\d+\.\d+[\d.]*$/u.test(version)) fail("op CLI returned an unexpected version");
@@ -2539,11 +2589,16 @@ async function runCommand(argv) {
   fail(`unknown command: ${command}`);
 }
 
+export function collapseBimoPrefixes(message) {
+  return String(message).replace(/([a-z]+ exited \d+: )bimo: /g, "$1");
+}
+
 function errorReceiptMessage(error) {
-  return (error instanceof Error && typeof error.message === "string" ? error.message : String(error))
+  const message = (error instanceof Error && typeof error.message === "string" ? error.message : String(error))
     .replace(/[\u0000-\u001f\u007f]+/gu, " ")
     .trim()
     .slice(0, 500) || "command failed";
+  return collapseBimoPrefixes(message);
 }
 
 export async function main(argv = process.argv.slice(2)) {
