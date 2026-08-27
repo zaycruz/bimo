@@ -570,8 +570,8 @@ requires `--deployment` and `--secret-ref`. Sequential workflows also require
 repository URL, an immutable `--base-sha`, and `--target-branch main`.
 
 Optional shared flags are `--account`, `--model`, `--image`, and `--json`;
-sequential deploys also accept `--port`. `logs` accepts `--run`, `--image`, and
-`--json`.
+sequential deploys also accept `--port`. `logs` accepts `--run`, `--image`,
+`--follow`, and `--json`.
 
 Defaults are port `8080`, model `openrouter/deepseek/deepseek-v4-flash`, and
 image tag `bimo-workflow:0.6.0`. `--account` selects a 1Password account;
@@ -633,8 +633,9 @@ owned workspaces. An abrupt host or container loss can leave a `running` record
 and private temporary roots. The pod does not resume a partial Planner, writer,
 or checker attempt. Confirm no controller or publisher is active, preserve the
 run records for diagnosis, then recover only that dedicated deployment root
-before starting a new run. The internal publisher can reconcile an interrupted
-durable publication, but v0.6.0 has no general user-facing resume command.
+before starting a new run. An interrupted durable publication can be resumed
+with `bimo publish`; v0.6.0 has no general user-facing resume command for
+runs.
 
 ## Security boundary
 
