@@ -161,11 +161,12 @@ this is deliberately not a plugin system yet.
 ## Agent runtimes
 
 The agent CLI a role container spawns is selected from a closed registry —
-one entry today:
+two entries today:
 
 | Runtime | Agent CLI | Default image tag | Selection |
 | --- | --- | --- | --- |
 | `opencode` | `opencode run` (pinned in the image) | `bimo-workflow:0.6.0` | Default, or `--agent-runtime opencode` |
+| `pi` | `pi -p` (pinned `@earendil-works/pi-coding-agent` in the image) | `bimo-workflow:0.6.0-pi` | `--agent-runtime pi` |
 
 `bimo deploy` and `bimo organize` accept `--agent-runtime NAME`. The name is
 validated against the registry, baked into the image with
@@ -175,9 +176,12 @@ the role timeout, the kill-tree, the gateway-only network, and the
 `/handoff/result.json` contract are enforced by the dispatcher and are
 identical for every runtime. Without `--image`, the default tag is
 `bimo-workflow:0.6.0` for `opencode` and `bimo-workflow:0.6.0-<name>` for any
-future entry.
+other entry. With `pi`, `--model` keeps the usual `openrouter/<id>` form —
+the adapter maps it to the image's `bimo-gateway` provider, and pi accepts
+ids beyond the declared list (the declaration pins context-window metadata
+for the default model).
 [The agent runtime contract](docs/agent-runtimes.md) defines the adapter
-shape, the invariants a second runtime may not weaken, and why the registry
+shape, the invariants every runtime may not weaken, and why the registry
 is deliberately not a plugin system.
 
 ## Templates

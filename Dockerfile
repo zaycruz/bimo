@@ -59,6 +59,27 @@ ENV OPENCODE_CONFIG=/etc/opencode/opencode.json \
 RUN chmod 0555 /etc/opencode \
     && chown -R root:root /etc/opencode
 
+FROM base AS runtime-pi
+
+ARG PI_VERSION=0.84.3
+
+# @earendil-works/pi-coding-agent@0.84.3 dist integrity:
+# sha512-Yr2p9PubrbFZmYEPYI+C8KmZP9xlFuLDnAG64RtU0ZDgrdiXYWa+y7WGyJO5OlqPliOkVCMd9IzVszO3/t0D0w==
+RUN npm install --global --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && test "$(pi --version)" = "${PI_VERSION}" \
+    && npm cache clean --force
+
+COPY --chown=root:root --chmod=0444 etc/pi/ /etc/pi/agent/
+
+ENV PI_CODING_AGENT_DIR=/etc/pi/agent \
+    BIMO_AGENT_RUNTIME=pi
+
+# pi writes a settings lock and an auth store next to its config, so the
+# agent dispatcher seeds this read-only config into the writable HOME tmpfs
+# at startup; the baked copy stays root-owned like the opencode config.
+RUN chmod 0555 /etc/pi /etc/pi/agent \
+    && chown -R root:root /etc/pi
+
 FROM runtime-${AGENT_RUNTIME} AS final
 
 USER node

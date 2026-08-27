@@ -280,6 +280,9 @@ export function agentCreateArgs({
     "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
     "--tmpfs", "/home/node:rw,nosuid,nodev,size=512m,uid=1000,gid=1000",
     "--tmpfs", "/instructions:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000",
+    // The image WORKDIR is /app; agent runtimes without a --dir flag (pi)
+    // inherit the process cwd, so pin it to the mounted workspace.
+    "--workdir", "/workspace",
     "--env", "BIMO_GATEWAY_URL=http://gateway:8787/api/v1",
     "--env", `BIMO_AGENT_RUNTIME=${agentRuntime}`,
     "--mount", bind(workspaceHost, "/workspace", workspaceMounts.rootReadOnly),

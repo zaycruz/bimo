@@ -660,6 +660,48 @@ test("deploy and organize reject an unknown --agent-runtime before any Docker wo
   assert.deepEqual(await readCommandLog(tools.logFile), []);
 });
 
+test("deploy and organize accept --agent-runtime pi and derive the pi image tag", async t => {
+  const piConfig = { ...BASE_CONFIG, Env: ["NODE_ENV=production", "BIMO_AGENT_RUNTIME=pi"] };
+
+  const deployTools = await fakeDeployTools(t, {
+    controller: "workflow-success",
+    localArchitecture: "arm64",
+    localConfig: piConfig,
+  });
+  const deploy = deployArgs(deployTools.taskFile).filter((value, index, all) => (
+    value !== "--host" && all[index - 1] !== "--host"
+      && value !== "--image" && all[index - 1] !== "--image"
+  ));
+  deploy.push("--agent-runtime", "pi");
+  const deployResult = await invoke(deploy, { env: deployTools.env });
+  assert.equal(deployResult.code, 0, deployResult.stderr);
+  const deployEntries = await readCommandLog(deployTools.logFile);
+  const deployDocker = deployEntries.filter(entry => entry.tool === "docker").map(entry => entry.args);
+  const build = deployDocker.find(command => command[0] === "build");
+  assert.ok(build);
+  assert.equal(build[build.indexOf("--tag") + 1], "bimo-workflow:0.6.0-pi");
+  assert.equal(build[build.indexOf("--build-arg") + 1], "AGENT_RUNTIME=pi");
+  const deployEnvelope = deployEntries.find(entry => entry.tool === "local-controller-envelope");
+  assert.ok(deployEnvelope.fields.includes("agentRuntime"));
+
+  const organizeTools = await fakeDeployTools(t, {
+    controller: "organize-success",
+    localConfig: piConfig,
+    remoteConfig: { ...REORDERED_CONFIG, Env: ["NODE_ENV=production", "BIMO_AGENT_RUNTIME=pi"] },
+  });
+  const organize = organizeArgs("Build a small status page.", 1).filter((value, index, all) => (
+    value !== "--image" && all[index - 1] !== "--image"
+  ));
+  organize.push("--agent-runtime", "pi");
+  const organizeResult = await invoke(organize, { env: organizeTools.env });
+  assert.equal(organizeResult.code, 0, organizeResult.stderr);
+  const organizeEntries = await readCommandLog(organizeTools.logFile);
+  const organizeDocker = organizeEntries.filter(entry => entry.tool === "docker").map(entry => entry.args);
+  const organizeBuild = organizeDocker.find(command => command[0] === "build");
+  assert.ok(organizeBuild);
+  assert.equal(organizeBuild[organizeBuild.indexOf("--tag") + 1], "bimo-workflow:0.6.0-pi");
+});
+
 test("an explicit --agent-runtime fails closed when the built image lacks the runtime env", async t => {
   const tools = await fakeDeployTools(t, {
     controller: "workflow-success",
