@@ -1,0 +1,18 @@
+{
+  "providers": {
+    "bimo-gateway": {
+      "name": "Bimo Gateway",
+      "baseUrl": "http://gateway:8787/api/v1",
+      "api": "openai-completions",
+      "apiKey": "bimo-runtime-proxy",
+      "models": [
+        {
+          "id": "deepseek/deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash (via gateway)",
+          "contextWindow": 131072,
+          "maxTokens": 8192
+        }
+      ]
+    }
+  }
+}

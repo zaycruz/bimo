@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { lstat, readFile, unlink } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -65,6 +65,55 @@ function assertDiagnostics(diagnostics) {
     fail("agent runtime returned invalid diagnostics");
   }
   return diagnostics;
+}
+
+// A runtime whose config must be writable at run time (pi writes a settings
+// lock and an auth store next to its config) declares seedConfig: the
+// dispatcher copies the baked read-only config into the writable HOME tmpfs
+// before spawn. Bounds keep the seed as strict as every other read.
+const SEED_SOURCE = /^\/etc\/[a-z0-9][a-z0-9/-]{0,63}$/;
+const SEED_TARGET = /^\/home\/node\/[a-z0-9.][a-z0-9./-]{0,63}$/;
+const MAX_SEED_FILES = 16;
+const MAX_SEED_FILE_BYTES = 65_536;
+const MAX_SEED_TOTAL_BYTES = 1_048_576;
+const MAX_SEED_DEPTH = 4;
+
+export function assertSeedConfig(seed) {
+  if (seed === undefined || seed === null) return null;
+  if (typeof seed !== "object" || Array.isArray(seed)
+      || !SEED_SOURCE.test(seed.source ?? "") || !SEED_TARGET.test(seed.target ?? "")
+      || seed.target.includes("..")) {
+    fail("agent runtime returned an invalid seed config");
+  }
+  return Object.freeze({ source: seed.source, target: seed.target });
+}
+
+export async function seedAgentConfig(seed) {
+  if (seed === null) return;
+  let files = 0;
+  let totalBytes = 0;
+  const copy = async (source, target, depth) => {
+    if (depth > MAX_SEED_DEPTH) fail("agent runtime seed config is too deep");
+    const stat = await lstat(source);
+    if (stat.isSymbolicLink()) fail("agent runtime seed config must not contain symlinks");
+    if (stat.isDirectory()) {
+      await mkdir(target, { recursive: true });
+      for (const entry of await readdir(source)) {
+        await copy(path.join(source, entry), path.join(target, entry), depth + 1);
+      }
+      return;
+    }
+    if (!stat.isFile()) fail("agent runtime seed config must contain only regular files");
+    files += 1;
+    totalBytes += stat.size;
+    if (files > MAX_SEED_FILES || stat.size > MAX_SEED_FILE_BYTES
+        || totalBytes > MAX_SEED_TOTAL_BYTES) {
+      fail("agent runtime seed config exceeds its bounds");
+    }
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, await readFile(source));
+  };
+  await copy(seed.source, seed.target, 1);
 }
 
 function runAgent(runtime, { model, timeoutSeconds, role }) {
@@ -142,6 +191,7 @@ async function main() {
   const existing = await lstat("/handoff/result.json").catch(() => null);
   if (existing) await unlink("/handoff/result.json");
 
+  await seedAgentConfig(assertSeedConfig(runtime.seedConfig));
   const result = await runAgent(runtime, options);
   const handoff = await lstat("/handoff/result.json").catch(() => null);
   if (!handoff?.isFile() || handoff.isSymbolicLink() || handoff.size < 2 || handoff.size > 65_536) {

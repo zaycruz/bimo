@@ -13,3 +13,6 @@
 !etc/organizer/organizer.md
 !etc/opencode/
 !etc/opencode/opencode.json
+!etc/pi/
+!etc/pi/models.json
+!etc/pi/settings.json

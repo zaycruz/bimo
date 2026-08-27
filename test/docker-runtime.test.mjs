@@ -175,6 +175,7 @@ test("agent containers use only the isolated agent network and external prompt m
   const rendered = args.join(" ");
 
   assert.match(rendered, /--network bimo-demo-agents/);
+  assert.match(rendered, /--workdir \/workspace/);
   assert.match(rendered, /BIMO_GATEWAY_URL=http:\/\/gateway:8787\/api\/v1/);
   assert.match(rendered, /--env BIMO_AGENT_RUNTIME=opencode/);
   assert.match(rendered, /dst=\/workspace,readonly/);
@@ -206,6 +207,8 @@ test("agent containers pin the selected agent runtime next to the gateway env", 
   assert.deepEqual(args.slice(gatewayIndex + 1, gatewayIndex + 3), [
     "--env", "BIMO_AGENT_RUNTIME=opencode",
   ]);
+  const piArgs = agentCreateArgs({ ...base, agentRuntime: "pi" });
+  assert.ok(piArgs.includes("BIMO_AGENT_RUNTIME=pi"));
   assert.throws(() => agentCreateArgs({ ...base, agentRuntime: "bogus" }), /unknown agent runtime/);
   assert.throws(() => createRuntime({ agentRuntime: "bogus" }), /unknown agent runtime/);
 });

@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createOpenCodeDiagnostics } from "../src/agent-runtime.mjs";
+import { assertSeedConfig, seedAgentConfig } from "../src/agent.mjs";
 
 const bimoScript = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -69,5 +72,48 @@ test("the agent entrypoint rejects an unknown BIMO_AGENT_RUNTIME before any work
   assert.equal(
     Buffer.concat(stderr).toString("utf8"),
     "bimo-agent: unknown agent runtime: bogus\n",
+  );
+});
+
+test("seed config validation accepts only baked /etc sources into the HOME tmpfs", () => {
+  assert.equal(assertSeedConfig(null), null);
+  assert.equal(assertSeedConfig(undefined), null);
+  const seed = assertSeedConfig({
+    source: "/etc/pi/agent",
+    target: "/home/node/.pi/agent",
+  });
+  assert.deepEqual(seed, { source: "/etc/pi/agent", target: "/home/node/.pi/agent" });
+  assert.ok(Object.isFrozen(seed));
+  for (const invalid of [
+    { source: "/workspace/pi", target: "/home/node/.pi/agent" },
+    { source: "/etc/pi/agent", target: "/etc/pi/agent" },
+    { source: "/etc/pi/agent", target: "/tmp/pi" },
+    { source: "/etc/pi/agent", target: "/home/node/../etc" },
+    { source: "/etc/../etc/pi", target: "/home/node/.pi/agent" },
+    { source: "/etc/pi/agent" },
+    "seed",
+  ]) {
+    assert.throws(() => assertSeedConfig(invalid), /invalid seed config/u);
+  }
+});
+
+test("seedAgentConfig copies bounded regular files and rejects symlinks", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "bimo-seed-"));
+  const source = path.join(root, "source");
+  const target = path.join(root, "home", ".pi", "agent");
+  await mkdir(path.join(source, "nested"), { recursive: true });
+  await writeFile(path.join(source, "models.json"), "{}");
+  await writeFile(path.join(source, "nested", "settings.json"), '{"a":1}');
+
+  await seedAgentConfig({ source, target });
+  const seeded = await readFile(path.join(target, "nested", "settings.json"), "utf8");
+  assert.equal(seeded, '{"a":1}');
+
+  await seedAgentConfig(null);
+
+  await symlink(path.join(source, "models.json"), path.join(source, "link"));
+  await assert.rejects(
+    seedAgentConfig({ source, target }),
+    /must not contain symlinks/u,
   );
 });
