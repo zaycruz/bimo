@@ -275,7 +275,7 @@ if (runtimeCommand[0] === "true") {
         headBranch: envelope.headBranch,
         publication: {
           number: 42,
-          url: "https://github.com/zaycruz/bimo/pull/42",
+          url: envelope.repository.replace(/\.git$/, "") + "/pull/42",
           draft: true,
           created: true,
           headBranch: envelope.headBranch,
@@ -1113,21 +1113,102 @@ test("internal-pod-run rejects a mismatched packaged template before Git or Dock
   assert.match(result.stderr, /template digest does not match/);
 });
 
-test("internal-publish rejects publication bindings outside the fixed repository", async () => {
-  const result = await invoke(["internal-publish"], {
-    input: JSON.stringify({
-      version: 1,
-      runId: "pod-run-1",
-      repository: "https://github.com/attacker/repository.git",
-      targetBranch: "main",
-      baseSha: POD_BASE_SHA,
-      candidateSha: POD_CANDIDATE_SHA,
-      headBranch: "bimo/pod-run-1",
-      token: `github_pat_${"g".repeat(64)}`,
-    }),
-  });
-  assert.equal(result.code, 1);
-  assert.match(result.stderr, /publisher envelope is invalid/);
+test("internal-publish validates the repository and branch shapes, not a fixed repository", async () => {
+  const base = {
+    version: 1,
+    runId: "pod-run-1",
+    repository: "https://github.com/zaycruz/pod-sandbox.git",
+    targetBranch: "main",
+    baseSha: POD_BASE_SHA,
+    candidateSha: POD_CANDIDATE_SHA,
+    headBranch: "bimo/pod-run-1",
+    token: `github_pat_${"g".repeat(64)}`,
+  };
+  for (const [patch, label] of [
+    [{ repository: "git@github.com:zaycruz/bimo.git" }, "ssh URL"],
+    [{ repository: "https://gitlab.com/zaycruz/bimo.git" }, "non-github host"],
+    [{ repository: "https://user:pass@github.com/zaycruz/bimo.git" }, "credentials in URL"],
+    [{ repository: "https://github.com/zaycruz/../bimo.git" }, "traversal in path"],
+    [{ targetBranch: "main..x" }, "double dot in branch"],
+    [{ targetBranch: "my branch" }, "space in branch"],
+    [{ targetBranch: "/main" }, "leading slash in branch"],
+    [{ targetBranch: "main.lock" }, "lock suffix in branch"],
+  ]) {
+    const result = await invoke(["internal-publish"], {
+      input: JSON.stringify({ ...base, ...patch }),
+    });
+    assert.equal(result.code, 1, label);
+    assert.match(result.stderr, /publisher envelope is invalid/, label);
+  }
+});
+
+test("pod deploy accepts an operator-selected repository and target branch", async t => {
+  const tools = await fakeDeployTools(t, { controller: "pod-success" });
+  const args = podDeployArgs(tools.taskFile).flatMap((value, index, all) => (
+    value === "--repository" || value === "--target-branch"
+      ? []
+      : all[index - 1] === "--repository" || all[index - 1] === "--target-branch"
+        ? []
+        : [value]
+  ));
+  args.push("--repository", "https://github.com/zaycruz/pod-sandbox.git",
+    "--target-branch", "develop");
+  const result = await invoke(args, { env: tools.env });
+
+  assert.equal(result.code, 0, result.stderr);
+  const response = JSON.parse(result.stdout);
+  assert.equal(response.repository, "https://github.com/zaycruz/pod-sandbox.git");
+  assert.equal(response.targetBranch, "develop");
+  assert.equal(response.publication.url, "https://github.com/zaycruz/pod-sandbox/pull/42");
+
+  const entries = await readCommandLog(tools.logFile);
+  const computeEnvelope = entries.find(entry => entry.tool === "pod-compute-envelope");
+  const publishEnvelope = entries.find(entry => entry.tool === "pod-publish-envelope");
+  assert.equal(computeEnvelope.repository, "https://github.com/zaycruz/pod-sandbox.git");
+  assert.equal(computeEnvelope.targetBranch, "develop");
+  assert.equal(publishEnvelope.repository, "https://github.com/zaycruz/pod-sandbox.git");
+  assert.equal(publishEnvelope.targetBranch, "develop");
+});
+
+test("pod deploy defaults the repository and target branch when the flags are omitted", async t => {
+  const tools = await fakeDeployTools(t, { controller: "pod-success" });
+  const args = podDeployArgs(tools.taskFile).flatMap((value, index, all) => (
+    value === "--repository" || value === "--target-branch"
+      ? []
+      : all[index - 1] === "--repository" || all[index - 1] === "--target-branch"
+        ? []
+        : [value]
+  ));
+  const result = await invoke(args, { env: tools.env });
+
+  assert.equal(result.code, 0, result.stderr);
+  const response = JSON.parse(result.stdout);
+  assert.equal(response.repository, "https://github.com/zaycruz/bimo.git");
+  assert.equal(response.targetBranch, "main");
+});
+
+test("pod deploy rejects invalid repository URLs and branch names before any Docker work", async () => {
+  const base = [
+    "deploy", "parallel-engineering-pod",
+    "--deployment", "pod-demo",
+    "--host", "example.invalid",
+    "--task-stdin",
+    "--secret-ref", "op://Test/Bimo/openrouter",
+    "--github-secret-ref", "op://Test/Bimo publisher/github",
+    "--base-sha", POD_BASE_SHA,
+  ];
+  for (const [extra, pattern] of [
+    [["--repository", "git@github.com:zaycruz/bimo.git"], /must be an https github\.com repository URL/],
+    [["--repository", "https://gitlab.com/zaycruz/bimo.git"], /must be an https github\.com repository URL/],
+    [["--repository", "https://user:pass@github.com/zaycruz/bimo.git"], /must be an https github\.com repository URL/],
+    [["--target-branch", "my branch"], /not a valid Git branch name/],
+    [["--target-branch", "main..x"], /not a valid Git branch name/],
+    [["--target-branch", "-bad"], /not a valid Git branch name/],
+  ]) {
+    const result = await invoke([...base, ...extra], { input: "Build the test application.\n" });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, pattern);
+  }
 });
 
 test("deploy rejects image shell syntax before local execution", async () => {

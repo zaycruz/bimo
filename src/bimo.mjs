@@ -42,8 +42,9 @@ const templateRoot = path.join(packageRoot, "templates");
 const organizerInstructionsPath = path.join(packageRoot, "etc", "organizer", "organizer.md");
 const DEFAULT_IMAGE = "bimo-workflow:0.6.0";
 const DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash";
-const POD_REPOSITORY = "https://github.com/zaycruz/bimo.git";
-const POD_TARGET_BRANCH = "main";
+const DEFAULT_POD_REPOSITORY = "https://github.com/zaycruz/bimo.git";
+const DEFAULT_POD_TARGET_BRANCH = "main";
+const POD_REPOSITORY_URL = /^https:\/\/github\.com\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}(?:\.git)?$/;
 const PUBLISH_TIMEOUT_MS = 5 * 60 * 1_000;
 const IMAGE_TRANSFER_TIMEOUT_MS = 10 * 60 * 1_000;
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
@@ -858,6 +859,26 @@ function validateOrganizerPlan(value, expected) {
   return value;
 }
 
+function validPodRepository(value) {
+  if (!POD_REPOSITORY_URL.test(value ?? "")) return false;
+  const name = value.replace(/\.git$/, "").split("/").pop();
+  return name !== "." && name !== "..";
+}
+
+function validTargetBranch(value) {
+  if (typeof value !== "string" || value.length < 1 || value.length > 128) return false;
+  if (value.startsWith("/") || value.endsWith("/") || value.endsWith(".")
+      || value.startsWith("-")
+      || value.includes("//") || value.includes("..") || value.includes("@{")
+      || value === "@" || value.endsWith(".lock")) return false;
+  // git-check-ref-format: no control characters, space, or ~^:?*[\
+  return !/[\x00-\x20~^:?*[\\]/.test(value);
+}
+
+function podPullUrl(repository, number) {
+  return `${repository.replace(/\.git$/, "")}/pull/${number}`;
+}
+
 function validatePodReady(value, expected) {
   exactObject(value, ["status", "runId", "baseSha", "candidateSha", "branch"], "pod controller");
   if (value.status !== "ready" || value.runId !== expected.runId
@@ -874,7 +895,7 @@ function validatePublishedPod(value, expected) {
     "headBranch", "publication",
   ], "pod publisher");
   if (value.status !== "completed" || value.runId !== expected.runId
-      || value.repository !== POD_REPOSITORY || value.targetBranch !== POD_TARGET_BRANCH
+      || value.repository !== expected.repository || value.targetBranch !== expected.targetBranch
       || value.baseSha !== expected.baseSha || value.candidateSha !== expected.candidateSha
       || value.headBranch !== expected.branch) {
     fail("pod publisher returned an invalid completion receipt");
@@ -888,8 +909,8 @@ function validatePublishedPod(value, expected) {
       || !Number.isSafeInteger(publication.number) || publication.number < 1
       || publication.draft !== true || typeof publication.created !== "boolean"
       || publication.baseSha !== expected.baseSha || publication.headSha !== expected.candidateSha
-      || publication.headBranch !== expected.branch || publication.targetBranch !== POD_TARGET_BRANCH
-      || !new RegExp(`^https://github\\.com/zaycruz/bimo/pull/${publication.number}$`).test(publication.url ?? "")) {
+      || publication.headBranch !== expected.branch || publication.targetBranch !== expected.targetBranch
+      || publication.url !== podPullUrl(expected.repository, publication.number)) {
     fail("pod publisher returned an invalid draft pull request receipt");
   }
   return value;
@@ -919,10 +940,16 @@ async function deploy(template, options) {
   if (!/^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/.test(model)) fail("--model is invalid");
   let port;
   let publicUrl;
+  let repository;
+  let targetBranch;
   if (pod) {
-    if (options.repository !== POD_REPOSITORY) fail(`--repository must be ${POD_REPOSITORY}`);
+    repository = options.repository ?? DEFAULT_POD_REPOSITORY;
+    if (!validPodRepository(repository)) {
+      fail("--repository must be an https github.com repository URL");
+    }
     if (!GIT_SHA.test(options["base-sha"] ?? "")) fail("--base-sha must be an exact 40-character Git SHA");
-    if (options["target-branch"] !== POD_TARGET_BRANCH) fail(`--target-branch must be ${POD_TARGET_BRANCH}`);
+    targetBranch = options["target-branch"] ?? DEFAULT_POD_TARGET_BRANCH;
+    if (!validTargetBranch(targetBranch)) fail("--target-branch is not a valid Git branch name");
     if (!options["github-secret-ref"]) fail("--github-secret-ref is required");
   } else {
     port = Number(options.port ?? 8080);
@@ -989,9 +1016,9 @@ async function deploy(template, options) {
         model,
         agentRuntime,
         image: remoteImage.imageId,
-        repository: POD_REPOSITORY,
+        repository,
         baseSha: options["base-sha"],
-        targetBranch: POD_TARGET_BRANCH,
+        targetBranch,
         runId,
       });
       openRouterKey = "";
@@ -1030,8 +1057,8 @@ async function deploy(template, options) {
       const publishEnvelope = JSON.stringify({
         version: 1,
         runId,
-        repository: POD_REPOSITORY,
-        targetBranch: POD_TARGET_BRANCH,
+        repository,
+        targetBranch,
         baseSha: ready.baseSha,
         candidateSha: ready.candidateSha,
         headBranch: ready.branch,
@@ -1060,7 +1087,11 @@ async function deploy(template, options) {
         timeoutMs: PUBLISH_TIMEOUT_MS + 60_000,
         maxOutputBytes: 512 * 1024,
       });
-      const response = validatePublishedPod(parseLastJson(publisher.stdout, "pod publisher"), ready);
+      const response = validatePublishedPod(parseLastJson(publisher.stdout, "pod publisher"), {
+        ...ready,
+        repository,
+        targetBranch,
+      });
       if (options.json) process.stdout.write(`${JSON.stringify(response)}\n`);
       else process.stdout.write(
         `deployed ${loaded.template.name} as ${options.deployment}\nrun: ${response.runId}\nPR: ${response.publication.url} (draft)\n`,
@@ -1522,8 +1553,8 @@ async function internalPodRun(options) {
       || !/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(envelope.key ?? "")
       || !/^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/.test(envelope.model ?? "")
       || !AGENT_RUNTIME_NAMES.includes(envelope.agentRuntime)
-      || !SHA256.test(envelope.image ?? "") || envelope.repository !== POD_REPOSITORY
-      || !GIT_SHA.test(envelope.baseSha ?? "") || envelope.targetBranch !== POD_TARGET_BRANCH
+      || !SHA256.test(envelope.image ?? "") || !validPodRepository(envelope.repository)
+      || !GIT_SHA.test(envelope.baseSha ?? "") || !validTargetBranch(envelope.targetBranch)
       || !RUN_ID.test(envelope.runId ?? "")) {
     fail("pod controller envelope is invalid");
   }
@@ -1535,7 +1566,7 @@ async function internalPodRun(options) {
     ([slot, writer]) => [slot, [...writer.allowedWriteRoots]],
   ));
   const source = new GitRuntime({
-    allowedRepositories: [POD_REPOSITORY],
+    allowedRepositories: [envelope.repository],
     allowedWriteRoots,
     gitRoot: "/source",
     worktreesRoot: "/worktrees",
@@ -1597,7 +1628,7 @@ async function internalPublish(options) {
     "headBranch", "token",
   ], "publisher");
   if (envelope.version !== 1 || !RUN_ID.test(envelope.runId ?? "")
-      || envelope.repository !== POD_REPOSITORY || envelope.targetBranch !== POD_TARGET_BRANCH
+      || !validPodRepository(envelope.repository) || !validTargetBranch(envelope.targetBranch)
       || !GIT_SHA.test(envelope.baseSha ?? "") || !GIT_SHA.test(envelope.candidateSha ?? "")
       || envelope.headBranch !== `bimo/${envelope.runId}`
       || !GITHUB_TOKEN.test(envelope.token ?? "")) {
@@ -1637,7 +1668,7 @@ async function internalPublishResume(options) {
   const ready = store.events.filter(event => event.type === "publication.ready");
   if (ready.length !== 1) fail(`no publication-ready record found for run ${runId}`);
   const { repository, targetBranch, baseSha, candidateSha, headBranch } = ready[0];
-  if (repository !== POD_REPOSITORY || targetBranch !== POD_TARGET_BRANCH
+  if (!validPodRepository(repository) || !validTargetBranch(targetBranch)
       || !GIT_SHA.test(baseSha ?? "") || !GIT_SHA.test(candidateSha ?? "")
       || headBranch !== `bimo/${runId}`) {
     fail("publication.ready record is invalid");
@@ -2199,7 +2230,7 @@ function validateResumedPublication(value) {
     "headBranch", "publication",
   ], "pod publisher");
   if (value.status !== "completed" || !RUN_ID.test(value.runId ?? "")
-      || value.repository !== POD_REPOSITORY || value.targetBranch !== POD_TARGET_BRANCH
+      || !validPodRepository(value.repository) || !validTargetBranch(value.targetBranch)
       || !GIT_SHA.test(value.baseSha ?? "") || !GIT_SHA.test(value.candidateSha ?? "")
       || value.headBranch !== `bimo/${value.runId}`) {
     fail("pod publisher returned an invalid completion receipt");
@@ -2213,8 +2244,8 @@ function validateResumedPublication(value) {
       || !Number.isSafeInteger(publication.number) || publication.number < 1
       || publication.draft !== true || typeof publication.created !== "boolean"
       || publication.baseSha !== value.baseSha || publication.headSha !== value.candidateSha
-      || publication.headBranch !== value.headBranch || publication.targetBranch !== POD_TARGET_BRANCH
-      || !new RegExp(`^https://github\\.com/zaycruz/bimo/pull/${publication.number}$`).test(publication.url ?? "")) {
+      || publication.headBranch !== value.headBranch || publication.targetBranch !== value.targetBranch
+      || publication.url !== podPullUrl(value.repository, publication.number)) {
     fail("pod publisher returned an invalid draft pull request receipt");
   }
   return value;
@@ -2575,7 +2606,7 @@ function usage() {
   bimo organize -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
   bimo -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
   bimo deploy TEMPLATE --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
-  bimo deploy parallel-engineering-pod --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --repository ${POD_REPOSITORY} --base-sha SHA --target-branch main [--json]
+  bimo deploy parallel-engineering-pod --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --base-sha SHA [--repository URL] [--target-branch BRANCH] [--json]
   bimo logs --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json] [--follow]
   bimo runs --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--json]
   bimo status --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json]
