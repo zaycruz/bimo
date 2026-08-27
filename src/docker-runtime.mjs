@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
+import { DEFAULT_AGENT_RUNTIME, agentRuntimeFor } from "./agent-runtime.mjs";
 import { isDeploymentHostRoot } from "./deployment-target.mjs";
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
@@ -259,11 +260,13 @@ export function agentCreateArgs({
   promptHost,
   access,
   model,
+  agentRuntime = DEFAULT_AGENT_RUNTIME,
   timeoutSeconds,
   nameSuffix = `${role}-${step}`,
   writeMounts,
 }) {
   if (!EXECUTION_ID.test(nameSuffix)) fail("invalid agent execution name");
+  agentRuntimeFor(agentRuntime);
   const workspaceMounts = writableWorkspaceMounts(workspaceHost, access, writeMounts);
   const name = containerName(deployment, nameSuffix);
   return [
@@ -278,6 +281,7 @@ export function agentCreateArgs({
     "--tmpfs", "/home/node:rw,nosuid,nodev,size=512m,uid=1000,gid=1000",
     "--tmpfs", "/instructions:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000",
     "--env", "BIMO_GATEWAY_URL=http://gateway:8787/api/v1",
+    "--env", `BIMO_AGENT_RUNTIME=${agentRuntime}`,
     "--mount", bind(workspaceHost, "/workspace", workspaceMounts.rootReadOnly),
     ...(workspaceMounts.maskGit ? ["--mount", bind("/dev/null", "/workspace/.git", true)] : []),
     ...workspaceMounts.mounts.flatMap(({ source, target }) => ["--mount", bind(source, target, false)]),
@@ -799,6 +803,7 @@ export class DockerRuntime {
     stateRoot = "/state",
     key,
     model,
+    agentRuntime = DEFAULT_AGENT_RUNTIME,
     modelConcurrency = 1,
     modelRequestLimit = 100,
     port,
@@ -812,6 +817,7 @@ export class DockerRuntime {
     if (path.resolve(stateRoot) !== stateRoot) fail("Bimo state root must be canonical");
     if (!SAFE_IMAGE.test(image)) fail("invalid image reference");
     if (!MODEL.test(model)) fail("invalid model reference");
+    agentRuntimeFor(agentRuntime);
     if (!Number.isInteger(modelConcurrency)
         || modelConcurrency < 1
         || modelConcurrency > MAX_MODEL_CONCURRENCY) {
@@ -841,6 +847,7 @@ export class DockerRuntime {
     this.stateRoot = path.resolve(stateRoot);
     this.key = key;
     this.model = model;
+    this.agentRuntime = agentRuntime;
     this.modelConcurrency = modelConcurrency;
     this.modelRequestLimit = modelRequestLimit;
     this.port = port ?? null;
@@ -1168,6 +1175,7 @@ export class DockerRuntime {
       promptHost: hostPrompt,
       access,
       model: this.model,
+      agentRuntime: this.agentRuntime,
       timeoutSeconds,
       nameSuffix: containerSuffix,
       writeMounts,

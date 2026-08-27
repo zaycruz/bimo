@@ -188,6 +188,7 @@ test("runs a majority organizer with read-only exact workspaces and durable comp
   assert.deepEqual(events.map(event => event.sequence), [1, 2]);
   assert.equal(events[0].agents, 3);
   assert.equal(events[0].model, MODEL);
+  assert.equal(events[0].agentRuntime, "unspecified");
   assert.equal(events[0].imageDigest, IMAGE_DIGEST);
   assert.equal(events[1].template, "react-app");
   assert.equal(events[1].templateDigest, CATALOG[0].templateDigest);

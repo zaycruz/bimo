@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createOpenCodeDiagnostics } from "../src/agent.mjs";
+import { createOpenCodeDiagnostics } from "../src/agent-runtime.mjs";
 
 const bimoScript = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -43,4 +43,31 @@ test("bin bimo dispatches the agent entrypoint", async () => {
   assert.deepEqual([code, signal], [1, null]);
   assert.equal(Buffer.concat(stdout).toString("utf8"), "");
   assert.equal(Buffer.concat(stderr).toString("utf8"), "bimo-agent: invalid option: --bad\n");
+});
+
+test("the agent entrypoint rejects an unknown BIMO_AGENT_RUNTIME before any workspace work", async () => {
+  const child = spawn(process.execPath, [
+    bimoScript,
+    "agent",
+    "--model", "openrouter/deepseek/deepseek-v4-flash",
+    "--timeout-seconds", "10",
+    "--role", "qa",
+  ], {
+    env: { BIMO_AGENT_RUNTIME: "bogus" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdout = [];
+  const stderr = [];
+  child.stdout.on("data", chunk => stdout.push(chunk));
+  child.stderr.on("data", chunk => stderr.push(chunk));
+  const [code, signal] = await new Promise(resolve => {
+    child.once("exit", (...result) => resolve(result));
+  });
+
+  assert.deepEqual([code, signal], [1, null]);
+  assert.equal(Buffer.concat(stdout).toString("utf8"), "");
+  assert.equal(
+    Buffer.concat(stderr).toString("utf8"),
+    "bimo-agent: unknown agent runtime: bogus\n",
+  );
 });

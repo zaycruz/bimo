@@ -7,18 +7,15 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+import {
+  AGENT_INSTRUCTIONS_PATH,
+  DEFAULT_AGENT_RUNTIME,
+  agentRuntimeFor,
+} from "./agent-runtime.mjs";
+
 const MODEL = /^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/;
 const MAX_OUTPUT_BYTES = 1_048_576;
-const MAX_DIAGNOSTIC_LINE_BYTES = 65_536;
-const INSTRUCTIONS_PATH = "/instructions/instructions.md";
-const DIAGNOSTIC_EVENT_TYPES = new Set([
-  "error",
-  "reasoning",
-  "step_finish",
-  "step_start",
-  "text",
-  "tool_use",
-]);
+const UNSAFE_CONTROL = /[\u0000-\u001f\u007f]/u;
 
 function fail(message) {
   throw new Error(message);
@@ -41,120 +38,60 @@ function parseArgs(argv) {
   return { model: options.model, timeoutSeconds, role: options.role };
 }
 
-function findHttpStatus(value, depth = 0, budget = { visited: 0 }) {
-  if (!value || typeof value !== "object" || Array.isArray(value)
-      || depth > 4 || budget.visited >= 32) return null;
-  budget.visited += 1;
-  for (const key of ["status", "statusCode"]) {
-    const raw = value[key];
-    const status = typeof raw === "string" && /^\d{3}$/u.test(raw) ? Number(raw) : raw;
-    if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
+function assertSpawnArgv(argv) {
+  if (!Array.isArray(argv) || argv.length < 1 || argv.length > 64
+      || argv.some(value => typeof value !== "string" || !value || value.length > 1_024
+        || UNSAFE_CONTROL.test(value))) {
+    fail("agent runtime returned an invalid spawn argv");
   }
-  for (const nested of Object.values(value)) {
-    const status = findHttpStatus(nested, depth + 1, budget);
-    if (status !== null) return status;
-  }
-  return null;
+  return argv;
 }
 
-export function createOpenCodeDiagnostics() {
-  let stdoutBytes = 0;
-  let stderrBytes = 0;
-  let stdoutLine = "";
-  let discardingLine = false;
-  let finished = false;
-  const decoder = new TextDecoder("utf-8");
-  const eventCounts = new Map();
-  let errorStatus = null;
-  const recordEvent = line => {
-    if (!line || Buffer.byteLength(line) > MAX_DIAGNOSTIC_LINE_BYTES) return;
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      return;
-    }
-    if (!event || typeof event !== "object" || Array.isArray(event)
-        || !DIAGNOSTIC_EVENT_TYPES.has(event.type)) return;
-    eventCounts.set(event.type, (eventCounts.get(event.type) ?? 0) + 1);
-    if (event.type === "error") errorStatus = findHttpStatus(event.error);
-  };
-  return {
-    stdout(chunk) {
-      stdoutBytes += chunk.length;
-      let text = decoder.decode(chunk, { stream: true });
-      if (discardingLine) {
-        const newline = text.indexOf("\n");
-        if (newline === -1) return;
-        discardingLine = false;
-        text = text.slice(newline + 1);
-      }
-      const lines = `${stdoutLine}${text}`.split("\n");
-      stdoutLine = lines.pop() ?? "";
-      for (const line of lines) recordEvent(line);
-      if (Buffer.byteLength(stdoutLine) > MAX_DIAGNOSTIC_LINE_BYTES) {
-        stdoutLine = "";
-        discardingLine = true;
-      }
-    },
-    stderr(chunk) {
-      stderrBytes += chunk.length;
-    },
-    failure(code) {
-      if (finished) throw new Error("OpenCode diagnostics already finalized");
-      finished = true;
-      const finalLine = discardingLine ? "" : `${stdoutLine}${decoder.decode()}`;
-      if (finalLine) recordEvent(finalLine);
-      const exit = Number.isInteger(code) ? `agent exited ${code}` : "agent exited on signal";
-      const events = [...eventCounts.entries()]
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([type, count]) => `${type}:${count}`)
-        .join(",");
-      return [
-        exit,
-        ...(events ? [`events=${events}`] : []),
-        ...(errorStatus === null ? [] : [`errorStatus=${errorStatus}`]),
-        `stdoutBytes=${stdoutBytes}`,
-        `stderrBytes=${stderrBytes}`,
-      ].join("; ");
-    },
-  };
+function assertSpawnEnv(env) {
+  if (!env || typeof env !== "object" || Array.isArray(env)
+      || Object.keys(env).length < 1 || Object.keys(env).length > 32
+      || Object.entries(env).some(([key, value]) => !/^[A-Z][A-Z0-9_]{0,63}$/.test(key)
+        || typeof value !== "string" || !value || value.length > 1_024
+        || UNSAFE_CONTROL.test(value))) {
+    fail("agent runtime returned an invalid spawn environment");
+  }
+  return env;
 }
 
-function runOpenCode({ model, timeoutSeconds, role }) {
+function assertDiagnostics(diagnostics) {
+  if (!diagnostics || typeof diagnostics !== "object"
+      || typeof diagnostics.stdout !== "function" || typeof diagnostics.stderr !== "function"
+      || typeof diagnostics.failure !== "function") {
+    fail("agent runtime returned invalid diagnostics");
+  }
+  return diagnostics;
+}
+
+function runAgent(runtime, { model, timeoutSeconds, role }) {
   return new Promise((resolve, reject) => {
     const gateway = process.env.BIMO_GATEWAY_URL;
     if (!gateway || !/^http:\/\/[a-z0-9.-]+:\d{2,5}\/api\/v1$/.test(gateway)) {
       reject(new Error("BIMO_GATEWAY_URL is invalid"));
       return;
     }
-    const child = spawn("opencode", [
-      "run",
-      "--pure",
-      "--auto",
-      "--agent", "build",
-      "--format", "json",
-      "--dir", "/workspace",
-      "--model", model,
-      "--file", INSTRUCTIONS_PATH,
-      "--title", `bimo-${role}`,
-      "Follow the attached Bimo instructions exactly.",
-    ], {
+    let argv;
+    let env;
+    let diagnostics;
+    try {
+      argv = assertSpawnArgv(runtime.spawnArgv({ model, role }));
+      env = assertSpawnEnv(runtime.spawnEnv({ gateway }));
+      diagnostics = assertDiagnostics(runtime.createDiagnostics());
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const child = spawn(argv[0], argv.slice(1), {
       detached: true,
-      env: {
-        PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-        HOME: "/home/node",
-        TMPDIR: "/tmp",
-        LANG: "C.UTF-8",
-        CI: "1",
-        BIMO_GATEWAY_URL: gateway,
-        OPENCODE_CONFIG: "/etc/opencode/opencode.json",
-      },
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     const hash = createHash("sha256");
     let outputBytes = 0;
-    const diagnostics = createOpenCodeDiagnostics();
     let settled = false;
     let timedOut = false;
 
@@ -199,12 +136,13 @@ function runOpenCode({ model, timeoutSeconds, role }) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const prompt = await readFile(INSTRUCTIONS_PATH);
+  const runtime = agentRuntimeFor(process.env.BIMO_AGENT_RUNTIME ?? DEFAULT_AGENT_RUNTIME);
+  const prompt = await readFile(AGENT_INSTRUCTIONS_PATH);
   if (!prompt.length || prompt.length > 256 * 1024) fail("prompt must contain 1 to 262144 bytes");
   const existing = await lstat("/handoff/result.json").catch(() => null);
   if (existing) await unlink("/handoff/result.json");
 
-  const result = await runOpenCode(options);
+  const result = await runAgent(runtime, options);
   const handoff = await lstat("/handoff/result.json").catch(() => null);
   if (!handoff?.isFile() || handoff.isSymbolicLink() || handoff.size < 2 || handoff.size > 65_536) {
     fail("agent did not create a regular bounded /handoff/result.json");

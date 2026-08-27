@@ -232,6 +232,7 @@ test("a failed review loops through Engineering and leaves durable why history",
   assert.deepEqual(events.filter(event => event.type === "role.finished").map(event => event.outcome), [
     "completed", "failed", "completed", "passed", "passed",
   ]);
+  assert.equal(events[0].agentRuntime, "unspecified");
 
   const changelog = await readFile(path.join(locations.stateRoot, "run-a", "CHANGELOG.md"), "utf8");
   assert.match(changelog, /qa chose the smallest correct change/);

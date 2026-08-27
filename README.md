@@ -158,6 +158,28 @@ the closed registry only after its end-to-end deploy, log, cancel, and
 cleanup evidence exists. [The target boundary](docs/targets.md) explains why
 this is deliberately not a plugin system yet.
 
+## Agent runtimes
+
+The agent CLI a role container spawns is selected from a closed registry —
+one entry today:
+
+| Runtime | Agent CLI | Default image tag | Selection |
+| --- | --- | --- | --- |
+| `opencode` | `opencode run` (pinned in the image) | `bimo-workflow:0.6.0` | Default, or `--agent-runtime opencode` |
+
+`bimo deploy` and `bimo organize` accept `--agent-runtime NAME`. The name is
+validated against the registry, baked into the image with
+`--build-arg AGENT_RUNTIME`, carried to the controller in the run envelope,
+and passed to every agent container as `BIMO_AGENT_RUNTIME`. Bounded output,
+the role timeout, the kill-tree, the gateway-only network, and the
+`/handoff/result.json` contract are enforced by the dispatcher and are
+identical for every runtime. Without `--image`, the default tag is
+`bimo-workflow:0.6.0` for `opencode` and `bimo-workflow:0.6.0-<name>` for any
+future entry.
+[The agent runtime contract](docs/agent-runtimes.md) defines the adapter
+shape, the invariants a second runtime may not weaken, and why the registry
+is deliberately not a plugin system.
+
 ## Templates
 
 Each template is one directory holding one JSON manifest and one Markdown
@@ -569,12 +591,14 @@ requires `--deployment` and `--secret-ref`. Sequential workflows also require
 `--public-url`. The fixed pod instead requires `--github-secret-ref`, the fixed
 repository URL, an immutable `--base-sha`, and `--target-branch main`.
 
-Optional shared flags are `--account`, `--model`, `--image`, and `--json`;
-sequential deploys also accept `--port`. `logs` accepts `--run`, `--image`,
-`--follow`, and `--json`.
+Optional shared flags are `--account`, `--model`, `--image`, `--agent-runtime`,
+and `--json`; sequential deploys also accept `--port`. `logs` accepts `--run`,
+`--image`, `--follow`, and `--json`.
 
-Defaults are port `8080`, model `openrouter/deepseek/deepseek-v4-flash`, and
-image tag `bimo-workflow:0.6.0`. `--account` selects a 1Password account;
+Defaults are port `8080`, model `openrouter/deepseek/deepseek-v4-flash`, agent
+runtime `opencode`, and image tag `bimo-workflow:0.6.0` (a non-default
+`--agent-runtime` derives `bimo-workflow:0.6.0-<name>` instead).
+`--account` selects a 1Password account;
 `--json` requests machine-readable output.
 
 Quote each `op://` reference as one shell argument. Vault, item, and field names

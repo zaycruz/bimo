@@ -103,6 +103,7 @@ async function fakeDeployTools(t, {
   remoteLayers = BASE_LAYERS,
   remotePlatform = "linux/amd64",
   localArchitecture = "amd64",
+  localConfig = BASE_CONFIG,
   controller = "conflict",
   missingOp = false,
 } = {}) {
@@ -379,7 +380,10 @@ else {
       DOCKER_HOST: "",
       BIMO_TEST_LOG: logFile,
       BIMO_TEST_DOCKER_ENDPOINT: "unix:///tmp/bimo-test-docker.sock",
-      BIMO_TEST_LOCAL_INSPECT: imageInspect(LOCAL_IMAGE_ID, { architecture: localArchitecture }),
+      BIMO_TEST_LOCAL_INSPECT: imageInspect(LOCAL_IMAGE_ID, {
+        architecture: localArchitecture,
+        config: localConfig,
+      }),
       BIMO_TEST_REMOTE_INSPECT: imageInspect(remoteImageId, {
         architecture: remotePlatform.split("/")[1],
         config: remoteConfig,
@@ -621,6 +625,80 @@ test("deploy defaults to local Docker without SSH or image transfer", async t =>
   assert.equal(envelope.runId, response.runId);
 });
 
+test("deploy builds with the AGENT_RUNTIME build-arg and defaults the opencode image tag", async t => {
+  const tools = await fakeDeployTools(t, {
+    controller: "workflow-success",
+    localArchitecture: "arm64",
+  });
+  const args = deployArgs(tools.taskFile).filter((value, index, all) => (
+    value !== "--host" && all[index - 1] !== "--host"
+      && value !== "--image" && all[index - 1] !== "--image"
+  ));
+  const result = await invoke(args, { env: tools.env });
+
+  assert.equal(result.code, 0, result.stderr);
+  const entries = await readCommandLog(tools.logFile);
+  const docker = entries.filter(entry => entry.tool === "docker").map(entry => entry.args);
+  const build = docker.find(command => command[0] === "build");
+  assert.ok(build);
+  assert.equal(build[build.indexOf("--tag") + 1], "bimo-workflow:0.6.0");
+  assert.equal(build[build.indexOf("--build-arg") + 1], "AGENT_RUNTIME=opencode");
+  const envelope = entries.find(entry => entry.tool === "local-controller-envelope");
+  assert.ok(envelope.fields.includes("agentRuntime"));
+});
+
+test("deploy and organize reject an unknown --agent-runtime before any Docker work", async t => {
+  const tools = await fakeDeployTools(t);
+  for (const args of [
+    [...deployArgs(tools.taskFile), "--agent-runtime", "bogus"],
+    [...organizeArgs("Build a small status page.", 1), "--agent-runtime", "bogus"],
+  ]) {
+    const result = await invoke(args, { env: tools.env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /--agent-runtime must name a built-in agent runtime/);
+  }
+  assert.deepEqual(await readCommandLog(tools.logFile), []);
+});
+
+test("an explicit --agent-runtime fails closed when the built image lacks the runtime env", async t => {
+  const tools = await fakeDeployTools(t, {
+    controller: "workflow-success",
+    localArchitecture: "arm64",
+  });
+  const args = deployArgs(tools.taskFile).filter((value, index, all) => (
+    value !== "--host" && all[index - 1] !== "--host"
+      && value !== "--image" && all[index - 1] !== "--image"
+  ));
+  args.push("--agent-runtime", "opencode");
+  const result = await invoke(args, { env: tools.env });
+
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /built image agent runtime unset does not match --agent-runtime opencode/);
+  const entries = await readCommandLog(tools.logFile);
+  assert.equal(entries.some(entry => entry.tool === "local-controller-envelope"), false);
+});
+
+test("an explicit --agent-runtime matching the built image env runs the controller", async t => {
+  const tools = await fakeDeployTools(t, {
+    controller: "workflow-success",
+    localArchitecture: "arm64",
+    localConfig: { ...BASE_CONFIG, Env: ["NODE_ENV=production", "BIMO_AGENT_RUNTIME=opencode"] },
+  });
+  const args = deployArgs(tools.taskFile).filter((value, index, all) => (
+    value !== "--host" && all[index - 1] !== "--host"
+      && value !== "--image" && all[index - 1] !== "--image"
+  ));
+  args.push("--agent-runtime", "opencode");
+  const result = await invoke(args, { env: tools.env });
+
+  assert.equal(result.code, 0, result.stderr);
+  const response = JSON.parse(result.stdout);
+  assert.equal(response.template, "react-app");
+  const entries = await readCommandLog(tools.logFile);
+  const envelope = entries.find(entry => entry.tool === "local-controller-envelope");
+  assert.ok(envelope.fields.includes("agentRuntime"));
+});
+
 test("explicit SSH target builds for the target daemon architecture", async t => {
   const tools = await fakeDeployTools(t, {
     controller: "workflow-success",
@@ -786,7 +864,7 @@ test("organize transfers content-verified image without retagging and runs one e
 
   const organizerEnvelope = entries.find(entry => entry.tool === "organizer-envelope");
   assert.deepEqual(organizerEnvelope.fields, [
-    "agents", "deployment", "image", "key", "model", "prompt", "runId", "version",
+    "agentRuntime", "agents", "deployment", "image", "key", "model", "prompt", "runId", "version",
   ]);
   assert.equal(organizerEnvelope.deployment, "organizer-demo");
   assert.equal(organizerEnvelope.agents, 2);
@@ -896,12 +974,14 @@ test("internal-organize rejects exact envelope violations before Docker", async 
     agents: 1,
     key: `sk-or-v1-${"k".repeat(32)}`,
     model: "openrouter/deepseek/deepseek-v4-flash",
+    agentRuntime: "opencode",
     image: LOCAL_IMAGE_ID,
   };
   for (const [envelope, pattern] of [
     [{ ...base, extra: true }, /invalid shape|exactly/],
     [{ ...base, image: undefined }, /invalid shape|exactly/],
     [{ ...base, agents: 0 }, /controller envelope is invalid/],
+    [{ ...base, agentRuntime: "bogus" }, /controller envelope is invalid/],
   ]) {
     if (envelope.image === undefined) delete envelope.image;
     const result = await invoke([
@@ -945,6 +1025,7 @@ test("internal-run rejects an invalid or mismatched template digest before Docke
     task: "Build the application.",
     key: `sk-or-v1-${"k".repeat(32)}`,
     model: "openrouter/deepseek/deepseek-v4-flash",
+    agentRuntime: "opencode",
     image: LOCAL_IMAGE_ID,
     port: 8080,
     publicUrl: "http://example.invalid:8080",
@@ -975,6 +1056,7 @@ test("internal-pod-run rejects a mismatched packaged template before Git or Dock
     task: "Implement the fixed pod.",
     key: `sk-or-v1-${"k".repeat(32)}`,
     model: "openrouter/deepseek/deepseek-v4-flash",
+    agentRuntime: "opencode",
     image: LOCAL_IMAGE_ID,
     repository: "https://github.com/zaycruz/bimo.git",
     baseSha: POD_BASE_SHA,
@@ -1153,8 +1235,8 @@ test("pod deploy computes without GitHub authority then publishes one exact draf
   const computeEnvelope = entries.find(entry => entry.tool === "pod-compute-envelope");
   const publishEnvelope = entries.find(entry => entry.tool === "pod-publish-envelope");
   assert.deepEqual(computeEnvelope.fields, [
-    "baseSha", "deployment", "image", "key", "model", "repository", "runId", "targetBranch",
-    "task", "template", "templateDigest", "version",
+    "agentRuntime", "baseSha", "deployment", "image", "key", "model", "repository", "runId",
+    "targetBranch", "task", "template", "templateDigest", "version",
   ]);
   assert.deepEqual(publishEnvelope.fields, [
     "baseSha", "candidateSha", "headBranch", "repository", "runId", "targetBranch", "token", "version",

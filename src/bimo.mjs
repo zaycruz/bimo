@@ -13,6 +13,7 @@ import {
 import path from "node:path";
 import process from "node:process";
 
+import { AGENT_RUNTIME_NAMES, DEFAULT_AGENT_RUNTIME } from "./agent-runtime.mjs";
 import { DockerRuntime } from "./docker-runtime.mjs";
 import {
   builtInTargetCatalog,
@@ -68,16 +69,16 @@ const POD_DEPLOY_OPTIONS = [
 ];
 const ORGANIZE_OPTIONS = [
   "prompt", "agents", "deployment", "target", "proxmox", "host", "vmid",
-  "secret-ref", "account", "model", "image", "json",
+  "secret-ref", "account", "model", "image", "agent-runtime", "json",
 ];
 const DEPLOY_WORKFLOW_OPTIONS = [
   "deployment", "target", "proxmox", "host", "vmid", "task-file", "task-stdin",
-  "secret-ref", "account", "public-url", "port", "model", "image", "json",
+  "secret-ref", "account", "public-url", "port", "model", "image", "agent-runtime", "json",
 ];
 const DEPLOY_POD_OPTIONS = [
   "deployment", "target", "proxmox", "host", "vmid", "task-file", "task-stdin",
   "secret-ref", "github-secret-ref", "account", "repository", "base-sha",
-  "target-branch", "model", "image", "json",
+  "target-branch", "model", "image", "agent-runtime", "json",
 ];
 const DEPLOY_OPTIONS = [...new Set([...DEPLOY_WORKFLOW_OPTIONS, ...DEPLOY_POD_OPTIONS])];
 const DEPLOYMENT_LAYOUTS = {
@@ -532,16 +533,39 @@ function imageTransferTag(imageId) {
   return `bimo-transfer:${imageId.slice(7, 19)}-${randomUUID().replaceAll("-", "")}`;
 }
 
-async function prepareImage(target, image, { retag = true } = {}) {
+function defaultImageFor(agentRuntime) {
+  if (!AGENT_RUNTIME_NAMES.includes(agentRuntime)) fail("agent runtime is invalid");
+  return agentRuntime === DEFAULT_AGENT_RUNTIME ? DEFAULT_IMAGE : `${DEFAULT_IMAGE}-${agentRuntime}`;
+}
+
+function imageAgentRuntime(image) {
+  const entry = image.env.find(value => value.startsWith("BIMO_AGENT_RUNTIME="));
+  return entry === undefined ? null : entry.slice("BIMO_AGENT_RUNTIME=".length);
+}
+
+async function prepareImage(target, image, {
+  retag = true,
+  agentRuntime = DEFAULT_AGENT_RUNTIME,
+  agentRuntimeExplicit = false,
+} = {}) {
+  if (!AGENT_RUNTIME_NAMES.includes(agentRuntime)) fail("agent runtime is invalid");
   const platform = await targetPlatform(target);
-  const buildArgs = target.kind === "local"
-    ? ["build", "--tag", image, packageRoot]
-    : ["build", "--platform", platform, "--tag", image, packageRoot];
+  const buildArgs = [
+    "build",
+    ...(target.kind === "local" ? [] : ["--platform", platform]),
+    "--build-arg", `AGENT_RUNTIME=${agentRuntime}`,
+    "--tag", image,
+    packageRoot,
+  ];
   await execute("docker", buildArgs);
   const imageResult = await execute("docker", ["image", "inspect", image]);
   const localImage = parseImageInspect(imageResult.stdout, "local");
   if (localImage.platform !== platform) {
     fail(`built image platform ${localImage.platform} does not match target ${platform}`);
+  }
+  const builtRuntime = imageAgentRuntime(localImage);
+  if (builtRuntime !== agentRuntime && (agentRuntimeExplicit || builtRuntime !== null)) {
+    fail(`built image agent runtime ${builtRuntime ?? "unset"} does not match --agent-runtime ${agentRuntime}`);
   }
   if (target.kind === "local") {
     return { remoteImage: localImage, transferTag: null };
@@ -752,6 +776,9 @@ function parseImageInspect(raw, label) {
   return {
     imageId: value.Id,
     platform: `${value.Os}/${value.Architecture}`,
+    env: Array.isArray(normalizedConfig.Env)
+      ? normalizedConfig.Env.filter(entry => typeof entry === "string")
+      : [],
     contentFingerprint: createHash("sha256").update(canonicalJson(content)).digest("hex"),
   };
 }
@@ -884,7 +911,9 @@ async function deploy(template, options) {
   if (!options.deployment) fail("--deployment is required");
   if (!NAME.test(options.deployment)) fail("--deployment must use lowercase letters, numbers, and dashes");
   const deploymentTarget = resolveDeploymentTarget(options);
-  const image = options.image ?? DEFAULT_IMAGE;
+  const agentRuntime = options["agent-runtime"] ?? DEFAULT_AGENT_RUNTIME;
+  if (!AGENT_RUNTIME_NAMES.includes(agentRuntime)) fail("--agent-runtime must name a built-in agent runtime");
+  const image = options.image ?? defaultImageFor(agentRuntime);
   if (!IMAGE.test(image)) fail("--image is invalid");
   const model = options.model ?? DEFAULT_MODEL;
   if (!/^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/.test(model)) fail("--model is invalid");
@@ -923,7 +952,10 @@ async function deploy(template, options) {
       ? await resolveGitHubSecret(options["github-secret-ref"], options.account)
       : null;
     heartbeat?.setPhase("preparing image");
-    const prepared = await prepareImage(deploymentTarget, image);
+    const prepared = await prepareImage(deploymentTarget, image, {
+      agentRuntime,
+      agentRuntimeExplicit: options["agent-runtime"] !== undefined,
+    });
     const remoteImage = prepared.remoteImage;
     transferTag = prepared.transferTag;
     if (progress) {
@@ -955,6 +987,7 @@ async function deploy(template, options) {
         task,
         key: openRouterKey,
         model,
+        agentRuntime,
         image: remoteImage.imageId,
         repository: POD_REPOSITORY,
         baseSha: options["base-sha"],
@@ -1045,6 +1078,7 @@ async function deploy(template, options) {
         task,
         key: openRouterKey,
         model,
+        agentRuntime,
         image: remoteImage.imageId,
         port,
         publicUrl: publicUrl.toString().replace(/\/$/, ""),
@@ -1102,7 +1136,9 @@ async function organizeRemote(options, agentFlag = "--agents") {
   if (!/^[1-3]$/u.test(agentsText)) fail(`${agentFlag} must be an integer from 1 to 3`);
   const agents = Number(agentsText);
   if (!options["secret-ref"]) fail("--secret-ref is required");
-  const image = options.image ?? DEFAULT_IMAGE;
+  const agentRuntime = options["agent-runtime"] ?? DEFAULT_AGENT_RUNTIME;
+  if (!AGENT_RUNTIME_NAMES.includes(agentRuntime)) fail("--agent-runtime must name a built-in agent runtime");
+  const image = options.image ?? defaultImageFor(agentRuntime);
   if (!IMAGE.test(image)) fail("--image is invalid");
   const model = options.model ?? DEFAULT_MODEL;
   if (!/^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/.test(model)) fail("--model is invalid");
@@ -1120,7 +1156,11 @@ async function organizeRemote(options, agentFlag = "--agents") {
   try {
     let openRouterKey = await resolveSecret(options["secret-ref"], options.account);
     heartbeat?.setPhase("preparing image");
-    const prepared = await prepareImage(deploymentTarget, image, { retag: false });
+    const prepared = await prepareImage(deploymentTarget, image, {
+      retag: false,
+      agentRuntime,
+      agentRuntimeExplicit: options["agent-runtime"] !== undefined,
+    });
     const remoteImage = prepared.remoteImage;
     transferTag = prepared.transferTag;
     if (progress) {
@@ -1151,6 +1191,7 @@ async function organizeRemote(options, agentFlag = "--agents") {
       agents,
       key: openRouterKey,
       model,
+      agentRuntime,
       image: remoteImage.imageId,
     });
     openRouterKey = "";
@@ -1237,6 +1278,7 @@ export async function runController({
       workspace,
       runId,
       model: envelope.model,
+      agentRuntime: envelope.agentRuntime,
       imageDigest,
       deadlineAt,
       clock,
@@ -1341,7 +1383,7 @@ async function internalRun(options) {
   const raw = await readStdin(128 * 1024);
   let envelope;
   try { envelope = JSON.parse(raw); } catch { fail("invalid controller envelope"); }
-  const expected = ["version", "template", "templateDigest", "deployment", "task", "key", "model", "image", "port", "publicUrl", "runId"].sort();
+  const expected = ["version", "template", "templateDigest", "deployment", "task", "key", "model", "agentRuntime", "image", "port", "publicUrl", "runId"].sort();
   if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
       || Object.keys(envelope).sort().some((key, index) => key !== expected[index])
       || Object.keys(envelope).length !== expected.length) {
@@ -1350,6 +1392,7 @@ async function internalRun(options) {
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "") || !NAME.test(envelope.template ?? "")
       || !controllerHostRootIsValid(options["host-root"], envelope.deployment, options["local-home"])
       || !TEMPLATE_DIGEST.test(envelope.templateDigest ?? "") || !SHA256.test(envelope.image ?? "")
+      || !AGENT_RUNTIME_NAMES.includes(envelope.agentRuntime)
       || !RUN_ID.test(envelope.runId ?? "")) {
     fail("controller envelope is invalid");
   }
@@ -1362,6 +1405,7 @@ async function internalRun(options) {
     localHome: options["local-home"],
     key: envelope.key,
     model: envelope.model,
+    agentRuntime: envelope.agentRuntime,
     port: envelope.port,
     publicUrl: envelope.publicUrl,
   });
@@ -1418,7 +1462,7 @@ async function internalPrepare(options) {
 async function internalOrganize(options) {
   exactOptions(options, ["host-root", "local-home"]);
   const envelope = await readJsonEnvelope(128 * 1024, [
-    "version", "deployment", "runId", "prompt", "agents", "key", "model", "image",
+    "version", "deployment", "runId", "prompt", "agents", "key", "model", "agentRuntime", "image",
   ], "organizer controller");
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "")
       || !controllerHostRootIsValid(options["host-root"], envelope.deployment, options["local-home"])
@@ -1426,6 +1470,7 @@ async function internalOrganize(options) {
       || !Number.isInteger(envelope.agents) || envelope.agents < 1 || envelope.agents > 3
       || !/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(envelope.key ?? "")
       || !/^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/.test(envelope.model ?? "")
+      || !AGENT_RUNTIME_NAMES.includes(envelope.agentRuntime)
       || !SHA256.test(envelope.image ?? "")) {
     fail("organizer controller envelope is invalid");
   }
@@ -1444,6 +1489,7 @@ async function internalOrganize(options) {
     localHome: options["local-home"],
     key: envelope.key,
     model: envelope.model,
+    agentRuntime: envelope.agentRuntime,
     modelConcurrency: envelope.agents,
     modelRequestLimit: 100,
   });
@@ -1454,6 +1500,7 @@ async function internalOrganize(options) {
     catalog,
     baseInstructions,
     model: envelope.model,
+    agentRuntime: envelope.agentRuntime,
     runtime,
     runId: envelope.runId,
   });
@@ -1463,7 +1510,7 @@ async function internalOrganize(options) {
 async function internalPodRun(options) {
   exactOptions(options, ["host-root", "local-home"]);
   const envelope = await readJsonEnvelope(128 * 1024, [
-    "version", "template", "templateDigest", "deployment", "task", "key", "model", "image",
+    "version", "template", "templateDigest", "deployment", "task", "key", "model", "agentRuntime", "image",
     "repository", "baseSha", "targetBranch", "runId",
   ], "pod controller");
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "")
@@ -1474,6 +1521,7 @@ async function internalPodRun(options) {
       || Buffer.byteLength(envelope.task) > 64 * 1024
       || !/^sk-or-v1-[A-Za-z0-9_-]{32,}$/.test(envelope.key ?? "")
       || !/^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/.test(envelope.model ?? "")
+      || !AGENT_RUNTIME_NAMES.includes(envelope.agentRuntime)
       || !SHA256.test(envelope.image ?? "") || envelope.repository !== POD_REPOSITORY
       || !GIT_SHA.test(envelope.baseSha ?? "") || envelope.targetBranch !== POD_TARGET_BRANCH
       || !RUN_ID.test(envelope.runId ?? "")) {
@@ -1512,6 +1560,7 @@ async function internalPodRun(options) {
     localHome: options["local-home"],
     key: envelope.key,
     model: envelope.model,
+    agentRuntime: envelope.agentRuntime,
     modelConcurrency: Object.keys(loaded.template.writers).length,
     modelRequestLimit: 300,
   });
