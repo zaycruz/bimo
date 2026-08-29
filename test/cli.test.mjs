@@ -1103,6 +1103,7 @@ test("internal-pod-run rejects a mismatched packaged template before Git or Dock
     repository: "https://github.com/zaycruz/bimo.git",
     baseSha: POD_BASE_SHA,
     targetBranch: "main",
+    cloneToken: null,
     runId: "pod-run-1",
   };
   const result = await invoke([
@@ -1111,6 +1112,37 @@ test("internal-pod-run rejects a mismatched packaged template before Git or Dock
   ], { input: JSON.stringify(envelope) });
   assert.equal(result.code, 1);
   assert.match(result.stderr, /template digest does not match/);
+});
+
+test("internal-pod-run validates the clone credential envelope field", async () => {
+  const envelope = {
+    version: 1,
+    template: "parallel-engineering-pod",
+    templateDigest: "0".repeat(64),
+    deployment: "pod-demo",
+    task: "Implement the fixed pod.",
+    key: `sk-or-v1-${"k".repeat(32)}`,
+    model: "openrouter/deepseek/deepseek-v4-flash",
+    agentRuntime: "opencode",
+    image: LOCAL_IMAGE_ID,
+    repository: "https://github.com/zaycruz/bimo.git",
+    baseSha: POD_BASE_SHA,
+    targetBranch: "main",
+    runId: "pod-run-1",
+  };
+  for (const [patch, pattern, label] of [
+    [{}, /pod controller envelope has an invalid shape/, "missing cloneToken"],
+    [{ cloneToken: "not-a-token" }, /pod controller envelope is invalid/, "malformed cloneToken"],
+    [{ cloneToken: 42 }, /pod controller envelope is invalid/, "non-string cloneToken"],
+  ]) {
+    const candidate = { ...envelope, ...patch };
+    const result = await invoke([
+      "internal-pod-run",
+      "--host-root", "/var/lib/bimo/deployments/pod-demo",
+    ], { input: JSON.stringify(candidate) });
+    assert.equal(result.code, 1, label);
+    assert.match(result.stderr, pattern, label);
+  }
 });
 
 test("internal-publish validates the repository and branch shapes, not a fixed repository", async () => {
@@ -1209,6 +1241,51 @@ test("pod deploy rejects invalid repository URLs and branch names before any Doc
     assert.equal(result.code, 1);
     assert.match(result.stderr, pattern);
   }
+});
+
+test("pod deploy brokers an optional read-scoped clone credential into the compute envelope", async t => {
+  const tools = await fakeDeployTools(t, { controller: "pod-success" });
+  const result = await invoke([
+    ...podDeployArgs(tools.taskFile),
+    "--clone-secret-ref", "op://Test/Bimo clone/github",
+  ], { env: tools.env });
+  assert.equal(result.code, 0, result.stderr);
+
+  const entries = await readCommandLog(tools.logFile);
+  const computeEnvelope = entries.find(entry => entry.tool === "pod-compute-envelope");
+  assert.ok(computeEnvelope.fields.includes("cloneToken"));
+  const cloneIndex = entries.findIndex(entry => entry.tool === "op"
+    && entry.reference === "op://Test/Bimo clone/github");
+  assert.ok(cloneIndex >= 0 && cloneIndex < entries.indexOf(computeEnvelope));
+  const serializedLog = JSON.stringify(entries);
+  assert.equal(serializedLog.includes(`github_pat_${"g".repeat(64)}`), false);
+});
+
+test("pod deploy rejects an invalid clone secret reference before any Docker work", async t => {
+  const tools = await fakeDeployTools(t);
+  for (const [reference, pattern] of [
+    ["not-an-op-reference", /--clone-secret-ref must be a 1Password op:\/\/ reference/],
+    ["op://Test/Bimo/openrouter", /did not resolve to a GitHub token/],
+  ]) {
+    const result = await invoke([
+      ...podDeployArgs(tools.taskFile),
+      "--clone-secret-ref", reference,
+    ], { env: tools.env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, pattern);
+  }
+  const entries = await readCommandLog(tools.logFile);
+  assert.equal(entries.some(entry => entry.tool === "ssh"), false);
+});
+
+test("workflow deploys reject the pod-only clone secret flag", async t => {
+  const tools = await fakeDeployTools(t);
+  const result = await invoke([
+    ...deployArgs(tools.taskFile),
+    "--clone-secret-ref", "op://Test/Bimo clone/github",
+  ], { env: tools.env });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /unknown option: --clone-secret-ref/);
 });
 
 test("deploy rejects image shell syntax before local execution", async () => {
@@ -1358,7 +1435,7 @@ test("pod deploy computes without GitHub authority then publishes one exact draf
   const computeEnvelope = entries.find(entry => entry.tool === "pod-compute-envelope");
   const publishEnvelope = entries.find(entry => entry.tool === "pod-publish-envelope");
   assert.deepEqual(computeEnvelope.fields, [
-    "agentRuntime", "baseSha", "deployment", "image", "key", "model", "repository", "runId",
+    "agentRuntime", "baseSha", "cloneToken", "deployment", "image", "key", "model", "repository", "runId",
     "targetBranch", "task", "template", "templateDigest", "version",
   ]);
   assert.deepEqual(publishEnvelope.fields, [

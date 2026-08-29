@@ -774,3 +774,143 @@ test("aborts an injected Git command at the absolute deadline and waits for sett
   assert.ok(Date.now() - startedAt < 1_000);
   await runtime.close({ deadlineAt: futureDeadline() });
 });
+
+test("validates the clone credential shape at construction", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-git-clone-cred-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const base = {
+    allowedRepositories: [REPOSITORY],
+    gitRoot: path.join(temporary, "controller"),
+    snapshotsRoot: path.join(temporary, "snapshots"),
+    worktreesRoot: path.join(temporary, "worktrees"),
+    runId: "run-1",
+    allowedWriteRoots: {
+      "engineering-a": ["src"],
+      "engineering-b": ["templates"],
+      "qa-tests": ["test"],
+    },
+  };
+  const token = `github_pat_${"c".repeat(64)}`;
+  for (const cloneCredential of [
+    token,
+    {},
+    { token: "not-a-token" },
+    { token, extra: true },
+    { token: `ghp_${"c".repeat(64)}`, other: token },
+  ]) {
+    assert.throws(() => new GitRuntime({ ...base, cloneCredential }), /cloneCredential/);
+  }
+  assert.throws(() => new GitRuntime({
+    ...base,
+    cloneSource: pathToFileURL(temporary).href,
+    allowLocalRepository: true,
+    cloneCredential: { token },
+  }), /cloneCredential is not allowed with allowLocalRepository/);
+  const runtime = new GitRuntime({ ...base, cloneCredential: { token } });
+  await runtime.close({ deadlineAt: futureDeadline() });
+});
+
+test("brokers the clone credential through askpass only for the clone", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-git-clone-cred-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const token = `github_pat_${"c".repeat(64)}`;
+  const baseSha = "a".repeat(40);
+  const bareRoot = path.join(temporary, "controller", "repository.git");
+  const calls = [];
+  let tokenFile = null;
+  let tokenFileContent = null;
+  const runner = async (command, args, options = {}) => {
+    calls.push({ command, args, env: options.env ?? {} });
+    if (args.includes("clone")) {
+      tokenFile = options.env?.BIMO_GIT_TOKEN_FILE ?? null;
+      tokenFileContent = tokenFile === null ? null : await readFile(tokenFile, "utf8");
+      await mkdir(bareRoot, { recursive: true, mode: 0o700 });
+      return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
+    }
+    if (args.includes("--show-object-format")) {
+      return { stdout: Buffer.from("sha1\n"), stderr: Buffer.alloc(0), exitCode: 0 };
+    }
+    if (args.includes("rev-parse")) {
+      return { stdout: Buffer.from(`${baseSha}\n`), stderr: Buffer.alloc(0), exitCode: 0 };
+    }
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
+  };
+  const runtime = new GitRuntime({
+    allowedRepositories: [REPOSITORY],
+    gitRoot: path.join(temporary, "controller"),
+    snapshotsRoot: path.join(temporary, "snapshots"),
+    worktreesRoot: path.join(temporary, "worktrees"),
+    runId: "run-1",
+    allowedWriteRoots: {
+      "engineering-a": ["src"],
+      "engineering-b": ["templates"],
+      "qa-tests": ["test"],
+    },
+    runner,
+    cloneCredential: { token },
+  });
+  const prepared = await runtime.prepareAssignment({
+    repository: REPOSITORY,
+    baseRevision: baseSha,
+    targetBranch: "main",
+    deadlineAt: futureDeadline(),
+  });
+  assert.equal(prepared.baseSha, baseSha);
+
+  const cloneCall = calls.find(call => call.args.includes("clone"));
+  assert.ok(cloneCall, "clone was not run");
+  assert.equal(cloneCall.args[cloneCall.args.indexOf("--") + 1], REPOSITORY);
+  assert.equal(JSON.stringify(cloneCall.args).includes(token), false);
+  assert.equal(cloneCall.env.GIT_ASKPASS_REQUIRE, "force");
+  assert.match(cloneCall.env.GIT_ASKPASS, /bin\/bimo-git-askpass$/u);
+  assert.ok(tokenFile, "clone call did not receive a token file");
+  assert.equal(tokenFileContent, `${token}\n`);
+  await assert.rejects(lstat(tokenFile), { code: "ENOENT" });
+  await assert.rejects(lstat(path.dirname(tokenFile)), { code: "ENOENT" });
+
+  for (const call of calls.filter(entry => !entry.args.includes("clone"))) {
+    assert.equal(call.env.GIT_ASKPASS, "/bin/false");
+    assert.equal(Object.hasOwn(call.env, "GIT_ASKPASS_REQUIRE"), false);
+    assert.equal(Object.hasOwn(call.env, "BIMO_GIT_TOKEN_FILE"), false);
+    assert.equal(JSON.stringify(call.env).includes(token), false);
+  }
+  await runtime.close({ deadlineAt: futureDeadline() });
+});
+
+test("removes the clone credential when the clone fails", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "bimo-git-clone-cred-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const token = `github_pat_${"c".repeat(64)}`;
+  let tokenFile = null;
+  const runner = async (command, args, options = {}) => {
+    if (args.includes("clone")) {
+      tokenFile = options.env?.BIMO_GIT_TOKEN_FILE ?? null;
+      throw new Error("clone failed");
+    }
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
+  };
+  const runtime = new GitRuntime({
+    allowedRepositories: [REPOSITORY],
+    gitRoot: path.join(temporary, "controller"),
+    snapshotsRoot: path.join(temporary, "snapshots"),
+    worktreesRoot: path.join(temporary, "worktrees"),
+    runId: "run-1",
+    allowedWriteRoots: {
+      "engineering-a": ["src"],
+      "engineering-b": ["templates"],
+      "qa-tests": ["test"],
+    },
+    runner,
+    cloneCredential: { token },
+  });
+  await assert.rejects(runtime.prepareAssignment({
+    repository: REPOSITORY,
+    baseRevision: "a".repeat(40),
+    targetBranch: "main",
+    deadlineAt: futureDeadline(),
+  }), /clone failed/);
+  assert.ok(tokenFile, "clone call did not receive a token file");
+  await assert.rejects(lstat(tokenFile), { code: "ENOENT" });
+  await assert.rejects(lstat(path.dirname(tokenFile)), { code: "ENOENT" });
+  await runtime.close({ deadlineAt: futureDeadline() });
+});

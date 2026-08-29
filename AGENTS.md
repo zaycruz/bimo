@@ -9,7 +9,7 @@ orientation: verification loop, hard rules, PR flow, and the design docs.
 Node.js 22+. No install step; there is nothing to install.
 
 ```sh
-npm test            # full suite: node --test test/*.test.mjs (271 tests)
+npm test            # full suite: node --test test/*.test.mjs (301 tests)
 for f in bin/bimo src/*.mjs test/*.mjs; do node --check "$f"; done
 npm pack --dry-run  # verify the package manifest and shipped file set
 ```
