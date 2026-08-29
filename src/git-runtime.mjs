@@ -13,6 +13,7 @@ import {
   rename,
   rm,
   rmdir,
+  writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -39,6 +40,8 @@ const MAX_SCAN_BLOB_BYTES = 16 * 1024 * 1024;
 const MAX_INSPECT_FILE_BYTES = 32 * 1024 * 1024;
 const MAX_REACHABLE_COMMITS = 100;
 const MAX_REACHABLE_TREE_ENTRIES = 200_000;
+const CLONE_TOKEN = /^(?:github_pat_[A-Za-z0-9_]{20,}|gh[psoru]_[A-Za-z0-9]{20,})$/u;
+const ASKPASS_PROGRAM = path.resolve(import.meta.dirname, "..", "bin", "bimo-git-askpass");
 const SECRET_PATTERNS = Object.freeze([
   /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/u,
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/u,
@@ -424,6 +427,7 @@ export class GitRuntime {
   #bareRoot;
   #branchHeads = new Map();
   #cloneSource;
+  #cloneToken = null;
   #closed = false;
   #command;
   #environment;
@@ -450,6 +454,7 @@ export class GitRuntime {
     allowedRepositories,
     allowedWriteRoots,
     cloneSource,
+    cloneCredential,
     allowLocalRepository = false,
     gitRoot,
     snapshotsRoot,
@@ -533,6 +538,16 @@ export class GitRuntime {
         fail("invalid local cloneSource");
       }
       this.#cloneSource = cloneSource;
+    }
+    if (cloneCredential !== undefined) {
+      if (allowLocalRepository) fail("cloneCredential is not allowed with allowLocalRepository");
+      if (!isPlainObject(cloneCredential)
+          || Object.keys(cloneCredential).join("\0") !== "token"
+          || !CLONE_TOKEN.test(cloneCredential.token ?? "")) {
+        fail("cloneCredential must contain exactly one GitHub token");
+      }
+      this.#cloneToken = cloneCredential.token;
+      Object.freeze(cloneCredential);
     }
     const currentUid = typeof process.getuid === "function" ? process.getuid() : 0;
     const currentGid = typeof process.getgid === "function" ? process.getgid() : 0;
@@ -704,6 +719,46 @@ export class GitRuntime {
     return runRoot;
   }
 
+  async #createCloneCredential(deadlineAt) {
+    const program = await lstat(ASKPASS_PROGRAM).catch(() => null);
+    if (!program?.isFile() || program.isSymbolicLink()
+        || (program.mode & 0o100) === 0 || (program.mode & 0o022) !== 0) {
+      fail("baked askpass program is invalid");
+    }
+    const token = this.#cloneToken;
+    const tokenBytes = Buffer.byteLength(`${token}\n`);
+    const directory = await checked(deadlineAt, () => mkdtemp(path.join(this.#gitRoot, "clone-credential-")));
+    const tokenFile = path.join(directory, "token");
+    let cleaned = false;
+    const cleanup = async () => {
+      if (cleaned) return;
+      cleaned = true;
+      try {
+        if (await lstat(tokenFile).catch(() => null)) {
+          await writeFile(tokenFile, Buffer.alloc(tokenBytes), { mode: 0o600 });
+        }
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    };
+    try {
+      await checked(deadlineAt, () => chmod(directory, 0o700));
+      await checked(deadlineAt, () => writeFile(tokenFile, `${token}\n`, { flag: "wx", mode: 0o600 }));
+      await checked(deadlineAt, () => chmod(tokenFile, 0o600));
+    } catch (error) {
+      await cleanup().catch(() => {});
+      throw error;
+    }
+    return Object.freeze({
+      environment: Object.freeze({
+        GIT_ASKPASS: ASKPASS_PROGRAM,
+        GIT_ASKPASS_REQUIRE: "force",
+        BIMO_GIT_TOKEN_FILE: tokenFile,
+      }),
+      cleanup,
+    });
+  }
+
   async prepareAssignment({ repository, baseRevision, targetBranch, deadlineAt }) {
     requireDeadline(deadlineAt);
     if (this.#prepared !== undefined) fail("assignment is already prepared");
@@ -717,11 +772,27 @@ export class GitRuntime {
     await this.#claimRunDirectory(this.#snapshotsRoot, "snapshot", deadlineAt);
     this.#snapshotsRunOwned = true;
     const source = this.#cloneSource ?? canonical;
-    await this.#run([
-      "-c", "http.followRedirects=false",
-      "-c", `protocol.file.allow=${this.#allowLocalRepository ? "always" : "never"}`,
-      "clone", "--bare", "--no-tags", "--", source, this.#bareRoot,
-    ], { deadlineAt, cwd: this.#gitRoot });
+    let cloneEnvironment;
+    let cloneCredentialCleanup;
+    if (this.#cloneToken !== null) {
+      const credential = await this.#createCloneCredential(deadlineAt);
+      cloneEnvironment = credential.environment;
+      cloneCredentialCleanup = credential.cleanup;
+    }
+    try {
+      await this.#run([
+        "-c", "http.followRedirects=false",
+        "-c", `protocol.file.allow=${this.#allowLocalRepository ? "always" : "never"}`,
+        "clone", "--bare", "--no-tags", "--", source, this.#bareRoot,
+      ], {
+        deadlineAt,
+        cwd: this.#gitRoot,
+        ...(cloneEnvironment === undefined ? {} : { environment: cloneEnvironment }),
+      });
+    } finally {
+      if (cloneCredentialCleanup !== undefined) await cloneCredentialCleanup();
+    }
+    this.#cloneToken = null;
     await checked(deadlineAt, () => chmod(this.#bareRoot, 0o700));
     const bareMetadata = await checked(deadlineAt, () => lstat(this.#bareRoot));
     const resolvedGitRoot = await checked(deadlineAt, () => realpath(this.#gitRoot));
@@ -1923,6 +1994,7 @@ export class GitRuntime {
 
   async close({ retainForPublication = false, deadlineAt } = {}) {
     if (this.#closed) return;
+    this.#cloneToken = null;
     if (typeof retainForPublication !== "boolean") fail("retainForPublication must be a boolean");
     const cleanupDeadline = Number.isSafeInteger(deadlineAt) && deadlineAt > Date.now()
       ? deadlineAt

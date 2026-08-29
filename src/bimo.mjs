@@ -66,7 +66,7 @@ const WORKFLOW_DEPLOY_OPTIONS = [
 ];
 const POD_DEPLOY_OPTIONS = [
   "--deployment", "--target", "--host", "--proxmox", "--vmid", "--task-file", "--task-stdin",
-  "--secret-ref", "--github-secret-ref", "--repository", "--base-sha", "--target-branch",
+  "--secret-ref", "--github-secret-ref", "--clone-secret-ref", "--repository", "--base-sha", "--target-branch",
 ];
 const ORGANIZE_OPTIONS = [
   "prompt", "agents", "deployment", "target", "proxmox", "host", "vmid",
@@ -78,7 +78,7 @@ const DEPLOY_WORKFLOW_OPTIONS = [
 ];
 const DEPLOY_POD_OPTIONS = [
   "deployment", "target", "proxmox", "host", "vmid", "task-file", "task-stdin",
-  "secret-ref", "github-secret-ref", "account", "repository", "base-sha",
+  "secret-ref", "github-secret-ref", "clone-secret-ref", "account", "repository", "base-sha",
   "target-branch", "model", "image", "agent-runtime", "json",
 ];
 const DEPLOY_OPTIONS = [...new Set([...DEPLOY_WORKFLOW_OPTIONS, ...DEPLOY_POD_OPTIONS])];
@@ -925,6 +925,15 @@ async function resolveGitHubSecret(reference, account) {
   return secret;
 }
 
+async function resolveCloneSecret(reference, account) {
+  if (!SECRET_REF.test(reference ?? "")) {
+    fail("--clone-secret-ref must be a 1Password op:// reference");
+  }
+  const secret = await opRead(reference, account, "--clone-secret-ref");
+  if (!GITHUB_TOKEN.test(secret)) fail("1Password reference did not resolve to a GitHub token");
+  return secret;
+}
+
 async function deploy(template, options) {
   const loaded = await loadTemplate(template);
   const pod = loaded.kind === "engineering-pod";
@@ -978,6 +987,9 @@ async function deploy(template, options) {
     let githubToken = pod
       ? await resolveGitHubSecret(options["github-secret-ref"], options.account)
       : null;
+    let cloneToken = pod && options["clone-secret-ref"]
+      ? await resolveCloneSecret(options["clone-secret-ref"], options.account)
+      : null;
     heartbeat?.setPhase("preparing image");
     const prepared = await prepareImage(deploymentTarget, image, {
       agentRuntime,
@@ -1019,9 +1031,11 @@ async function deploy(template, options) {
         repository,
         baseSha: options["base-sha"],
         targetBranch,
+        cloneToken,
         runId,
       });
       openRouterKey = "";
+      cloneToken = null;
       const controllerName = `bimo-${options.deployment}-controller`;
       const compute = await targetExecute(deploymentTarget, [
         "docker", "run", "--pull=never", "--rm", "-i",
@@ -1542,7 +1556,7 @@ async function internalPodRun(options) {
   exactOptions(options, ["host-root", "local-home"]);
   const envelope = await readJsonEnvelope(128 * 1024, [
     "version", "template", "templateDigest", "deployment", "task", "key", "model", "agentRuntime", "image",
-    "repository", "baseSha", "targetBranch", "runId",
+    "repository", "baseSha", "targetBranch", "cloneToken", "runId",
   ], "pod controller");
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "")
       || !controllerHostRootIsValid(options["host-root"], envelope.deployment, options["local-home"])
@@ -1555,6 +1569,7 @@ async function internalPodRun(options) {
       || !AGENT_RUNTIME_NAMES.includes(envelope.agentRuntime)
       || !SHA256.test(envelope.image ?? "") || !validPodRepository(envelope.repository)
       || !GIT_SHA.test(envelope.baseSha ?? "") || !validTargetBranch(envelope.targetBranch)
+      || !(envelope.cloneToken === null || GITHUB_TOKEN.test(envelope.cloneToken ?? ""))
       || !RUN_ID.test(envelope.runId ?? "")) {
     fail("pod controller envelope is invalid");
   }
@@ -1572,7 +1587,9 @@ async function internalPodRun(options) {
     worktreesRoot: "/worktrees",
     snapshotsRoot: "/snapshots",
     runId: envelope.runId,
+    cloneCredential: envelope.cloneToken === null ? undefined : { token: envelope.cloneToken },
   });
+  envelope.cloneToken = null;
   await prunePodRuns({ stateRoot: "/state", keepTerminalRuns: 20 });
   const store = await createPodRunStore({
     stateRoot: "/state",
@@ -2606,7 +2623,7 @@ function usage() {
   bimo organize -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
   bimo -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
   bimo deploy TEMPLATE --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
-  bimo deploy parallel-engineering-pod --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --base-sha SHA [--repository URL] [--target-branch BRANCH] [--json]
+  bimo deploy parallel-engineering-pod --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --github-secret-ref op://VAULT/ITEM/FIELD --base-sha SHA [--clone-secret-ref op://VAULT/ITEM/FIELD] [--repository URL] [--target-branch BRANCH] [--json]
   bimo logs --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json] [--follow]
   bimo runs --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--json]
   bimo status --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json]

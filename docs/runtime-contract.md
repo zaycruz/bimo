@@ -104,7 +104,9 @@ platform cannot express one, the adapter is not supported.
   run-scoped gateway. It never appears in argv, environment, workflow JSON,
   prompts, logs, or the shared workspace. The adapter's transport must
   preserve this: no credential in an API payload that the platform logs or
-  persists.
+  persists. The compute phase may additionally hold a read-only clone
+  credential, brokered to the initial clone through an isolated askpass
+  helper and erased afterwards; it is never visible to agents.
 - **Deterministic receipts.** Image digests, execution receipts, artifact
   receipts, and verifier evidence are exact-shape, hash-bound values the
   controller validates (`validateArtifactReceipt`,

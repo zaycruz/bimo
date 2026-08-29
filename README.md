@@ -346,6 +346,12 @@ The Planner, checker, QA, and Testing receipts are advisory model judgments.
 The separate `bimo-repo-v1` profile and source scan are controller-owned
 gates bound to the exact integrated commit.
 
+Compute holds no GitHub authority. The single, optional exception is a
+read-scoped clone credential (`--clone-secret-ref`) for private repositories:
+it reaches only the controller's initial clone through an isolated askpass
+helper, is erased immediately after the clone, and is never visible to
+agents, present in the clone URL, or retained in the cloned repository.
+
 After those gates pass, compute stops. A separate publisher receives the GitHub
 credential, rechecks the allowlisted base and candidate SHAs, pushes the fixed
 `bimo/<run-id>` branch, and opens a draft pull request. It has no Docker
@@ -512,7 +518,10 @@ project with sources under `src/`, baseline tests in `test/*.test.mjs`, and an
 currently expected at the target branch; publication fails closed if the
 branch moves. The two secret references must resolve to separate,
 least-privilege credentials, and the GitHub token must have content and
-pull-request access to the target repository.
+pull-request access to the target repository. Cloning a private repository
+additionally needs `--clone-secret-ref`, a separate read-scoped fine-grained
+token with contents read-only access to that repository; public repositories
+need nothing extra. Publication still uses only `--github-secret-ref`.
 
 Read the pod's structured events using the run ID returned by deploy:
 
@@ -599,7 +608,8 @@ options cannot be mixed. Deploy also accepts exactly one task source
 requires `--deployment` and `--secret-ref`. Sequential workflows also require
 `--public-url`. The pod instead requires `--github-secret-ref` and an immutable
 `--base-sha`; `--repository` and `--target-branch` are optional and default to
-the Bimo repository and `main`.
+the Bimo repository and `main`, and `--clone-secret-ref` is an optional
+read-scoped token used only to clone a private repository.
 
 Optional shared flags are `--account`, `--model`, `--image`, `--agent-runtime`,
 and `--json`; sequential deploys also accept `--port`. `logs` accepts `--run`,
