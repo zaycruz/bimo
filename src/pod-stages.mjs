@@ -1,0 +1,15 @@
+export const POD_STAGES = Object.freeze([
+  "planner",
+  "engineering-a",
+  "engineering-b",
+  "qa-tests",
+  "checker-engineering-a",
+  "checker-engineering-b",
+  "checker-qa-tests",
+  "integration",
+  "qa",
+  "testing",
+  "trusted-verification",
+  "pre-publication-scan",
+  "draft-pr-publication",
+]);
