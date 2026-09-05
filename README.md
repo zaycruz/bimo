@@ -255,6 +255,10 @@ aborts active Docker commands before cleanup. Cleanup and rollback use a short,
 separate bounded margin so deadline expiry does not strand an attempted
 replacement.
 
+The source verifier gives each command process group 250 ms to stop after a
+timeout or output-limit breach, then sends SIGKILL to that group even if its
+leader has already exited. Gate completion includes this cleanup margin.
+
 ### Receipts are not verification
 
 Every role must write `/handoff/result.json` with exactly these fields:

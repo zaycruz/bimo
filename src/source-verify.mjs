@@ -40,7 +40,7 @@ function safeEnvironment() {
 }
 
 function terminateGroup(child, signal) {
-  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+  if (!child?.pid) return;
   try { process.kill(-child.pid, signal); } catch {}
 }
 
@@ -56,12 +56,17 @@ function executeFixed({ command, args, cwd, signal, maxOutputBytes }) {
     const stderr = [];
     let bytes = 0;
     let exceeded = false;
-    let killTimer;
+    let termination;
 
     const terminate = () => {
+      if (termination) return;
       terminateGroup(child, "SIGTERM");
-      killTimer ??= setTimeout(() => terminateGroup(child, "SIGKILL"), KILL_GRACE_MS);
-      killTimer.unref();
+      // A group leader can exit before descendants release inherited pipes.
+      // Complete escalation even after close, before reporting the gate result.
+      termination = new Promise(done => setTimeout(() => {
+        terminateGroup(child, "SIGKILL");
+        done();
+      }, KILL_GRACE_MS));
     };
     const onAbort = () => terminate();
     const collect = target => chunk => {
@@ -77,14 +82,14 @@ function executeFixed({ command, args, cwd, signal, maxOutputBytes }) {
     else signal.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
-    child.once("error", error => {
-      clearTimeout(killTimer);
+    child.once("error", async error => {
       signal.removeEventListener("abort", onAbort);
+      await termination;
       reject(error);
     });
-    child.once("close", code => {
-      clearTimeout(killTimer);
+    child.once("close", async code => {
       signal.removeEventListener("abort", onAbort);
+      await termination;
       resolve({
         code: exceeded ? 125 : code,
         stdout: Buffer.concat(stdout).toString("utf8"),
@@ -224,15 +229,7 @@ async function checkedWorkspace(workspaceRoot) {
   return resolved;
 }
 
-export async function verifySourceCandidate({
-  workspaceRoot,
-  expectedSha,
-  expectedSnapshot,
-  profile,
-  suite,
-  timeoutSeconds,
-  runCommand = executeFixed,
-}) {
+function validateVerificationOptions({ expectedSha, expectedSnapshot, profile, suite, timeoutSeconds, runCommand }) {
   if (!SHA.test(expectedSha ?? "")) fail("expected SHA is invalid");
   if (profile !== PROFILE) fail("source verification profile is invalid");
   if (suite !== "candidate" && suite !== "baseline") fail("source verification suite is invalid");
@@ -243,71 +240,90 @@ export async function verifySourceCandidate({
     fail("source verification timeout is invalid");
   }
   if (typeof runCommand !== "function") fail("source command runner is invalid");
-  const cwd = await checkedWorkspace(workspaceRoot);
-  const deadlineAt = Date.now() + timeoutSeconds * 1_000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutSeconds * 1_000);
+}
 
-  const run = async ({ command, args }) => {
-    if (controller.signal.aborted || Date.now() >= deadlineAt) fail("source verification timed out");
+function commandRunner({ runCommand, cwd, signal, deadlineAt }) {
+  return async ({ command, args }) => {
+    if (signal.aborted || Date.now() >= deadlineAt) fail("source verification timed out");
     try {
       const result = validateCommandResult(await runCommand({
         command,
         args: [...args],
         cwd,
-        signal: controller.signal,
+        signal,
         deadlineAt,
         maxOutputBytes: MAX_OUTPUT_BYTES,
       }));
-      if (controller.signal.aborted || Date.now() >= deadlineAt) fail("source verification timed out");
+      if (signal.aborted || Date.now() >= deadlineAt) fail("source verification timed out");
       return result;
     } catch (error) {
-      if (controller.signal.aborted || Date.now() >= deadlineAt) fail("source verification timed out");
+      if (signal.aborted || Date.now() >= deadlineAt) fail("source verification timed out");
       throw error;
     }
   };
+}
 
+async function baselineEvidence(cwd, run) {
+  const files = await baselineTests(cwd);
+  const result = await run({ command: "node", args: ["--test", ...files] });
+  if (result.code !== 0) fail(`source gate baseline regression exited ${result.code}`);
+  return [{
+    authority: "trusted",
+    command: `node --test ${files.length} baseline files`,
+    outputSha256: outputDigest(result),
+  }];
+}
+
+async function candidateEvidence(cwd, run) {
+  const sourceFiles = await sourceFilesForSyntax(cwd);
+  const syntaxHash = createHash("sha256");
+  for (const sourceFile of sourceFiles) {
+    const result = await run({ command: "node", args: ["--check", sourceFile] });
+    if (result.code !== 0) fail(`source gate node --check exited ${result.code}`);
+    syntaxHash.update(`${sourceFile}\0${outputDigest(result)}\0`);
+  }
+  const evidence = [{
+    authority: "trusted",
+    command: `node --check ${sourceFiles.length} source files`,
+    outputSha256: syntaxHash.digest("hex"),
+  }];
+  for (const gate of GATES) {
+    const result = await run(gate);
+    const label = `${gate.command} ${gate.args.join(" ")}`;
+    if (result.code !== 0) fail(`source gate ${label} exited ${result.code}`);
+    evidence.push({
+      authority: "advisory",
+      command: label,
+      outputSha256: outputDigest(result),
+    });
+  }
+  return evidence;
+}
+
+export async function verifySourceCandidate({
+  workspaceRoot,
+  expectedSha,
+  expectedSnapshot,
+  profile,
+  suite,
+  timeoutSeconds,
+  runCommand = executeFixed,
+}) {
+  validateVerificationOptions({ expectedSha, expectedSnapshot, profile, suite, timeoutSeconds, runCommand });
+  const cwd = await checkedWorkspace(workspaceRoot);
+  const deadlineAt = Date.now() + timeoutSeconds * 1_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutSeconds * 1_000);
+  const run = commandRunner({ runCommand, cwd, signal: controller.signal, deadlineAt });
   try {
     let snapshot;
     if (suite === "candidate") {
       snapshot = await scanSourceSnapshot(cwd);
       if (!sameSnapshot(snapshot, expectedSnapshot)) fail("source snapshot does not match its trusted receipt");
     }
-
-    const evidence = [];
-    if (suite === "baseline") {
-      const files = await baselineTests(cwd);
-      const result = await run({ command: "node", args: ["--test", ...files] });
-      if (result.code !== 0) fail(`source gate baseline regression exited ${result.code}`);
-      evidence.push({
-        authority: "trusted",
-        command: `node --test ${files.length} baseline files`,
-        outputSha256: outputDigest(result),
-      });
-    } else {
-      const sourceFiles = await sourceFilesForSyntax(cwd);
-      const syntaxHash = createHash("sha256");
-      for (const sourceFile of sourceFiles) {
-        const result = await run({ command: "node", args: ["--check", sourceFile] });
-        if (result.code !== 0) fail(`source gate node --check exited ${result.code}`);
-        syntaxHash.update(`${sourceFile}\0${outputDigest(result)}\0`);
-      }
-      evidence.push({
-        authority: "trusted",
-        command: `node --check ${sourceFiles.length} source files`,
-        outputSha256: syntaxHash.digest("hex"),
-      });
-      for (const gate of GATES) {
-        const result = await run(gate);
-        const label = `${gate.command} ${gate.args.join(" ")}`;
-        if (result.code !== 0) fail(`source gate ${label} exited ${result.code}`);
-        evidence.push({
-          authority: "advisory",
-          command: label,
-          outputSha256: outputDigest(result),
-        });
-      }
-    }
+    const evidence = suite === "baseline"
+      ? await baselineEvidence(cwd, run)
+      : await candidateEvidence(cwd, run);
     return {
       status: "passed",
       candidateSha: expectedSha,

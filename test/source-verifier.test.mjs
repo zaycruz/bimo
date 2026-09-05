@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { scanSourceSnapshot, verifySourceCandidate } from "../src/source-verify.mjs";
 
@@ -222,4 +223,73 @@ test("the production runner executes the fixed candidate profile with a sanitize
   assert.deepEqual(receipt.snapshot, expectedSnapshot);
   assert.equal(receipt.evidence[0].authority, "trusted");
   assert(receipt.evidence.some(item => item.command === "npm test" && item.authority === "advisory"));
+});
+
+
+test("deadline kills descendants even after the command group leader exits", { timeout: 10_000 }, async t => {
+  const workspaceRoot = await temporaryWorkspace(t);
+  const pidFile = path.join(workspaceRoot, "descendant.pid");
+  const markerFile = path.join(workspaceRoot, "survived.txt");
+  const descendant = `
+    const { writeFileSync } = require("node:fs");
+    process.on("SIGTERM", () => {
+      setTimeout(() => writeFileSync(${JSON.stringify(markerFile)}, "survived"), 500);
+    });
+    writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+    setInterval(() => {}, 1000);
+  `;
+  // Candidate code can retain the output pipes after its parent exits.
+  await writeFile(path.join(workspaceRoot, "test", "base.test.mjs"), `
+    import { spawn } from "node:child_process";
+    spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { stdio: "inherit" });
+    process.on("SIGTERM", () => process.exit(0));
+    setInterval(() => {}, 1000);
+  `);
+  // Bound the regression independently so old code fails without leaking a process.
+  const cleanup = async () => {
+    const pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+    if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch {} }
+  };
+  const safetyTimer = setTimeout(cleanup, 6_000);
+  t.after(async () => { clearTimeout(safetyTimer); await cleanup(); });
+  const started = Date.now();
+  await assert.rejects(verifySourceCandidate({
+    workspaceRoot,
+    expectedSha: SHA,
+    profile: "bimo-repo-v1",
+    suite: "baseline",
+    timeoutSeconds: 2,
+  }), /source verification timed out/);
+  assert(Date.now() - started < 4_000, "verification must finish without the independent safety cleanup");
+  assert(Number(await readFile(pidFile, "utf8")) > 0, "descendant installed its signal handler before the deadline");
+  await delay(700);
+  await assert.rejects(readFile(markerFile), { code: "ENOENT" });
+});
+
+test("untrusted command results cannot manufacture passing evidence", async t => {
+  const workspaceRoot = await temporaryWorkspace(t);
+  const expectedSnapshot = await scanSourceSnapshot(workspaceRoot);
+  const cases = [
+    ["string exit code", { code: "0", stdout: "", stderr: "" }, /invalid command result/],
+    ["signal termination", { code: null, stdout: "", stderr: "" }, /invalid command result/],
+    ["invalid exit code", { code: 256, stdout: "", stderr: "" }, /invalid command result/],
+    ["missing stderr", { code: 0, stdout: "" }, /invalid command result/],
+    ["reported truncation", { code: 0, stdout: "", stderr: "", outputExceeded: true }, /output exceeded/],
+    ["combined output limit", { code: 0, stdout: "a".repeat(1024 * 1024), stderr: "b".repeat(1024 * 1024 + 1) }, /output exceeded/],
+  ];
+  for (const [name, result, error] of cases) {
+    await t.test(name, async () => {
+      let calls = 0;
+      await assert.rejects(verifySourceCandidate({
+        workspaceRoot,
+        expectedSha: SHA,
+        expectedSnapshot,
+        profile: "bimo-repo-v1",
+        suite: "candidate",
+        timeoutSeconds: 60,
+        runCommand: async () => { calls += 1; return result; },
+      }), error);
+      assert.equal(calls, 1, "invalid evidence must prevent every later gate");
+    });
+  }
 });
