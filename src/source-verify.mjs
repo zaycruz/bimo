@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { PI_PROFILE, discoverPiBaselineFiles, piGatePlan } from "./pi-verification.mjs";
 
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -40,7 +41,7 @@ function safeEnvironment() {
 }
 
 function terminateGroup(child, signal) {
-  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+  if (!child?.pid) return;
   try { process.kill(-child.pid, signal); } catch {}
 }
 
@@ -56,12 +57,16 @@ function executeFixed({ command, args, cwd, signal, maxOutputBytes }) {
     const stderr = [];
     let bytes = 0;
     let exceeded = false;
-    let killTimer;
+    let termination;
 
     const terminate = () => {
+      if (termination) return;
       terminateGroup(child, "SIGTERM");
-      killTimer ??= setTimeout(() => terminateGroup(child, "SIGKILL"), KILL_GRACE_MS);
-      killTimer.unref();
+      // Finish process-group cleanup even if its leader exits before the grace.
+      termination = new Promise(done => setTimeout(() => {
+        terminateGroup(child, "SIGKILL");
+        done();
+      }, KILL_GRACE_MS));
     };
     const onAbort = () => terminate();
     const collect = target => chunk => {
@@ -77,14 +82,14 @@ function executeFixed({ command, args, cwd, signal, maxOutputBytes }) {
     else signal.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
-    child.once("error", error => {
-      clearTimeout(killTimer);
+    child.once("error", async error => {
       signal.removeEventListener("abort", onAbort);
+      await termination;
       reject(error);
     });
-    child.once("close", code => {
-      clearTimeout(killTimer);
+    child.once("close", async code => {
       signal.removeEventListener("abort", onAbort);
+      await termination;
       resolve({
         code: exceeded ? 125 : code,
         stdout: Buffer.concat(stdout).toString("utf8"),
@@ -132,7 +137,7 @@ function sameSnapshot(left, right) {
   return left.files === right.files && left.bytes === right.bytes && left.sha256 === right.sha256;
 }
 
-export async function scanSourceSnapshot(workspaceRoot) {
+export async function scanSourceSnapshot(workspaceRoot, { rejectNodeModules = false } = {}) {
   const root = await checkedWorkspace(workspaceRoot);
   const hash = createHash("sha256");
   let files = 0;
@@ -153,6 +158,7 @@ export async function scanSourceSnapshot(workspaceRoot) {
       if (relative.includes("\\") || /[\u0000-\u001f\u007f]/.test(relative)) {
         fail("source snapshot contains an unsafe path");
       }
+      if (rejectNodeModules && entry.name === "node_modules") fail("Pi source snapshot contains node_modules shadowing");
       const absolute = path.join(directory, entry.name);
       const stat = await lstat(absolute);
       if (stat.isSymbolicLink() || (stat.mode & 0o022) !== 0 || (entry.isFile() && stat.nlink > 1)) {
@@ -179,6 +185,12 @@ export async function scanSourceSnapshot(workspaceRoot) {
   await visit(root);
   if (files < 1 || bytes < 1) fail("source snapshot is empty");
   return Object.freeze({ files, bytes, sha256: hash.digest("hex") });
+}
+
+export async function sourceBaselinePaths(root, profile) {
+  if (profile !== PROFILE && profile !== PI_PROFILE) fail("source verification profile is invalid");
+  await scanSourceSnapshot(root, { rejectNodeModules: profile === PI_PROFILE });
+  return profile === PI_PROFILE ? discoverPiBaselineFiles(root) : Object.freeze(["test"]);
 }
 
 async function sourceFilesForSyntax(root) {
@@ -232,9 +244,10 @@ export async function verifySourceCandidate({
   suite,
   timeoutSeconds,
   runCommand = executeFixed,
+  piIdentityPath,
 }) {
   if (!SHA.test(expectedSha ?? "")) fail("expected SHA is invalid");
-  if (profile !== PROFILE) fail("source verification profile is invalid");
+  if (profile !== PROFILE && profile !== PI_PROFILE) fail("source verification profile is invalid");
   if (suite !== "candidate" && suite !== "baseline") fail("source verification suite is invalid");
   if (suite === "candidate" && !validSnapshotReceipt(expectedSnapshot)) {
     fail("expected source snapshot is invalid");
@@ -270,12 +283,20 @@ export async function verifySourceCandidate({
   try {
     let snapshot;
     if (suite === "candidate") {
-      snapshot = await scanSourceSnapshot(cwd);
+      snapshot = await scanSourceSnapshot(cwd, { rejectNodeModules: profile === PI_PROFILE });
       if (!sameSnapshot(snapshot, expectedSnapshot)) fail("source snapshot does not match its trusted receipt");
     }
 
     const evidence = [];
-    if (suite === "baseline") {
+    if (profile === PI_PROFILE) {
+      if (suite === "baseline") await scanSourceSnapshot(cwd, { rejectNodeModules: true });
+      const gates = await piGatePlan(cwd, suite, { identityPath: piIdentityPath });
+      for (const gate of gates) {
+        const result = await run(gate);
+        if (result.code !== 0) fail(`source gate ${gate.label} exited ${result.code}`);
+        evidence.push({ authority: gate.authority, command: gate.label, outputSha256: outputDigest(result) });
+      }
+    } else if (suite === "baseline") {
       const files = await baselineTests(cwd);
       const result = await run({ command: "node", args: ["--test", ...files] });
       if (result.code !== 0) fail(`source gate baseline regression exited ${result.code}`);

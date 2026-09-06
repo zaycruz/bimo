@@ -78,7 +78,7 @@ const CONFORMANCE_RECEIPT_FIELDS = [
   "files",
 ];
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
-const VERIFICATION_PROFILES = new Set(["bimo-repo-v1"]);
+const VERIFICATION_PROFILES = new Set(["bimo-repo-v1", "pi-palantir-v1"]);
 const TRACE_ID = /^[A-Z][A-Z0-9-]{0,63}$/;
 const GIT_SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const PORTABLE_COMPONENT = /^[A-Za-z0-9._-]+$/;
@@ -463,6 +463,18 @@ export async function loadPodTemplate(name, { templateRoot } = {}) {
     fail(`template directory ${name} does not match pod template name ${template.name}`);
   }
 
+  // The two built-in engineering profiles use the same seven role prompts.
+  // This is a closed pairing, not a manifest-selected inheritance path.
+  let promptRoot = realTemplateDir;
+  if (name === "pi-palantir-pod") {
+    const shared = path.join(root, "parallel-engineering-pod");
+    const sharedStat = await lstat(shared).catch(() => null);
+    if (!sharedStat?.isDirectory() || sharedStat.isSymbolicLink()) {
+      fail("Pi pod requires the built-in engineering prompts");
+    }
+    promptRoot = await realpath(shared);
+    if (!descendant(root, promptRoot)) fail("shared engineering prompts escape template root");
+  }
   const promptEntries = [
     ...WRITER_IDS.map(writerId => [writerId, template.writers[writerId].prompt]),
     ...PROMPT_IDS.map(promptId => [promptId, template.prompts[promptId]]),
@@ -470,13 +482,13 @@ export async function loadPodTemplate(name, { templateRoot } = {}) {
   const prompts = {};
   const hash = createHash("sha256").update(raw);
   for (const [promptId, relative] of promptEntries) {
-    const promptPath = path.join(realTemplateDir, ...relative.split("/"));
+    const promptPath = path.join(promptRoot, ...relative.split("/"));
     const promptStat = await lstat(promptPath).catch(() => null);
     if (!promptStat?.isFile() || promptStat.isSymbolicLink()) {
       fail(`pod prompt ${promptId} must be a regular file`);
     }
     const realPrompt = await realpath(promptPath);
-    if (!descendant(realTemplateDir, realPrompt)) fail(`pod prompt ${promptId} escapes template`);
+    if (!descendant(promptRoot, realPrompt)) fail(`pod prompt ${promptId} escapes template`);
     const prompt = await readFile(realPrompt, "utf8");
     assertText(prompt, `pod prompt ${promptId}`, 32 * 1024);
     prompts[promptId] = prompt;

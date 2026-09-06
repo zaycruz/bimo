@@ -37,6 +37,8 @@ jobs:
           done
       - run: npm pack --dry-run
       - run: docker build --tag bimo-workflow:ci .
+      - name: Prove Pi verification against real isolated containers
+        run: node test/pi-container-proof.mjs
       - name: Scan the CI image for vulnerabilities
         uses: aquasecurity/trivy-action@v0.36.0
         with:

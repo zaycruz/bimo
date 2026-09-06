@@ -84,10 +84,11 @@ Within a forked manifest, the legitimate knobs are data: role and transition
 declarations within the numeric bounds, prompt text, timeouts, output caps,
 the smoke check, and — for the pod — the three write roots, the attempt and
 change bounds, and prompt text. The pod topology itself is fixed in
-controller code, not in `pod.json`: the pod controller accepts only the
-`parallel-engineering-pod` template name (`src/bimo.mjs:1382`), so a forked
-pod can retune prompts, roots, and bounds but cannot rename, resize, or
-re-wire the pod without changing controller code.
+controller code, not in `pod.json`: the packaged profiles are `parallel-engineering-pod` and `pi-palantir-pod`.
+The Pi profile shares the engineering role prompt files; their bytes still
+participate in its template digest. Each manifest binds fixed write roots and
+a closed verification profile. Changing topology or adding verification
+profiles requires controller code changes.
 
 ## What a template cannot do
 

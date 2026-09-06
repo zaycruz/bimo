@@ -16,6 +16,8 @@ import process from "node:process";
 import { AGENT_RUNTIME_NAMES, DEFAULT_AGENT_RUNTIME } from "./agent-runtime.mjs";
 import { DockerRuntime } from "./docker-runtime.mjs";
 import { formatDeploymentPlan, loadDeploymentPlan } from "./deployment-plan.mjs";
+import { preparePiVerificationImage } from "./pi-image.mjs";
+import { PI_PROFILE } from "./pi-verification.mjs";
 import {
   builtInTargetCatalog,
   commandForTarget,
@@ -939,6 +941,8 @@ async function deploy(template, options) {
   const loaded = await loadTemplate(template);
   const pod = loaded.kind === "engineering-pod";
   exactOptions(options, pod ? DEPLOY_POD_OPTIONS : DEPLOY_WORKFLOW_OPTIONS);
+  const piPod = pod && loaded.template.verificationProfile === PI_PROFILE;
+  if (piPod && !options.image) fail("pi-palantir-pod requires --image built with prepare-pi-image");
   if (!options.deployment) fail("--deployment is required");
   if (!NAME.test(options.deployment)) fail("--deployment must use lowercase letters, numbers, and dashes");
   const deploymentTarget = resolveDeploymentTarget(options);
@@ -953,7 +957,10 @@ async function deploy(template, options) {
   let repository;
   let targetBranch;
   if (pod) {
-    repository = options.repository ?? DEFAULT_POD_REPOSITORY;
+    repository = options.repository ?? (piPod ? "https://github.com/raava-solutions/pi-palantir.git" : DEFAULT_POD_REPOSITORY);
+    if (piPod && !/^https:\/\/github\.com\/raava-solutions\/pi-palantir(?:\.git)?$/.test(repository)) {
+      fail("pi-palantir-pod requires the raava-solutions/pi-palantir repository");
+    }
     if (!validPodRepository(repository)) {
       fail("--repository must be an https github.com repository URL");
     }
@@ -1561,7 +1568,7 @@ async function internalPodRun(options) {
   ], "pod controller");
   if (envelope.version !== 1 || !NAME.test(envelope.deployment ?? "")
       || !controllerHostRootIsValid(options["host-root"], envelope.deployment, options["local-home"])
-      || envelope.template !== "parallel-engineering-pod"
+      || !NAME.test(envelope.template ?? "")
       || !TEMPLATE_DIGEST.test(envelope.templateDigest ?? "")
       || typeof envelope.task !== "string" || !envelope.task.trim()
       || Buffer.byteLength(envelope.task) > 64 * 1024
@@ -2603,6 +2610,7 @@ async function doctor(options) {
 }
 
 const COMMAND_HELP = {
+  "prepare-pi-image": "bimo prepare-pi-image SOURCE OUTPUT --base-image IMAGE [--json]\n  Prepare a locked Pi verification image context from a trusted checkout. Does not build or deploy.",
   plan: "bimo plan FILE [--json]\n  Validate operator-owned deployment intent offline. No execution, credential resolution, or resource reservation.",
   list: "bimo list [--json]\n  List the installed workflow and pod templates.",
   targets: "bimo targets [--json]\n  Probe the local Docker daemon and list the built-in deployment targets.",
@@ -2623,6 +2631,7 @@ function usage() {
   bimo targets [--json]
   bimo validate TEMPLATE [--json]
   bimo plan FILE [--json]
+  bimo prepare-pi-image SOURCE OUTPUT --base-image IMAGE [--json]
   bimo organize -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
   bimo -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
   bimo deploy TEMPLATE --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
@@ -2695,6 +2704,13 @@ async function runCommand(argv) {
     const loaded = await loadTemplate(positional[0]);
     const result = { valid: true, kind: loaded.kind, template: loaded.name, digest: loaded.digest };
     process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `valid template ${result.template} (${result.digest})\n`);
+    return;
+  }
+  if (command === "prepare-pi-image") {
+    const { positional, options } = parseOptions(rest, { booleans: ["json"], allowed: ["base-image", "json"] });
+    if (positional.length !== 2 || !options["base-image"]) fail("prepare-pi-image requires SOURCE OUTPUT and --base-image");
+    const receipt = await preparePiVerificationImage(positional[0], positional[1], options["base-image"]);
+    process.stdout.write(options.json ? `${JSON.stringify(receipt)}\n` : `Prepared ${receipt.profile} image context at ${receipt.outputDir}\n`);
     return;
   }
   if (command === "plan") {

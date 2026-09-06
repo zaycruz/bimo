@@ -459,6 +459,7 @@ test("the installed CLI lists the packaged workflows and fixed engineering pod",
   const result = await run("list", "--json");
   assert.deepEqual(result.templates.map(template => template.name), [
     "parallel-engineering-pod",
+    "pi-palantir-pod",
     "react-app",
     "react-solo",
   ]);

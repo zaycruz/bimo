@@ -42,12 +42,13 @@ Use the existing `deploy` command for supported workflows. Deployment plans
 cannot yet be passed to it. See [the deployment manifest contract](docs/deployment-manifests.md)
 and [the delivery milestone](docs/product-milestone.md).
 
-Three templates ship in the package:
+Four templates ship in the package:
 
 | Template | Kind | Roles | Start here when |
 | --- | --- | --- | --- |
 | `react-solo` | workflow | `engineering` (maxSteps 1) | You want the simplest proof: one role, one verified artifact |
 | `react-app` | workflow | `engineering` → `qa` → `testing` (maxSteps 15) | You want the gated pipeline with review loops |
+| `pi-palantir-pod` | engineering-pod | Same fixed engineering roles; writes to extensions, omp and test | Build Pi-Palantir with locked TypeScript tooling and trusted baseline tests |
 | `parallel-engineering-pod` | engineering-pod | planner, two engineers, qa-tests, checker, qa, testing (maxAttempts 3) | You want the full pod: three parallel writers on a real repository, ending in a draft pull request |
 
 The fastest path to value is the quickstart below: install, preflight with
@@ -91,7 +92,7 @@ bimo list --json
 ```
 
 ```json
-{"templates":[{"kind":"engineering-pod","name":"parallel-engineering-pod","roles":["planner","engineering-a","engineering-b","qa-tests","checker","qa","testing"],"maxAttempts":3},{"kind":"workflow","name":"react-app","roles":["engineering","qa","testing"],"maxSteps":15},{"kind":"workflow","name":"react-solo","roles":["engineering"],"maxSteps":1}]}
+{"templates":[{"kind":"engineering-pod","name":"parallel-engineering-pod","roles":["planner","engineering-a","engineering-b","qa-tests","checker","qa","testing"],"maxAttempts":3},{"kind":"engineering-pod","name":"pi-palantir-pod","roles":["planner","engineering-a","engineering-b","qa-tests","checker","qa","testing"],"maxAttempts":3},{"kind":"workflow","name":"react-app","roles":["engineering","qa","testing"],"maxSteps":15},{"kind":"workflow","name":"react-solo","roles":["engineering"],"maxSteps":1}]}
 ```
 
 ### 3. Preflight the machine
@@ -249,7 +250,7 @@ role should behave. Every load computes one SHA-256 digest over the manifest
 and prompts; deploy carries that digest into the controller, so one changed
 byte stops the run before Docker or Git work begins.
 
-The three bundled templates are reusable starting points, not a ceiling. The
+The four bundled templates are reusable starting points, not a ceiling. The
 supported customization path is a fork: edit or add template directories in a
 private copy of the package, rebuild the image so the same bytes are baked
 in, and deploy with `--image`. Templates stay data-only — no executable
@@ -284,6 +285,10 @@ covers gateway startup, every role, verification, and publication. Cancellation
 aborts active Docker commands before cleanup. Cleanup and rollback use a short,
 separate bounded margin so deadline expiry does not strand an attempted
 replacement.
+
+The source verifier gives each command process group 250 ms to stop after a
+timeout or output-limit breach, then sends SIGKILL to that group even if its
+leader has already exited. Gate completion includes this cleanup margin.
 
 ### Receipts are not verification
 
@@ -796,3 +801,47 @@ the tagged release and its exact-SHA GitHub Actions run.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+### Building Pi-Palantir with Bimo
+
+`pi-palantir-pod` uses the existing engineering controller and shared role
+prompts. It assigns writers to `extensions/`, `omp/`, and `test/`. Its closed
+`pi-palantir-v1` verifier runs TypeScript, the repository's complexity ratchet,
+and behavior tests with locked dependencies. Prepare the image from a trusted
+checkout of the exact Pi-Palantir base you intend to build:
+
+```sh
+bimo prepare-pi-image /absolute/path/to/pi-palantir /absolute/path/to/new-image-context \
+  --base-image bimo-workflow:local --json
+docker build --tag bimo-pi:local /absolute/path/to/new-image-context
+bimo deploy pi-palantir-pod \
+  --image bimo-pi:local \
+  --deployment pi-internal \
+  --task-file /absolute/path/to/task.md \
+  --base-sha EXACT_40_CHARACTER_BASE_COMMIT \
+  --target-branch main \
+  --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
+  --github-secret-ref 'op://VAULT/ITEM/GITHUB_TOKEN' \
+  --clone-secret-ref 'op://VAULT/ITEM/READ_ONLY_GITHUB_TOKEN' \
+  --json
+```
+
+Build the base Bimo image from this version first. The context directory must
+not exist. Preparation writes only the package manifests, a hashed tooling/test
+identity, and a Dockerfile; it does not install dependencies or start agents.
+Docker installs locked dependencies while building the image. For remote
+targets, make that same image available on the execution host.
+
+The repository defaults to `raava-solutions/pi-palantir`; this profile rejects
+other repositories. Use the actual target branch, which need not be `main`.
+The prepared image is required explicitly. Before planner execution, Bimo
+verifies the immutable base with that image. Changes to locked configuration,
+quality scripts, or baseline tests require rebuilding the verification image.
+The execution verifier installs nothing and has no network or credentials.
+
+Candidate-authored tests are advisory. Bimo then mounts the original test and
+configuration files read-only at their original paths and runs them against
+the candidate's implementation. Rewriting a test to agree with broken code
+cannot replace the trusted baseline. Successful runs retain the existing
+verified draft-PR publication boundary. These commands run a job; `bimo plan`
+remains a deployment-contract preview.

@@ -16,6 +16,8 @@ import path from "node:path";
 
 import { DEFAULT_AGENT_RUNTIME, agentRuntimeFor } from "./agent-runtime.mjs";
 import { isDeploymentHostRoot } from "./deployment-target.mjs";
+import { scanSourceSnapshot } from "./source-verify.mjs";
+import { discoverPiBaselineFiles, isPiBaselinePath } from "./pi-verification.mjs";
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const MODEL = /^openrouter\/[a-z0-9][a-z0-9._/-]{2,127}$/;
@@ -356,6 +358,41 @@ export function proxyCreateArgs({
   ];
 }
 
+function sourceBaselineMounts({
+  profile, suite, snapshotHost, baselineTestHost, baselineSnapshotHost, baselinePaths,
+}) {
+  if (profile === "bimo-repo-v1") {
+    if (baselineSnapshotHost !== undefined || baselinePaths !== undefined) {
+      fail("Bimo verification cannot accept Pi baseline mounts");
+    }
+    return suite === "baseline"
+      ? ["--mount", bind(path.resolve(baselineTestHost), "/workspace/test", true)] : [];
+  }
+  if (suite === "candidate") return [];
+  if (baselineTestHost !== undefined) fail("Pi verification cannot mount a test directory");
+  if (typeof baselineSnapshotHost !== "string"
+      || path.dirname(baselineSnapshotHost) !== path.dirname(snapshotHost)
+      || !EXECUTION_ID.test(path.basename(baselineSnapshotHost))) {
+    fail("invalid Pi baseline snapshot path");
+  }
+  if (!Array.isArray(baselinePaths) || baselinePaths.length < 1 || baselinePaths.length > 600
+      || new Set(baselinePaths).size !== baselinePaths.length) {
+    fail("invalid Pi baseline paths");
+  }
+  return baselinePaths.flatMap(relative => {
+    if (typeof relative !== "string" || relative.length > 240
+        || !/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(relative)
+        || relative.split("/").some(part => part === "." || part === "..")
+        || !isPiBaselinePath(relative)) {
+      fail("invalid Pi baseline overlay path");
+    }
+    // Preflight verifies the immutable base against itself; its readonly root
+    // already contains the trusted tests, so no child mounts are necessary.
+    return baselineSnapshotHost === snapshotHost ? []
+      : ["--mount", bind(path.join(baselineSnapshotHost, relative), `/workspace/${relative}`, true)];
+  });
+}
+
 export function sourceVerifierCreateArgs({
   deployment,
   hostRoot,
@@ -363,6 +400,8 @@ export function sourceVerifierCreateArgs({
   image,
   snapshotHost,
   baselineTestHost,
+  baselineSnapshotHost,
+  baselinePaths,
   expectedSha,
   expectedSnapshot,
   profile,
@@ -385,7 +424,7 @@ export function sourceVerifierCreateArgs({
   if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(expectedSha ?? "")) {
     fail("invalid source verifier SHA");
   }
-  if (profile !== "bimo-repo-v1" || (suite !== "candidate" && suite !== "baseline")) {
+  if (!["bimo-repo-v1", "pi-palantir-v1"].includes(profile) || (suite !== "candidate" && suite !== "baseline")) {
     fail("invalid source verification profile");
   }
   if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 900) {
@@ -400,16 +439,21 @@ export function sourceVerifierCreateArgs({
         || !/^[a-f0-9]{64}$/.test(expectedSnapshot.sha256)) {
       fail("invalid expected source snapshot");
     }
-    if (baselineTestHost !== undefined) fail("candidate verification cannot mount baseline tests");
+    if (baselineTestHost !== undefined || baselineSnapshotHost !== undefined || baselinePaths !== undefined) {
+      fail("candidate verification cannot mount baseline tests");
+    }
   } else {
     if (expectedSnapshot !== undefined) fail("baseline verification cannot accept a snapshot receipt");
-    if (typeof baselineTestHost !== "string" || !path.isAbsolute(baselineTestHost)
+    if (profile === "bimo-repo-v1" && (typeof baselineTestHost !== "string" || !path.isAbsolute(baselineTestHost)
         || !path.resolve(baselineTestHost).startsWith(`${snapshotRoot}${path.sep}`)
-        || path.basename(baselineTestHost) !== "test") {
+        || path.basename(baselineTestHost) !== "test")) {
       fail("invalid baseline test snapshot path");
     }
   }
 
+  const baselineMounts = sourceBaselineMounts({
+    profile, suite, snapshotHost, baselineTestHost, baselineSnapshotHost, baselinePaths,
+  });
   return [
     "create",
     "--pull=never",
@@ -422,9 +466,7 @@ export function sourceVerifierCreateArgs({
     "--tmpfs", "/test-tools:rw,exec,nosuid,nodev,size=32m,uid=1000,gid=1000",
     "--tmpfs", "/home/node:rw,nosuid,nodev,size=256m,uid=1000,gid=1000",
     "--mount", bind(path.resolve(snapshotHost), "/workspace", true),
-    ...(suite === "baseline"
-      ? ["--mount", bind(path.resolve(baselineTestHost), "/workspace/test", true)]
-      : []),
+    ...baselineMounts,
     image,
     "source-verify",
     "--workspace", "/workspace",
@@ -804,6 +846,7 @@ export class DockerRuntime {
     hostRoot,
     localHome,
     stateRoot = "/state",
+    snapshotsRoot = "/snapshots",
     key,
     model,
     agentRuntime = DEFAULT_AGENT_RUNTIME,
@@ -818,6 +861,8 @@ export class DockerRuntime {
     }
     if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) fail("invalid Bimo state root");
     if (path.resolve(stateRoot) !== stateRoot) fail("Bimo state root must be canonical");
+    if (typeof snapshotsRoot !== "string" || !path.isAbsolute(snapshotsRoot)
+        || path.resolve(snapshotsRoot) !== snapshotsRoot) fail("invalid Bimo snapshots root");
     if (!SAFE_IMAGE.test(image)) fail("invalid image reference");
     if (!MODEL.test(model)) fail("invalid model reference");
     agentRuntimeFor(agentRuntime);
@@ -848,6 +893,7 @@ export class DockerRuntime {
     this.hostRoot = hostRoot;
     this.localHome = localHome;
     this.stateRoot = path.resolve(stateRoot);
+    this.snapshotsRoot = snapshotsRoot;
     this.key = key;
     this.model = model;
     this.agentRuntime = agentRuntime;
@@ -1254,7 +1300,7 @@ export class DockerRuntime {
     if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(expectedSha ?? "")) {
       fail("invalid source verification SHA");
     }
-    if (profile !== "bimo-repo-v1") fail("invalid source verification profile");
+    if (!["bimo-repo-v1", "pi-palantir-v1"].includes(profile)) fail("invalid source verification profile");
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 2 || timeoutSeconds > 900) {
       fail("invalid source verification timeout");
     }
@@ -1274,7 +1320,15 @@ export class DockerRuntime {
       this.deploymentDeadlineAt ?? Number.MAX_SAFE_INTEGER,
     );
     const candidateHost = path.join(this.hostRoot, "snapshots", runId, candidate.id);
-    const baselineTestsHost = path.join(this.hostRoot, "snapshots", runId, base.id, "test");
+    const baselineHost = path.join(this.hostRoot, "snapshots", runId, base.id);
+    let baselineMountOptions = { baselineTestHost: path.join(baselineHost, "test") };
+    if (profile === "pi-palantir-v1") {
+      const baselineLocal = path.join(this.snapshotsRoot, runId, base.id);
+      const receipt = await bounded(() => scanSourceSnapshot(baselineLocal, { rejectNodeModules: true }), deadlineAt, "base snapshot");
+      if (!sameArtifact(receipt, base.receipt)) fail("base source snapshot does not match its trusted receipt");
+      const baselinePaths = await bounded(() => discoverPiBaselineFiles(baselineLocal), deadlineAt, "baseline tests");
+      baselineMountOptions = Object.freeze({ baselineSnapshotHost: baselineHost, baselinePaths });
+    }
 
     const runSuite = async suite => {
       const nameSuffix = suite === "candidate" ? "source-candidate" : "source-baseline";
@@ -1293,7 +1347,7 @@ export class DockerRuntime {
           localHome: this.localHome,
           image: this.image,
           snapshotHost: candidateHost,
-          ...(suite === "baseline" ? { baselineTestHost: baselineTestsHost } : {}),
+          ...(suite === "baseline" ? baselineMountOptions : {}),
           expectedSha,
           ...(suite === "candidate" ? { expectedSnapshot: candidate.receipt } : {}),
           profile,

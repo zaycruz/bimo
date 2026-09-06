@@ -24,6 +24,7 @@ COPY --chown=root:root src ./src
 COPY --chown=root:root starters ./starters
 COPY --chown=root:root templates ./templates
 COPY --chown=root:root etc/organizer ./etc/organizer
+COPY --chown=root:root etc/pi-verification ./etc/pi-verification
 
 COPY --chown=root:root starters/react/package.json starters/react/package-lock.json /opt/bimo-react/
 RUN cd /opt/bimo-react \
