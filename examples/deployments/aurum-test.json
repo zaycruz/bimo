@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "clientId": "aurum-test",
+  "agentId": "aurum",
+  "lifecycle": "service",
+  "runtime": "hermes",
+  "target": {
+    "kind": "proxmox-lxc",
+    "proxmox": "operator@192.0.2.10",
+    "vmid": "100"
+  },
+  "workload": {
+    "service": "aurum"
+  },
+  "model": {
+    "provider": "openrouter",
+    "fallback": "disabled"
+  },
+  "secretRefs": {
+    "model": "op://EXAMPLE/Bimo/OpenRouter"
+  },
+  "limits": {
+    "memoryMiB": 2048,
+    "cpus": 1.5,
+    "maxConcurrentRuns": 1,
+    "runTimeoutSeconds": 120
+  }
+}

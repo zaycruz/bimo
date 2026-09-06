@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "clientId": "raava",
+  "agentId": "engineering",
+  "lifecycle": "job",
+  "runtime": "pi",
+  "target": {
+    "kind": "local"
+  },
+  "workload": {
+    "template": "parallel-engineering-pod"
+  },
+  "model": {
+    "provider": "openrouter",
+    "fallback": "disabled"
+  },
+  "secretRefs": {
+    "model": "op://EXAMPLE/Bimo/OpenRouter"
+  },
+  "limits": {
+    "memoryMiB": 2048,
+    "cpus": 1.5,
+    "maxConcurrentRuns": 1,
+    "runTimeoutSeconds": 3600
+  }
+}

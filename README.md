@@ -12,6 +12,36 @@ or graph engine.
 template = one JSON manifest + one Markdown prompt per role
 ```
 
+### Plan a client-owned deployment (offline preview)
+
+Raava is developing Bimo to operate both internal software-delivery workflows
+and client-facing agents. The first step is an operator-owned deployment
+manifest, separate from the data-only workflow templates below:
+
+```bash
+bimo plan examples/deployments/raava-engineering.json --json
+bimo plan examples/deployments/aurum-test.json --json
+```
+
+For a globally installed package, prefix each example path with
+`"$(npm root --global)/bimo-workflow/"`.
+
+`plan` validates client and agent identity, workload, target, model policy,
+credential references, and requested limits. It reads one local JSON file
+(at most 64 KiB) and returns its SHA-256 digest. It does not contact Docker,
+SSH, a model provider, or 1Password, and does not create deployment state.
+
+Every result declares `planOnly: true` and `executionSupported: false`:
+this command does not execute even an existing job workflow. Hermes services,
+local inference, persistent client identity, and aggregate capacity enforcement
+are not implemented by this preview. Valid limits are requests, not resource
+reservations or proof of client isolation. The Aurum example is a test plan
+with placeholder infrastructure, not a live deployment configuration.
+
+Use the existing `deploy` command for supported workflows. Deployment plans
+cannot yet be passed to it. See [the deployment manifest contract](docs/deployment-manifests.md)
+and [the delivery milestone](docs/product-milestone.md).
+
 Three templates ship in the package:
 
 | Template | Kind | Roles | Start here when |
