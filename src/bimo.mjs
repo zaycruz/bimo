@@ -18,6 +18,7 @@ import { DockerRuntime } from "./docker-runtime.mjs";
 import { formatDeploymentPlan, loadDeploymentPlan } from "./deployment-plan.mjs";
 import { preparePiVerificationImage } from "./pi-image.mjs";
 import { PI_PROFILE } from "./pi-verification.mjs";
+import { manageTestService } from "./test-service.mjs";
 import {
   builtInTargetCatalog,
   commandForTarget,
@@ -2611,6 +2612,7 @@ async function doctor(options) {
 
 const COMMAND_HELP = {
   "prepare-pi-image": "bimo prepare-pi-image SOURCE OUTPUT --base-image IMAGE [--json]\n  Prepare a locked Pi verification image context from a trusted checkout. Does not build or deploy.",
+  service: "bimo service status|start|stop|restart FILE [--json]\n  Manage a pre-provisioned test-only Hermes unit. No provisioning or credential resolution.",
   plan: "bimo plan FILE [--json]\n  Validate operator-owned deployment intent offline. No execution, credential resolution, or resource reservation.",
   list: "bimo list [--json]\n  List the installed workflow and pod templates.",
   targets: "bimo targets [--json]\n  Probe the local Docker daemon and list the built-in deployment targets.",
@@ -2632,6 +2634,7 @@ function usage() {
   bimo validate TEMPLATE [--json]
   bimo plan FILE [--json]
   bimo prepare-pi-image SOURCE OUTPUT --base-image IMAGE [--json]
+  bimo service status|start|stop|restart FILE [--json]
   bimo organize -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
   bimo -p PROMPT [-n 1|2|3] --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --secret-ref op://VAULT/ITEM/FIELD [--json]
   bimo deploy TEMPLATE --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --task-file FILE --secret-ref op://VAULT/ITEM/FIELD --public-url URL [--json]
@@ -2711,6 +2714,15 @@ async function runCommand(argv) {
     if (positional.length !== 2 || !options["base-image"]) fail("prepare-pi-image requires SOURCE OUTPUT and --base-image");
     const receipt = await preparePiVerificationImage(positional[0], positional[1], options["base-image"]);
     process.stdout.write(options.json ? `${JSON.stringify(receipt)}\n` : `Prepared ${receipt.profile} image context at ${receipt.outputDir}\n`);
+    return;
+  }
+  if (command === "service") {
+    const { positional, options } = parseOptions(rest, { booleans: ["json"], allowed: ["json"] });
+    if (positional.length !== 2) fail("service requires an action and one manifest file");
+    const plan = await loadDeploymentPlan(positional[1]);
+    const receipt = await manageTestService(positional[0], plan.manifest, execute);
+    process.stdout.write(options.json ? `${JSON.stringify(receipt)}\n`
+      : `Test-only service ${receipt.unit}: ${receipt.observed.ActiveState}/${receipt.observed.SubState}\n${receipt.limitations.join("\n")}\n`);
     return;
   }
   if (command === "plan") {
