@@ -262,6 +262,30 @@ function controllerInput({
   };
 }
 
+test("Pi repository preflight gates paid agent execution on the exact base", async () => {
+  for (const compatible of [false, true]) {
+    const calls = [];
+    const agents = {
+      async runAgentExecution() { calls.push({ type: "agent" }); throw new Error("stop after preflight"); },
+      async cancel() {},
+    };
+    const input = controllerInput({
+      agents, source: createSource(calls), store: createStore(),
+      verifyCandidate: async verification => {
+        calls.push({ type: "preflight" });
+        assert.equal(verification.expectedSha, SHA.base);
+        assert.equal(verification.candidateSnapshot.id, verification.baseSnapshot.id);
+        return { status: compatible ? "passed" : "failed", candidateSha: SHA.base };
+      },
+    });
+    input.template.verificationProfile = "pi-palantir-v1";
+    input.template.maxAttempts = 1;
+    await assert.rejects(runEngineeringPod(input), compatible ? /stop after preflight/ : /preflight did not pass/);
+    assert.deepEqual(calls.filter(call => ["preflight", "agent"].includes(call.type)).map(call => call.type),
+      compatible ? ["preflight", "agent"] : ["preflight"]);
+  }
+});
+
 test("rejects missing or oversized digest-bound role prompts before source access", async () => {
   const calls = [];
   const source = createSource(calls);

@@ -11,6 +11,8 @@
 !etc/
 !etc/organizer/
 !etc/organizer/organizer.md
+!etc/pi-verification/
+!etc/pi-verification/Dockerfile
 !etc/opencode/
 !etc/opencode/opencode.json
 !etc/pi/

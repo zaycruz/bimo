@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "name": "pi-palantir-pod",
+  "maxAttempts": 3,
+  "timeouts": {
+    "executionSeconds": 1200,
+    "attemptSeconds": 3600,
+    "workflowSeconds": 7200
+  },
+  "changes": {
+    "maxFiles": 200,
+    "maxBytes": 5242880
+  },
+  "writers": {
+    "engineering-a": {
+      "prompt": "roles/engineering.md",
+      "allowedWriteRoots": [
+        "extensions"
+      ]
+    },
+    "engineering-b": {
+      "prompt": "roles/engineering.md",
+      "allowedWriteRoots": [
+        "omp"
+      ]
+    },
+    "qa-tests": {
+      "prompt": "roles/qa-tests.md",
+      "allowedWriteRoots": [
+        "test"
+      ]
+    }
+  },
+  "prompts": {
+    "planner": "roles/planner.md",
+    "checker": "roles/checker.md",
+    "qa": "roles/qa.md",
+    "testing": "roles/testing.md"
+  },
+  "verificationProfile": "pi-palantir-v1"
+}

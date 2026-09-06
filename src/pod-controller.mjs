@@ -815,6 +815,22 @@ export async function runEngineeringPod({
     });
     assertPlainObject(baseSnapshot, "base snapshot");
 
+    if (template.verificationProfile === "pi-palantir-v1") {
+      await store.appendEvent("verification.preflight.started", { baseSha, profile: template.verificationProfile });
+      const preflight = await verifyCandidate({
+        candidateSnapshot: baseSnapshot,
+        baseSnapshot,
+        expectedSha: baseSha,
+        profile: template.verificationProfile,
+        timeoutSeconds: Math.min(900, Math.floor(remainingMs(deadlineAt) / 1_000)),
+      });
+      assertPlainObject(preflight, "repository preflight receipt");
+      if (preflight.status !== "passed" || preflight.candidateSha !== baseSha) {
+        fail("repository verification preflight did not pass the exact base SHA");
+      }
+      await store.appendEvent("verification.preflight.passed", { baseSha, profile: template.verificationProfile });
+    }
+
     for (let attempt = 1; attempt <= template.maxAttempts; attempt += 1) {
       const attemptDeadlineAt = Math.min(
         deadlineAt,

@@ -6,7 +6,7 @@ const MANIFEST_FIELDS = [
   "schemaVersion", "clientId", "agentId", "lifecycle", "runtime", "target",
   "workload", "model", "secretRefs", "limits",
 ];
-const TEMPLATES = ["react-solo", "react-app", "parallel-engineering-pod"];
+const TEMPLATES = ["react-solo", "react-app", "parallel-engineering-pod", "pi-palantir-pod"];
 
 function fail(message) {
   throw new Error(message);
