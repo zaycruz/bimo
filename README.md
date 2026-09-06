@@ -42,6 +42,46 @@ Use the existing `deploy` command for supported workflows. Deployment plans
 cannot yet be passed to it. See [the deployment manifest contract](docs/deployment-manifests.md)
 and [the delivery milestone](docs/product-milestone.md).
 
+### Manage a pre-provisioned Aurum test service
+
+`bimo service status|start|stop|restart FILE [--json]` accepts the service/Hermes
+manifest above and uses its explicit local, SSH or Proxmox LXC target. The only
+unit it can address is `bimo-test-<clientId>.<agentId>.service`; there is no
+arbitrary unit argument or production default. The dot separates two IDs that
+cannot contain dots. For `aurum-test.json` the unit is
+`bimo-test-aurum-test.aurum.service`.
+
+After an operator provisions that unit on a **separate test target**, use:
+
+```bash
+bimo service status my-aurum-test.json --json
+bimo service start my-aurum-test.json
+bimo service restart my-aurum-test.json
+bimo service stop my-aurum-test.json
+```
+
+The supplied example has placeholder infrastructure; replace it with your test
+target before running these commands. The target account must already have
+permission to manage its test unit; Bimo does not run sudo or prompt for access.
+Bimo confirms the loaded unit identity before any mutation, rejects aliases,
+and checks the resulting process state. Restart means stop then start. Each
+command has a 10-second timeout and 4-KiB output cap; an operation has a
+30-second command budget. A failed/timed-out command may have reached systemd:
+inspect status before retrying. Commands inherit only PATH, HOME, SSH_AUTH_SOCK
+and locale settings; model, GitHub, 1Password and bus-redirection environment
+variables are excluded. No logs or environment values are returned.
+
+This is test-only lifecycle control, **not provisioning or a client-ready Aurum
+deployment**. It does not resolve the model credential reference, enforce the
+manifest's limits, create client isolation, or verify application/channel health.
+Aurum's Hermes messaging agent is separate from its FastAPI data gateway.
+Before provisioning a genuine Aurum test instance we still need a sanitized
+Hermes unit and drop-in contract, an exact runtime revision and dependency set,
+and an independent test profile, target, channel identity and data credentials.
+The historical Aurum runbook and checked-in tracing requirements disagree on
+Langfuse's major version; reconcile that when selecting the runtime. Do not
+copy production credentials, crons or client conversations into the test instance.
+
 Four templates ship in the package:
 
 | Template | Kind | Roles | Start here when |

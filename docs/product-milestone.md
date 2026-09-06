@@ -15,33 +15,35 @@ cloud fallback is an explicit client policy. Initial client execution targets
 are dedicated hosts or guests; naming a directory does not prove isolation.
 Brains remain outside this implementation scope.
 
-The current bounded Docker runtime is still the only supported execution
-contract. Earlier no-service/no-scheduler alpha non-goals describe that released
-behavior. This milestone authorizes designing the additional service contract;
-it does not declare those capabilities available or replace their acceptance gates.
+Bounded Docker workflows remain the job execution contract. Test-only systemd
+controls now manage pre-provisioned Hermes units; they do not provision an
+Aurum instance or establish application health, authenticated interaction or
+request recovery. The full internal-use milestone remains open.
 
 ## Delivery sequence and acceptance
 
-1. **Offline deployment intent (this change).** Versioned, exact-shape,
-   immutable manifest validation; packaged Raava and Aurum test examples;
-   bounded CLI reads; honest unsupported execution receipts. No live migration.
-2. **Internal engineering execution binding.** First resolve the existing
-   [repository-profile blocker (#55)](https://github.com/zaycruz/bimo/issues/55)
-   and [writer-root mismatch (#41)](https://github.com/zaycruz/bimo/issues/41).
-   The current Node-only src/test profile cannot execute Pi-Palantir's TypeScript
-   layout or Foundry CLI's Python suite. Add one tested repository-specific
-   profile and matching template with trusted verification before increasing
-   worker count. Include [asset inputs (#56)](https://github.com/zaycruz/bimo/issues/56)
-   when the chosen task requires them. Bind an approved repository,
-   base SHA, workflow digest, image identity and runtime to a client/agent.
-   Enforce tool/credential scope and limits; run a real approved task through
-   candidate/baseline verification to a draft PR with retained evidence.
-   Preserve existing merge and deployment approval boundaries.
-3. **Aurum service adapter in a separate test instance.** Verify the current
-   deployment contract before implementation. Start/stop/status/health/logs,
-   bounded restart policy, versioned configuration, upgrade and rollback must
-   work without modifying Aurum's live data or domain behavior. Reuse its actual
-   runtime through a closed adapter. No arbitrary executable plugin mechanism.
+1. **Offline deployment intent — shipped.** Versioned, exact-shape immutable
+   manifest validation, packaged Raava/Aurum test examples and bounded CLI reads.
+   Planning stays offline and does not create a deployment.
+2. **Internal engineering execution — Pi-Palantir profile implemented.** The
+   dedicated template matches `extensions`, `omp` and `test` writer roots. Its
+   locked verification image binds dependencies and tooling to the selected
+   baseline; controller-owned candidate/baseline checks preserve proof. This
+   addresses the selected Pi-Palantir profile/root blockers without claiming
+   generic Python support or closing every repository-profile requirement.
+   **Pending:** run a real approved task through to a draft PR using the actual
+   execution target, approved model and credential references, with retained
+   evidence. Foundry CLI's Python profile remains separate work. Existing merge
+   and deployment approval boundaries remain in force.
+3. **Aurum service management — test-only controls implemented.**
+   `bimo service status|start|stop|restart FILE` manages only the exact derived
+   `bimo-test-<clientId>.<agentId>.service` on the manifest's explicit target.
+   It checks loaded identity before mutation and process state afterward;
+   restart is stop then start. No logs, secrets or production defaults.
+   **Pending:** provision an independent Aurum test instance from a verified
+   Hermes runtime/unit/configuration, then prove application health, channel
+   behavior, upgrade/rollback and request recovery. The existing live agent
+   and its data remain untouched; an active unit does not satisfy these gates.
 4. **Authenticated client interaction.** Bind caller, conversation and request
    to the permitted client/agent outside model control. Requests produce durable
    IDs, bounded execution and explicit completed/failed/approval-needed results.
