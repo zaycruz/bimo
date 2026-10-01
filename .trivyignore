@@ -7,6 +7,9 @@
 # The npm CLI runs only at image build time, never at runtime.
 CVE-2026-14257 # brace-expansion 5.0.7 (fix: 5.0.8), bundled in npm 12.0.2
 CVE-2026-69152 # brace-expansion 5.0.7 (fix: 5.0.9), bundled in npm 12.0.2
+CVE-2026-102276 # brace-expansion 5.0.7 (fix: 5.0.10), bundled in npm 12.0.2
+CVE-2026-102278 # brace-expansion 5.0.7 (fix: 5.0.11), bundled in npm 12.0.2
+CVE-2026-19534 # undici 6.27.0 (fix: 6.28.1), bundled in npm 12.0.2
 CVE-2026-69192 # ip-address 10.2.0 (fix: 10.3.1), bundled in npm 12.0.2
 CVE-2026-73566 # tar 7.5.19 (fix: 7.5.21), bundled in npm 12.0.2
 
