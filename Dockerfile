@@ -7,7 +7,7 @@ FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95ea
 ARG NPM_VERSION=12.0.2
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates git \
+    && apt-get install --yes --no-install-recommends ca-certificates git libpcre2-8-0 \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "npm@${NPM_VERSION}" \
     && npm cache clean --force
