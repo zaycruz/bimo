@@ -66,3 +66,11 @@ pub fn net0(bridge: &str, address: Ipv4Addr, prefix: u8, gateway: Ipv4Addr, vlan
     }
     value
 }
+
+/// The `net1` value of a tenant proxy guest on a tenant segment: a second
+/// NIC on the tenant's VLAN, without a gateway, where the tenant's agent
+/// guests reach the proxy (KTD5). Its `net0` stays on the untagged bridge
+/// for the control plane and the proxy's own upstream traffic.
+pub fn net1_tenant(bridge: &str, address: Ipv4Addr, prefix: u8, vlan: u16) -> String {
+    format!("name=eth1,bridge={bridge},ip={address}/{prefix},tag={vlan}")
+}

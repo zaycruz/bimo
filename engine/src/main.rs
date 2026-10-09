@@ -30,6 +30,7 @@ USAGE:
   monolith agent destroy <name>  [--output json|text] [--state-root <dir>] [--targets-config <file>]
   monolith agent list            [--output json|text] [--state-root <dir>] [--targets-config <file>]
   monolith pool status|fill|drain --target <name> [--tenant <id>] [--warm <runtime>] [--output json|text] [--targets-config <file>]
+  monolith proxy up|status|down --target <name> [--tenant <id>] [--force] [--output json|text] [--targets-config <file>]
   monolith targets [--targets-config <file>]
   monolith deploy <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
   monolith validate <manifest>
@@ -53,9 +54,11 @@ Factory manifests run on 'local'. Spec-declared agents run on 'local' or a
 named proxmox target in .monolith/targets.toml. The proxmox driver claims a
 guest from the tenant's warm pool (or clones one cold), binds it, delivers
 the runtime bundle through the guest's bind agent and runs it there; the
-agent's credential proxy stays on this host and the guest reaches it through
-a relay (see templates/README.md). 'monolith pool' keeps a target's
-per-tenant warm pool. 'ssh' is reserved and has no driver.
+agent's credential proxy runs as a route in its tenant's proxy guest, the
+only address the agent guest may reach (see docs/credential-boundary.md).
+'monolith pool' keeps a target's per-tenant warm pool; 'monolith proxy'
+starts, shows or stops a tenant's proxy guest (apply starts it when needed).
+'ssh' is reserved and has no driver.
 "#;
 const MAX_TOOL_CALLS_PER_TURN: usize = 32;
 
@@ -108,6 +111,7 @@ fn run() -> Result<(), String> {
         }
         "agent" => std::process::exit(command_agent(&rest)),
         "pool" => std::process::exit(command_pool(&rest)),
+        "proxy" => std::process::exit(command_proxy(&rest)),
         "targets" => command_targets(&rest),
         "deploy" => command_deploy(&rest),
         "validate" => command_validate(&rest),
@@ -119,9 +123,6 @@ fn run() -> Result<(), String> {
         "destroy" => command_destroy(&rest),
         "demo" => command_demo(&rest),
         "pod-process" => command_pod_process(&rest),
-        // Internal: the control-plane end of a guest's egress tunnel,
-        // started by the proxmox driver (src/relay.rs).
-        "relay" => std::process::exit(monolith::relay::main(&rest)),
         other => Err(format!("unknown command '{other}'. Run 'monolith help'.")),
     }
 }
@@ -318,6 +319,74 @@ fn pool_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, s
         }
         "" => return Err(usage("missing pool command (status, fill or drain)".to_owned())),
         other => return Err(usage(format!("unknown pool command '{other}'"))),
+    })
+}
+
+const PROXY_FLAGS: &[&str] = &["--output", "--target", "--tenant", "--targets-config"];
+
+/// `monolith proxy <up|status|down>`: a tenant's proxy guest on a proxmox
+/// target (U7). Prints one envelope, like `monolith pool`.
+fn command_proxy(arguments: &[String]) -> i32 {
+    let verb = arguments.first().cloned().unwrap_or_default();
+    let rest = arguments.get(1..).unwrap_or_default();
+    let command = format!("proxy {verb}");
+    let json = rest.windows(2).any(|w| w[0] == "--output" && w[1] == "json");
+    let format = if json { output::Format::Json } else { output::Format::Text };
+    let envelope = match proxy_envelope(&verb, rest) {
+        Ok(envelope) => envelope,
+        Err(error) => output::Envelope::failure(&command, error),
+    };
+    envelope.emit(format)
+}
+
+fn proxy_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, substrate::FabricError> {
+    use substrate::{codes, FabricError};
+    let usage = |message: String| FabricError::new(codes::USAGE, message).next("monolith help");
+    let force = arguments.iter().any(|a| a == "--force");
+    let arguments: Vec<String> = arguments.iter().filter(|a| *a != "--force").cloned().collect();
+    for argument in &arguments {
+        if argument.starts_with("--") && !PROXY_FLAGS.contains(&argument.as_str()) {
+            return Err(usage(format!("unknown option '{argument}' for 'proxy {verb}'")));
+        }
+    }
+    if !positional_arguments(&arguments).is_empty() {
+        return Err(usage(format!("'proxy {verb}' takes no positional arguments")));
+    }
+    let target_name = option_value(&arguments, "--target")
+        .map_err(usage)?
+        .ok_or_else(|| usage("--target <name> is required".to_owned()))?;
+    let tenant = option_value(&arguments, "--tenant").map_err(usage)?;
+    let loaded = target::load_catalog_from_cli(&arguments)
+        .map_err(|message| FabricError::new(codes::TARGET_UNKNOWN, message))?;
+    let resolved = loaded
+        .catalog
+        .resolve(Some(&target_name))
+        .map_err(|message| FabricError::new(codes::TARGET_UNKNOWN, message))?;
+    if resolved.kind != target::DeploymentTarget::Proxmox {
+        return Err(usage(format!("target '{target_name}' is not a proxmox target")));
+    }
+    let driver = monolith::proxmox::ProxmoxDriver::from_target(&resolved)?;
+    let command = format!("proxy {verb}");
+    Ok(match verb {
+        "status" => {
+            let proxies = driver.proxy_status(tenant.as_deref())?;
+            output::Envelope::success(&command, false, serde_json::json!({ "proxies": proxies }), Vec::new(), None)
+        }
+        "up" => {
+            let tenant = tenant.ok_or_else(|| usage("'proxy up' needs --tenant <id>".to_owned()))?;
+            let before = driver.proxy_record(&tenant)?.map(|r| (r.vmid, r.provisions));
+            let record = driver.ensure_proxy(&tenant)?;
+            let changed = before != Some((record.vmid, record.provisions));
+            output::Envelope::success(&command, changed, record.summary(), Vec::new(), None)
+        }
+        "down" => {
+            let tenant = tenant.ok_or_else(|| usage("'proxy down' needs --tenant <id>".to_owned()))?;
+            let result = driver.proxy_down(&tenant, force)?;
+            let changed = !result["destroyed"].is_null();
+            output::Envelope::success(&command, changed, result, Vec::new(), None)
+        }
+        "" => return Err(usage("missing proxy command (up, status or down)".to_owned())),
+        other => return Err(usage(format!("unknown proxy command '{other}'"))),
     })
 }
 

@@ -3,13 +3,12 @@
 //!
 //! The control plane packs the runtime's guest recipe into one tar.gz
 //! bundle (the built runtime files plus the agent CA certificate, never a
-//! key or a secret), uploads it with the per-guest credential, starts the
-//! egress relay to the agent's credential proxy on this host, then asks the
-//! bind agent to start the runtime as its unprivileged user with the proxy
-//! variables pointing at the guest's loopback egress port.
-use crate::process::ProcessIdentity;
-use crate::runtimes::{GuestRecipe, LaunchRecipe, WARM_GO_PATH, WarmRecipe, guest_path};
-use crate::substrate::{self, CreateRequest, FabricError, Resource, ResourceJournal, ResourceKind, codes};
+//! key or a secret), uploads it with the per-guest credential, then asks the
+//! bind agent to start the runtime as its unprivileged user, with the proxy
+//! variables naming the agent's route in its tenant's proxy guest and an
+//! egress lock that admits only that proxy (`tenant_proxy.rs`).
+use super::tenant_proxy::Egress;
+use crate::runtimes::{GuestRecipe, WARM_GO_PATH, WarmRecipe, guest_path};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -20,9 +19,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// The loopback port inside the guest where the runtime's proxy variables
-/// point; the bind agent carries each connection to the relay.
-pub const GUEST_EGRESS_PORT: u16 = 7071;
 /// Where the agent CA certificate lands in the bundle.
 pub const GUEST_CA: &str = "trust/monolith-agent-ca.pem";
 
@@ -117,6 +113,12 @@ impl GuestChannel {
 
     pub fn status(&self) -> Result<Value, ChannelError> {
         self.get_json("/status")
+    }
+
+    /// Every process in the guest: pid, uid and command line, without its
+    /// environment (bind agent API 3).
+    pub fn processes(&self) -> Result<Value, ChannelError> {
+        self.get_json("/processes")
     }
 
     fn get_json(&self, path: &str) -> Result<Value, ChannelError> {
@@ -256,7 +258,7 @@ pub fn stage_bundle(recipe: &GuestRecipe, agent_ca: &Path, work_dir: &Path) -> R
     result
 }
 
-fn run_tar(mode: &[&str], archive: &Path, dir: &Path) -> Result<(), String> {
+pub(super) fn run_tar(mode: &[&str], archive: &Path, dir: &Path) -> Result<(), String> {
     let output = Command::new("tar")
         .env("COPYFILE_DISABLE", "1")
         .args(mode)
@@ -358,9 +360,11 @@ fn tar_content_len(data: &[u8]) -> Result<usize, String> {
     Err("the packed files have no end-of-archive marker".to_owned())
 }
 
-/// The body of `POST /runtime/start`: the recipe plus the proxy variables,
-/// which point at the guest's loopback egress port and the CA in the bundle.
-pub fn start_body(recipe: &GuestRecipe, proxy_env: BTreeMap<String, String>) -> Value {
+/// The body of `POST /runtime/start` (bind agent API 3): the recipe plus
+/// the proxy variables, which name the agent's route in its tenant proxy
+/// guest and the CA in the bundle, under an egress lock that admits only
+/// that proxy.
+pub fn start_body(recipe: &GuestRecipe, proxy_env: BTreeMap<String, String>, egress: Egress) -> Value {
     let mut env = recipe.env.clone();
     env.extend(proxy_env);
     json!({
@@ -369,7 +373,7 @@ pub fn start_body(recipe: &GuestRecipe, proxy_env: BTreeMap<String, String>) -> 
         "env": env,
         "cwd": recipe.cwd,
         "port": recipe.port,
-        "egress_port": GUEST_EGRESS_PORT,
+        "egress": egress.lock(),
         "require_egress_lock": true,
     })
 }
@@ -402,7 +406,7 @@ pub fn stage_warm_bundle(recipe: &WarmRecipe, work_dir: &Path) -> Result<PathBuf
 
 /// The body of `POST /runtime/start` for a warm runtime: its own
 /// environment plus the go token, under the same egress lock as any runtime.
-pub fn warm_start_body(recipe: &WarmRecipe, go_token: &str) -> Value {
+pub fn warm_start_body(recipe: &WarmRecipe, go_token: &str, egress: Egress) -> Value {
     let mut env = recipe.env.clone();
     env.insert("MONOLITH_WARM_TOKEN".to_owned(), go_token.to_owned());
     json!({
@@ -411,7 +415,7 @@ pub fn warm_start_body(recipe: &WarmRecipe, go_token: &str) -> Value {
         "env": env,
         "cwd": recipe.cwd,
         "port": recipe.port,
-        "egress_port": GUEST_EGRESS_PORT,
+        "egress": egress.lock(),
         "require_egress_lock": true,
     })
 }
@@ -445,10 +449,11 @@ pub fn go_body(recipe: &GuestRecipe, proxy_env: BTreeMap<String, String>, agent_
     }
     let ca = fs::read(agent_ca).map_err(|e| format!("could not read the agent CA certificate: {e}"))?;
     add(GUEST_CA.to_owned(), ca)?;
-    let start = start_body(recipe, proxy_env);
+    let mut env = recipe.env.clone();
+    env.extend(proxy_env);
     Ok(json!({
-        "env": start["env"],
-        "cwd": start["cwd"],
+        "env": env,
+        "cwd": recipe.cwd,
         "dirs": recipe.dirs,
         "files": files,
     }))
@@ -527,73 +532,6 @@ pub fn send_go(address: Ipv4Addr, port: u16, go_token: &str, body: &Value, deadl
     }
 }
 
-pub fn guest_proxy_url() -> String {
-    format!("http://127.0.0.1:{GUEST_EGRESS_PORT}")
-}
-
 pub fn guest_ca_path() -> String {
     guest_path(GUEST_CA)
-}
-
-/// The `monolith` binary that runs the relay: this executable when it is the
-/// CLI, otherwise `MONOLITH_BIN`.
-fn monolith_bin() -> Result<PathBuf, FabricError> {
-    if let Ok(exe) = std::env::current_exe() {
-        if exe.file_name().and_then(|n| n.to_str()) == Some("monolith") {
-            return Ok(exe);
-        }
-    }
-    if let Some(path) = std::env::var_os("MONOLITH_BIN").map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    Err(FabricError::new(
-        codes::SUBSTRATE_FAILED,
-        "the egress relay needs the monolith binary, and this process is not it",
-    )
-    .next("run through the monolith CLI, or set MONOLITH_BIN to its path"))
-}
-
-/// Start the relay between the guest's tunnel endpoint and the proxy's
-/// loopback tunnel listener, journaled like any other process.
-pub fn start_relay(
-    request: &CreateRequest<'_>,
-    journal: &mut dyn ResourceJournal,
-    session: &str,
-    guest: &str,
-    credential_file: &Path,
-    proxy_tunnel_port: u16,
-) -> Result<Resource, FabricError> {
-    let recipe = LaunchRecipe {
-        program: monolith_bin()?,
-        args: vec![
-            "relay".to_owned(),
-            "--guest".to_owned(),
-            guest.to_owned(),
-            "--credential-file".to_owned(),
-            credential_file.to_string_lossy().into_owned(),
-            "--upstream".to_owned(),
-            proxy_tunnel_port.to_string(),
-        ],
-        env: BTreeMap::new(),
-        cwd: request.generation_dir.to_path_buf(),
-    };
-    let relay_session = format!("{session}-relay");
-    let pending = Resource {
-        kind: ResourceKind::RelayProcess,
-        id: format!("local:{relay_session}"),
-        process: None,
-        guest: None,
-    };
-    journal.touching(&pending)?;
-    let identity: ProcessIdentity =
-        substrate::spawn_group(&recipe, &request.generation_dir.join("relay.log"), &relay_session)
-            .map_err(|error| FabricError::io(codes::PROXY_FAILED, "could not start the egress relay", error))?;
-    let relay = Resource {
-        process: Some(identity),
-        ..pending
-    };
-    journal.created(&relay)?;
-    Ok(relay)
 }

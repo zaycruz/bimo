@@ -11,6 +11,13 @@
 //!
 //! Secret rotation rewrites the secret files and reloads the running proxy
 //! through its management API, without restarting the agent.
+//!
+//! Where the proxy runs is the substrate's choice (`Placement`). A local
+//! proxy reads its files from the generation directory. A remote proxy (the
+//! tenant's proxy guest on Proxmox) gets the CA key, the management key and
+//! the secret values over its control API; on this host they stay in memory
+//! (`RemoteMaterial`, redacted in Debug) and only the CA certificate, which
+//! the agent trusts, is written.
 pub mod config;
 
 use crate::spec::AgentSpec;
@@ -28,6 +35,33 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Where an agent's proxy runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// On this host, from files in the generation directory.
+    Local,
+    /// Elsewhere (a proxy guest); its material is delivered over the wire.
+    Remote,
+}
+
+/// The proxy material a remote proxy needs, held in memory only.
+#[derive(Clone)]
+pub struct RemoteMaterial {
+    pub ca_cert: String,
+    pub ca_key: String,
+    pub secrets: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for RemoteMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemoteMaterial")
+            .field("ca_key", &"<redacted>")
+            .field("secrets", &self.secrets.iter().map(|(env, _)| env).collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 /// Everything needed to launch one agent's proxy.
 #[derive(Debug, Clone)]
 pub struct ProxyPlan {
@@ -44,6 +78,8 @@ pub struct ProxyPlan {
     /// Placeholder per secret env name.
     pub placeholders: BTreeMap<String, String>,
     pub upstream_deny_cidrs: Option<Vec<String>>,
+    /// Set for `Placement::Remote`: nothing secret was written locally.
+    pub remote: Option<RemoteMaterial>,
 }
 
 /// Listener ports a driver allocates for the proxy. Only `tunnel` is used by
@@ -129,8 +165,10 @@ pub fn rotate(proxy_dir: &Path, management_url: &str, secrets: &[(String, String
 }
 
 impl ProxyPlan {
-    /// Create the proxy directory, the per-agent CA, the management key and
-    /// the secret files.
+    /// Create the per-agent CA and the management key. For a local proxy,
+    /// also the proxy directory and the secret files; for a remote one, keep
+    /// them in memory. Either way the agent's CA certificate is written to
+    /// `trust/monolith-agent-ca.pem`.
     pub fn prepare(
         spec: &AgentSpec,
         secrets: &[(String, String)],
@@ -138,27 +176,48 @@ impl ProxyPlan {
         generation_dir: &Path,
         audit_log: PathBuf,
         upstream_deny_cidrs: Option<Vec<String>>,
+        placement: Placement,
     ) -> Result<Self, FabricError> {
-        let program = find_iron_proxy()?;
-        let dir = generation_dir.join("proxy");
         let fail = |context: &str, error: std::io::Error| FabricError::io(codes::PROXY_FAILED, context, error);
+        let (cert_pem, key_pem) = generate_ca(spec)?;
+        verify_ca(&cert_pem, spec)?;
+        let management_key = random_hex(32)?;
+        let dir = generation_dir.join("proxy");
+        let trust_dir = generation_dir.join("trust");
+        fs::create_dir_all(&trust_dir).map_err(|e| fail("could not create the trust directory", e))?;
+        let agent_ca = trust_dir.join("monolith-agent-ca.pem");
+        if placement == Placement::Remote {
+            // Public material only; the generation directory is rebuilt on
+            // every apply, so no fsync is needed for a crash-safe record.
+            fs::write(&agent_ca, cert_pem.as_bytes()).map_err(|e| fail("could not write the agent CA", e))?;
+            return Ok(Self {
+                program: PathBuf::new(),
+                dir,
+                agent_ca,
+                audit_log,
+                management_key,
+                spec: spec.clone(),
+                placeholders,
+                upstream_deny_cidrs,
+                remote: Some(RemoteMaterial {
+                    ca_cert: cert_pem,
+                    ca_key: key_pem,
+                    secrets: secrets.to_vec(),
+                }),
+            });
+        }
+        let program = find_iron_proxy()?;
         fs::create_dir_all(dir.join("secrets")).map_err(|e| fail("could not create the proxy directory", e))?;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
             .map_err(|e| fail("could not restrict the proxy directory", e))?;
         fs::set_permissions(dir.join("secrets"), fs::Permissions::from_mode(0o700))
             .map_err(|e| fail("could not restrict the secrets directory", e))?;
-        let (cert_pem, key_pem) = generate_ca(spec)?;
-        verify_ca(&cert_pem, spec)?;
         state::atomic_write(&dir.join("ca.key"), key_pem.as_bytes(), 0o600)
             .map_err(|e| fail("could not write the CA key", e))?;
         state::atomic_write(&dir.join("ca.crt"), cert_pem.as_bytes(), 0o600)
             .map_err(|e| fail("could not write the CA certificate", e))?;
-        let management_key = random_hex(32)?;
         state::atomic_write(&dir.join("management.key"), management_key.as_bytes(), 0o600)
             .map_err(|e| fail("could not write the proxy management key", e))?;
-        let trust_dir = generation_dir.join("trust");
-        fs::create_dir_all(&trust_dir).map_err(|e| fail("could not create the trust directory", e))?;
-        let agent_ca = trust_dir.join("monolith-agent-ca.pem");
         state::atomic_write(&agent_ca, cert_pem.as_bytes(), 0o644)
             .map_err(|e| fail("could not write the agent CA", e))?;
         write_secret_files(&dir, secrets)?;
@@ -171,7 +230,27 @@ impl ProxyPlan {
             spec: spec.clone(),
             placeholders,
             upstream_deny_cidrs,
+            remote: None,
         })
+    }
+
+    /// The files a remote proxy needs in its route directory, by relative
+    /// name. Holds the CA key and the secret values: send, never store.
+    pub fn remote_files(&self) -> Option<BTreeMap<String, String>> {
+        let material = self.remote.as_ref()?;
+        let mut files = BTreeMap::new();
+        files.insert("ca.crt".to_owned(), material.ca_cert.clone());
+        files.insert("ca.key".to_owned(), material.ca_key.clone());
+        files.insert("management.key".to_owned(), self.management_key.clone());
+        for (env, value) in &material.secrets {
+            files.insert(format!("secrets/{env}.secret"), value.clone());
+        }
+        Some(files)
+    }
+
+    /// The config for a proxy whose files are in `dir` on its own host.
+    pub fn render_at(&self, dir: &Path, bind_host: &str, ports: ProxyPorts, deny: Option<&[String]>) -> String {
+        config::render(self, dir, bind_host, ports, deny)
     }
 
     pub fn secret_file(&self, env: &str) -> PathBuf {
@@ -184,7 +263,7 @@ impl ProxyPlan {
 
     /// Write the config for the given ports and return the launch recipe.
     pub fn launch(&self, bind_host: &str, ports: ProxyPorts) -> Result<crate::runtimes::LaunchRecipe, FabricError> {
-        let text = config::render(self, bind_host, ports);
+        let text = config::render(self, &self.dir, bind_host, ports, None);
         state::atomic_write(&self.config_path(), text.as_bytes(), 0o600)
             .map_err(|e| FabricError::io(codes::PROXY_FAILED, "could not write the proxy config", e))?;
         let mut env = BTreeMap::new();

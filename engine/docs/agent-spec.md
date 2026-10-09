@@ -107,8 +107,8 @@ guest (`RuntimeAdapter::guest`, `src/runtimes/mod.rs`): the files to bundle,
 the program and environment, the port, the memory it needs, and the guest
 class it needs. The driver picks how to acquire a guest from the class;
 delivery into it (bundle upload and start through the bind agent, egress
-through the relay to the proxy on the control plane) is the same for every
-class.
+locked to the agent's route in its tenant's proxy guest) is the same for
+every class.
 
 | Class | Acquired | Agents per guest | Status |
 |---|---|---|---|
@@ -119,8 +119,7 @@ class.
 k3s-based multi-agent platform). Such a runtime would add an adapter whose
 `guest` returns `platform_vm`, and a driver path that creates the VM once per
 deployment and places further agents into the running platform instead of
-claiming a guest per agent. Nothing in delivery, the proxy or the relay
-changes. Asking for it today fails with `runtime_unavailable`.
+claiming a guest per agent. Nothing in delivery or the proxy guest changes. Asking for it today fails with `runtime_unavailable`.
 
 ## Validation
 

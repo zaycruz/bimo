@@ -7,7 +7,6 @@ pub mod process;
 pub mod protocol;
 pub mod proxy;
 pub mod proxmox;
-pub mod relay;
 pub mod runtime;
 pub mod runtimes;
 pub mod secrets;

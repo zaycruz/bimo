@@ -1,11 +1,13 @@
-# Golden template, warm pool and runtime delivery (U6, U8)
+# Golden template, warm pool, proxy guests and runtime delivery (U6, U7, U8)
 
 The Proxmox driver (`src/proxmox/`) clones agent guests from one golden LXC
 template and keeps a small warm pool of started, unbound clones per tenant.
 A claim takes a pooled guest and binds it through the bind agent baked into
 the template (KTD10), and the same bind agent then delivers and runs the
-agent's runtime (U8). This page covers what the operator builds by hand, how
-the pool behaves and how a runtime gets into a guest.
+agent's runtime (U8). Each tenant's credential proxies run in one proxy
+guest cloned from the same template (U7). This page covers what the operator
+builds by hand, how the pool behaves, how a runtime gets into a guest and how
+the proxy guest works.
 
 Monolith never SSHes to a node. The template is built by an operator on the
 node; after that the driver uses only the Proxmox HTTPS API with the
@@ -15,7 +17,7 @@ pool-scoped token.
 
 - Debian 13 standard LXC, unprivileged, `nesting=1`, 256 MB, no swap, 6 GB
   on `local-lvm` (lvmthin, so clones are linked: `full=0`).
-- `python3`, `python3-venv`, `nftables` and the bind agent (API version 2):
+- `python3`, `python3-venv`, `nftables` and the bind agent (API version 3):
   `bind-agent/monolith-bind-agent.py`, run by
   `bind-agent/monolith-bind-agent.service` on port 7070.
 - The runtimes, baked (see "Baked, not fetched" below):
@@ -70,7 +72,19 @@ variables (`VMID`, `OSTEMPLATE`, `STORAGE`, `DISK_GB`, `POOL`, `BRIDGE`,
 `RUNTIME_UID`); see the top of the script. Check the exact
 `OSTEMPLATE` name with `pveam list local`.
 
-To rebuild, `pct destroy 9000` and run the script again. The driver's
+To rebuild, `pct destroy 9000` and run the script again:
+
+```sh
+ssh root@pve-node-a 'pct destroy 9000'
+scp -r scripts/build-template.sh templates/bind-agent root@pve-node-a:/root/monolith-template/
+ssh root@pve-node-a 'sh /root/monolith-template/build-template.sh'
+```
+
+Then `monolith pool drain --target proxmox-live` (or the next fill) retires
+guests from the old template. The proxy guest needs bind agent API 3
+(`TEMPLATE_VERSION` label `debian13-bind-v4`); with an older template,
+`monolith proxy up` and `agent apply` fail with `target_unavailable` and this
+step. The driver's
 template version is the first 12 hex digits of the template config's
 `digest`, so any rebuild or config change is a new version: the next
 `monolith pool fill` retires pooled guests from the old one, and a claim
@@ -95,15 +109,15 @@ The driver token (`agent-driver@pve!example`, role `MonolithDriver` on
 
 | Endpoint | Meaning |
 |---|---|
-| `GET /health` | `{"state": "unbound"|"bound", "hostname", "template_version", "api": 2}` |
+| `GET /health` | `{"state": "unbound"|"bound", "hostname", "template_version", "api": 3}` |
 | `POST /bind` | First bind wins: `{"claim_id", "credential", "payload"}`. A second bind gets 409. |
 | `GET /status` | The bound claim. |
 | `PUT /runtime/bundle` | Unpack a tar.gz runtime bundle into `/srv/monolith/runtime` (owned by `monolith-agent`; links out of the root are refused). 409 while a runtime runs. |
-| `POST /runtime/start` | `{"program", "args", "env", "cwd", "port", "egress_port"}`: install the egress lock, open the loopback egress port, start and supervise the runtime as `monolith-agent` (restarts with backoff; relaunched if the bind agent restarts). |
+| `POST /runtime/start` | `{"program", "args", "env", "cwd", "port", "egress"}`: install the egress lock, then start and supervise the runtime as `monolith-agent` (restarts with backoff; relaunched if the bind agent restarts). `egress` is `{"mode": "proxy", "address", "port"}` (the runtime user may reach only that address and port, plus its own port on loopback) or, only for a guest bound with payload `role: "proxy"`, `{"mode": "upstream", "deny_cidrs"}` (loopback and DNS open, IPv6 and the listed IPv4 ranges refused, the rest open). A bare `egress_port` (API 2) is refused. |
 | `GET /runtime`, `GET /runtime/log` | Supervisor state; the last 256 KiB of the runtime's output. |
-| `GET /tunnel` | 101: the connection becomes an idle egress tunnel for the relay. |
+| `GET /processes` | Every process's pid, uid and command line (no environment), for checks such as "is tailscaled running". |
 | `POST /probe/egress` | `{"host", "port"}`: try a direct connection as `monolith-agent` (the live test expects a refusal). |
-| `GET /inspect` | A tar of the guest's writable state and every process's environment and command line, for the no-secret audit. |
+| `GET /inspect` | A tar of the guest's writable state (including `/dev/shm`) and every process's environment and command line, for the no-secret audit. Never used on a proxy guest, which holds secrets by design. |
 
 Every endpoint except `/health` and `/bind` needs `Authorization: Bearer
 <credential>` and answers 401 without it.
@@ -111,8 +125,12 @@ Every endpoint except `/health` and `/bind` needs `Authorization: Bearer
 The credential is minted by the control plane for this one claim and kept in
 the agent's generation directory (`guest-credential`, mode 0600). The guest
 keeps only its SHA-256, in `/run` (tmpfs). The payload carries identity
-(agent, tenant, generation, target, template version), no secret and no
-source; secrets stay with the per-tenant credential proxy (U7).
+(agent, tenant, generation, target, template version; `role: "proxy"` for a
+proxy guest), no secret and no source; secrets stay with the tenant's proxy
+guest (U7).
+
+API 3 replaced API 2's loopback egress port and `GET /tunnel` (the relay to a
+proxy on the control plane) with the two egress modes above.
 
 Stage-1 limit: the first bind is trust-on-first-use. Anything that can reach
 an unbound pooled guest's port 7070 before the control plane can bind it.
@@ -126,18 +144,52 @@ After the bind, `monolith agent apply` (`src/proxmox/delivery.rs`):
 1. packs the adapter's guest recipe on the control plane: eve ships its
    built `.output` server bundle (made by `eve build`), Hermes its config
    directory as `HERMES_HOME`, plus the agent CA certificate;
-2. starts the agent's iron-proxy on the control-plane host (loopback only);
-3. raises the guest's memory if the runtime needs more than the pool
-   default (eve: 384 MB; Hermes: 256 MB), through the API;
-4. uploads the bundle (`PUT /runtime/bundle`);
-5. starts the relay (`monolith relay`, a journaled `relay_process`) that
-   carries the guest's egress to the proxy;
-6. starts the runtime (`POST /runtime/start`) on port 8080 with its proxy
-   variables pointing at the guest's `127.0.0.1:7071`;
-7. probes the runtime at `http://<guest>:8080` until it accepts a first task.
+2. makes sure the tenant's proxy guest is up (a health check when it is;
+   see "The proxy guest");
+3. claims a guest and checks its bind agent speaks API 3;
+4. at the same time: starts the agent's route in the proxy guest (its own
+   iron-proxy with its CA, secrets and allowlist), raises the guest's memory
+   if the runtime needs more than the pool default (eve: 384 MB; Hermes:
+   256 MB) and uploads the bundle (`PUT /runtime/bundle`);
+5. starts the runtime (`POST /runtime/start`) on port 8080, locked to the
+   proxy guest's front, with its proxy variables set to
+   `http://<route>:<token>@<proxy guest>:3128`;
+6. probes the runtime at `http://<guest>:8080` until it accepts a first task.
 
-A guest cloned from a template without the v2 bind agent answers 404, and
-apply fails with `target_unavailable` and the rebuild step.
+A guest cloned from a template whose bind agent is older than API 3 fails the
+claim check, and apply fails with `target_unavailable` and the rebuild step.
+
+## The proxy guest (U7)
+
+One per tenant and target, started by `monolith proxy up --target T --tenant
+X` or by the first apply that needs it; `monolith proxy status` shows it and
+its routes, `monolith proxy down` destroys it (refused while it serves a
+route, unless `--force`). It is a linked clone like any guest, in the same
+pool and VMID range, with `role=proxy` in its description and the
+`monolith-proxy` tag, 384 MB; its record is
+`<pool dir>/<target>-proxies/<tenant>.json` (0600), outside the pool state,
+so pool fill, drain and claim never touch it, and reservations skip its VMID
+and addresses.
+
+Provisioning, all through the bind agent: bind with payload `role: "proxy"`,
+upload a bundle with `tenant-proxy.py` (the supervisor) and the Linux
+iron-proxy 0.52.0 build (pinned by SHA-256, see `docs/credential-boundary.md`),
+start the supervisor under the upstream lock. The supervisor listens on 3128
+(the front agents use, credential required) and 8080 (its control API,
+bearer token known only to the control plane): `PUT /routes/<id>`,
+`GET /routes/<id>`, `POST /routes/<id>/secrets`, `GET /routes/<id>/audit`,
+`DELETE /routes/<id>`, `GET /status`, `GET /health`. Route files live in
+`/dev/shm` only.
+
+With `tenant_vlans` mapping the tenant to a VLAN, the proxy guest also gets
+`net1` on that VLAN with a second address from the range (no gateway), and
+agents are locked to that address. Built, not yet exercised live.
+
+Restarts: the external restart on pve-node-a (below) empties the proxy guest's
+tmpfs like any guest's. The next `proxy up` or apply sees the supervisor's
+boot id change (or the guest unbound) and provisions the guest again in
+place; agents whose routes were lost fail closed until they are applied
+again. Secrets are never stored to re-send them.
 
 ### Baked, not fetched
 
@@ -215,7 +267,8 @@ Decisions:
    8080 and answers everything 503 `{"state": "warm"}`. The guest counts as
    warm only after that answer. At claim the control plane checks the
    binding (`/status`: claim id, tenant, warm key) and the runtime
-   (`/runtime`), starts the relay, and sends one `POST /monolith/warm/go`
+   (`/runtime`) and the lock's proxy address, starts the agent's route in the
+   proxy guest, and sends one `POST /monolith/warm/go`
    with the per-guest go token: the agent's env (placeholder, control key,
    proxy variables), cwd, its `HERMES_HOME` files and the agent CA. The
    launcher writes them, records go in the runtime root (0600, so a
@@ -238,8 +291,9 @@ Decisions:
    before the agent is known. A per-artifact standby (pre-start a given
    build in a pooled guest) would be the next step and is not built.
 4. **Memory is raised beside the upload,** not before it.
-5. **No template rebuild.** Everything above uses the v2 bind agent as it is
-   (bind, bundle, start, status, runtime); template 9000 is unchanged.
+5. **No template rebuild for warm runtimes.** They use the bind agent as it
+   is (bind, bundle, start, status, runtime). The proxy guest (U7) needs
+   API 3's egress modes, which is a rebuild.
 
 Security properties of a warm guest:
 
@@ -253,7 +307,9 @@ Security properties of a warm guest:
   tenant (the claim checks the binding again); the latency test fills
   another tenant's warm guests and shows a claim with an empty pool clones
   rather than take them.
-- Egress is locked before the launcher starts, exactly as for a cold start.
+- Egress is locked before the launcher starts, exactly as for a cold start,
+  to the tenant's proxy guest; a claim refuses a warm guest locked to another
+  address.
 - A warm runtime's `/proc/<pid>/environ` shows its pre-claim environment;
   the agent's environment is in the go record, which `/inspect` captures.
 
@@ -274,8 +330,11 @@ p50 834 ms, p95 1004 ms, the one sample over 1 s in a noisy round; R3 is
 borderline, STOP by 4 ms). eve, n=6: p50 1622 ms, p95 2297 ms. eve's floor on a
 pooled guest is Node loading its server bundle in the guest (0.8 to 0.9 s;
 150 ms on the control-plane Mac) plus upload (0.3 s), about 1.5 s: eve does
-not meet R3 without a per-artifact standby. Of the Hermes breakdown,
-`proxy_plan`, `proxy_start` and `relay_start` (about 90 ms together) are the
-control-plane iron-proxy and its relay, and move when the proxy moves to a
-per-tenant proxy guest; the go protocol carries the proxy variables and CA
-it is given and does not depend on where the proxy runs.
+not meet R3 without a per-artifact standby. Those numbers had `proxy_plan`,
+`proxy_start` and `relay_start` (about 90 ms together) for the control-plane
+iron-proxy and its relay. With the proxy guest, `proxy_start` and
+`relay_start` are gone; `proxy_ready` (a health check) and the route request
+(beside the upload, or `route` before go) replace them. The go protocol
+carries the proxy variables and CA it is given and does not depend on where
+the proxy runs. New numbers need the API 3 template (see
+`docs/benchmarks/spawn-latency.md`).

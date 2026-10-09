@@ -10,36 +10,48 @@ After the bind, the control plane delivers the runtime through this agent
 (U8): it uploads the runtime bundle, then starts the runtime, which runs as
 the unprivileged user MONOLITH_RUNTIME_USER under this agent's supervision.
 
-Credentials never enter the guest. The runtime reaches its model provider
-only through its credential proxy, which runs on the control plane: the
-runtime's HTTP(S)_PROXY is a loopback listener here (the egress port), and
-each connection to it is carried to the proxy over a tunnel the control
-plane's relay opened to this agent (GET /tunnel, authenticated). An
-nftables rule rejects every other connection the runtime user makes.
+Credentials never enter an agent guest. An agent's runtime reaches its model
+provider only through its tenant's credential proxy, which runs in a
+separate, long-lived proxy guest (one per tenant): the runtime's
+HTTP(S)_PROXY names that guest's address and port, with a per-agent proxy
+credential. The egress lock (nftables) lets the runtime user connect to
+that one address and port and to its own loopback port, and rejects
+everything else, so a client that ignores the proxy variables fails instead
+of leaking.
+
+A proxy guest is bound with the payload role "proxy". Only such a guest may
+start its runtime with the "upstream" egress mode, which lets the runtime
+user (the tenant proxy) reach the internet but no private, link-local or
+loopback-adjacent network except DNS.
 
 The template carries no CA, key, secret or tenant data. The claim is kept in
 /run (tmpfs), so it never reaches the template or a clone's disk.
 
 Endpoints (port MONOLITH_BIND_PORT, default 7070); B = Bearer credential:
-  GET  /health          -> {"state", "hostname", "template_version", "api"}
+  GET  /health          -> {"state", "hostname", "template_version", "api": 3}
   POST /bind            -> {"state": "bound", "claim_id", "hostname"} | 409
   GET  /status       B  -> the bound claim
   PUT  /runtime/bundle B -> unpack a tar.gz runtime bundle (409 while running)
-  POST /runtime/start  B -> lock egress, open the egress port, run the runtime
+  POST /runtime/start  B -> lock egress (mode "proxy" or "upstream"), run the
+                           runtime
   GET  /runtime      B  -> supervisor state (pid, restarts, last exit)
   GET  /runtime/log  B  -> the last 256 KiB of the runtime's output
-  GET  /tunnel       B  -> 101; the socket becomes an idle egress tunnel
   POST /probe/egress B  -> try a direct connection as the runtime user
   GET  /inspect      B  -> tar of the guest's writable state and every
                            process's environment, for audits
+  GET  /processes    B  -> every process's pid, uid and command line (no
+                           environment)
+
+API 3 replaced API 2's loopback egress port and GET /tunnel (the relay to a
+proxy on the control plane) with the direct path to the tenant proxy guest.
 """
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import os
 import pwd
-import queue
 import shutil
 import socket
 import subprocess
@@ -49,7 +61,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-API_VERSION = 2
+API_VERSION = 3
 PORT = int(os.environ.get("MONOLITH_BIND_PORT", "7070"))
 STATE_DIR = os.environ.get("MONOLITH_BIND_STATE_DIR", "/run/monolith")
 SRV_DIR = os.environ.get("MONOLITH_SRV_DIR", "/srv/monolith")
@@ -63,10 +75,8 @@ VERSION_PATH = "/etc/monolith/template-version"
 MAX_BODY = 64 * 1024
 MAX_BUNDLE = 512 * 1024 * 1024
 LOG_TAIL = 256 * 1024
-KEEPALIVE_S = 15
-TUNNEL_WAIT_S = 10
 INSPECT_PATHS = [SRV_DIR, STATE_DIR, "/etc/monolith", "/etc/environment", "/etc/profile.d",
-                 "/tmp", "/var/tmp", "/root", "/home", "/var/log"]
+                 "/tmp", "/var/tmp", "/root", "/home", "/var/log", "/dev/shm"]
 INSPECT_FILE_CAP = 64 * 1024 * 1024
 INSPECT_TOTAL_CAP = 512 * 1024 * 1024
 
@@ -113,119 +123,10 @@ def as_runtime_user():
 # ---------------------------------------------------------------- egress
 
 
-class Tunnel:
-    """One idle connection from the control plane's relay. The relay waits
-    for a byte: 0x00 is a keepalive, 0x01 means "connect the proxy now";
-    after 0x01 the socket carries one proxied connection's bytes."""
-
-    def __init__(self, sock, rfile):
-        self.sock = sock
-        self.rfile = rfile
-        self.lock = threading.Lock()
-        self.state = "idle"
-        self.claimed = threading.Event()
-        self.done = threading.Event()
-
-    def keepalive(self):
-        with self.lock:
-            if self.state != "idle":
-                return True
-            try:
-                self.sock.sendall(b"\x00")
-                return True
-            except OSError:
-                self.state = "dead"
-                return False
-
-    def claim(self):
-        with self.lock:
-            if self.state != "idle":
-                return False
-            try:
-                self.sock.sendall(b"\x01")
-            except OSError:
-                self.state = "dead"
-                return False
-            self.state = "busy"
-            self.claimed.set()
-            return True
-
-
-TUNNELS = queue.Queue()
-EGRESS_STARTED = set()
-EGRESS_LOCK = threading.Lock()
-
-
-def splice(client, tunnel):
-    def upstream():
-        try:
-            while True:
-                data = client.recv(65536)
-                if not data:
-                    break
-                tunnel.sock.sendall(data)
-        except OSError:
-            pass
-        try:
-            tunnel.sock.shutdown(socket.SHUT_WR)
-        except OSError:
-            pass
-
-    worker = threading.Thread(target=upstream, daemon=True)
-    worker.start()
-    try:
-        while True:
-            data = tunnel.rfile.read1(65536)
-            if not data:
-                break
-            client.sendall(data)
-    except (OSError, ValueError):
-        pass
-    for sock in (client, tunnel.sock):
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-    worker.join(5)
-    client.close()
-    tunnel.done.set()
-
-
-def handle_egress(client):
-    deadline = time.monotonic() + TUNNEL_WAIT_S
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            client.close()
-            return
-        try:
-            tunnel = TUNNELS.get(timeout=remaining)
-        except queue.Empty:
-            client.close()
-            return
-        if tunnel.claim():
-            break
-    splice(client, tunnel)
-
-
-def serve_egress(port):
-    with EGRESS_LOCK:
-        if port in EGRESS_STARTED:
-            return
-        listener = socket.create_server(("127.0.0.1", port), reuse_port=False)
-        EGRESS_STARTED.add(port)
-
-    def loop():
-        while True:
-            client, _ = listener.accept()
-            threading.Thread(target=handle_egress, args=(client,), daemon=True).start()
-
-    threading.Thread(target=loop, daemon=True).start()
-
-
-def egress_ruleset(uid, ports):
-    allowed = ", ".join(str(p) for p in sorted(set(ports)))
-    return (
+def egress_ruleset(uid, port, egress):
+    """The runtime user's output policy. Every other user is untouched;
+    replies on connections the runtime accepted are allowed."""
+    head = (
         "table inet monolith_egress\n"
         "delete table inet monolith_egress\n"
         "table inet monolith_egress {\n"
@@ -233,23 +134,37 @@ def egress_ruleset(uid, ports):
         "    type filter hook output priority 0; policy accept;\n"
         f"    meta skuid != {uid} accept\n"
         "    ct state established,related accept\n"
-        f"    oifname \"lo\" tcp dport {{ {allowed} }} accept\n"
-        "    counter reject\n"
-        "  }\n"
-        "}\n"
     )
+    if egress["mode"] == "proxy":
+        body = (
+            f"    oifname \"lo\" tcp dport {port} accept\n"
+            f"    ip daddr {egress['address']} tcp dport {egress['port']} accept\n"
+            "    counter reject\n"
+        )
+    else:
+        deny = ", ".join(egress["deny_cidrs"])
+        body = (
+            "    oifname \"lo\" accept\n"
+            "    udp dport 53 accept\n"
+            "    tcp dport 53 accept\n"
+            "    meta nfproto ipv6 counter reject\n"
+            + (f"    ip daddr {{ {deny} }} counter reject\n" if deny else "")
+            + "    accept\n"
+        )
+    return head + body + "  }\n}\n"
 
 
-def lock_egress(ports):
-    """The runtime user may connect only to the loopback egress port (and its
-    own port); everything else it sends is rejected, so a client that
-    ignores the proxy variables fails instead of leaking."""
+def lock_egress(spec):
+    """Install the runtime user's egress policy. In "proxy" mode (an agent
+    guest) it may connect only to its tenant proxy and its own loopback
+    port; in "upstream" mode (a proxy guest) it may reach public addresses
+    and DNS, never a denied range."""
     ids = runtime_ids()
     if ids is None:
         raise RuntimeError("the egress lock needs root")
     nft = shutil.which("nft") or "/usr/sbin/nft"
-    result = subprocess.run([nft, "-f", "-"], input=egress_ruleset(ids[0], ports).encode(),
-                            capture_output=True, timeout=10)
+    rules = egress_ruleset(ids[0], spec["port"], spec["egress"])
+    result = subprocess.run([nft, "-f", "-"], input=rules.encode(), capture_output=True, timeout=10)
     if result.returncode != 0:
         raise RuntimeError("nft failed: " + result.stderr.decode(errors="replace").strip()[:400])
 
@@ -332,14 +247,48 @@ class Supervisor:
             "last_exit": self.last_exit,
             "started_at": self.started_at,
             "port": self.spec.get("port") if self.spec else None,
-            "egress_port": self.spec.get("egress_port") if self.spec else None,
+            "egress": self.spec.get("egress") if self.spec else None,
         }
 
 
 SUPERVISOR = Supervisor()
 
 
-def validate_start(body):
+def validate_egress(egress, claim):
+    if not isinstance(egress, dict):
+        return None, "egress must be an object: {\"mode\": \"proxy\", \"address\", \"port\"} or {\"mode\": \"upstream\", \"deny_cidrs\"}"
+    mode = egress.get("mode")
+    if mode == "proxy":
+        try:
+            address = ipaddress.IPv4Address(egress.get("address"))
+        except (ipaddress.AddressValueError, ValueError, TypeError):
+            return None, "egress.address must be an IPv4 address"
+        port = egress.get("port")
+        if address.is_loopback or address.is_unspecified or address.is_multicast:
+            return None, "egress.address must be the tenant proxy guest's address"
+        if not isinstance(port, int) or not 1 <= port <= 65535:
+            return None, "egress.port must be a port number"
+        return {"mode": "proxy", "address": str(address), "port": port}, None
+    if mode == "upstream":
+        payload = (claim or {}).get("payload") or {}
+        if payload.get("role") != "proxy":
+            return None, "only a guest bound as a proxy guest (payload role \"proxy\") may use upstream egress"
+        cidrs = egress.get("deny_cidrs")
+        if not isinstance(cidrs, list):
+            return None, "egress.deny_cidrs must be a list of IPv4 CIDRs"
+        clean = []
+        for cidr in cidrs:
+            try:
+                network = ipaddress.ip_network(cidr, strict=False)
+            except (ValueError, TypeError):
+                return None, "egress.deny_cidrs holds an invalid CIDR"
+            if network.version == 4:
+                clean.append(str(network))
+        return {"mode": "upstream", "deny_cidrs": clean}, None
+    return None, "egress.mode must be \"proxy\" or \"upstream\""
+
+
+def validate_start(body, claim):
     if not isinstance(body, dict):
         return None, "body must be a JSON object"
     program = body.get("program")
@@ -347,7 +296,6 @@ def validate_start(body):
     env = body.get("env", {})
     cwd = body.get("cwd")
     port = body.get("port")
-    egress_port = body.get("egress_port")
     if not isinstance(program, str) or not program.startswith("/"):
         return None, "program must be an absolute path"
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
@@ -359,9 +307,13 @@ def validate_start(body):
         return None, "cwd must be inside " + RUNTIME_DIR
     if not os.path.isdir(real_cwd):
         return None, "cwd %s does not exist; upload the bundle first" % cwd
-    for name, value in (("port", port), ("egress_port", egress_port)):
-        if not isinstance(value, int) or not 1024 <= value <= 65535 or value == PORT:
-            return None, name + " must be a free port between 1024 and 65535"
+    if not isinstance(port, int) or not 1024 <= port <= 65535 or port == PORT:
+        return None, "port must be a free port between 1024 and 65535"
+    if "egress_port" in body and "egress" not in body:
+        return None, "egress_port is API 2 (the control-plane relay); API 3 takes egress {mode, ...}"
+    egress, error = validate_egress(body.get("egress"), claim)
+    if error:
+        return None, error
     if not os.path.isfile(program):
         return None, "program %s is not installed in this guest (rebuild the template)" % program
     return {
@@ -370,20 +322,19 @@ def validate_start(body):
         "env": env,
         "cwd": cwd,
         "port": port,
-        "egress_port": egress_port,
+        "egress": egress,
         "require_egress_lock": body.get("require_egress_lock", True) is not False,
     }, None
 
 
 def run_runtime(spec):
-    """Lock egress, open the egress port and start supervising. Raises on a
+    """Lock egress and start supervising. Raises on a
     failure that must keep the runtime from starting."""
     try:
-        lock_egress([spec["egress_port"], spec["port"]])
+        lock_egress(spec)
     except (RuntimeError, OSError, subprocess.SubprocessError) as error:
         if spec["require_egress_lock"]:
             raise RuntimeError("could not lock the runtime's egress: %s" % error)
-    serve_egress(spec["egress_port"])
     return SUPERVISOR.start(spec)
 
 
@@ -449,6 +400,19 @@ def write_inspect(out):
         add_bytes("inspect-manifest.json", json.dumps(manifest, indent=1).encode())
 
 
+def list_processes():
+    out = []
+    for pid in sorted((p for p in os.listdir("/proc") if p.isdigit()), key=int) if os.path.isdir("/proc") else []:
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as handle:
+                cmdline = [part.decode(errors="replace") for part in handle.read(4096).split(b"\0") if part]
+            uid = os.stat("/proc/%s" % pid).st_uid
+        except OSError:
+            continue
+        out.append({"pid": int(pid), "uid": uid, "cmdline": cmdline})
+    return out
+
+
 PROBE_SCRIPT = (
     "import json, socket, sys\n"
     "try:\n"
@@ -463,7 +427,7 @@ PROBE_SCRIPT = (
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "monolith-bind/2"
+    server_version = "monolith-bind/3"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):  # quiet: no payload in the journal
@@ -519,7 +483,7 @@ class Handler(BaseHTTPRequestHandler):
                 "api": API_VERSION,
             })
             return
-        if self.path not in ("/status", "/runtime", "/runtime/log", "/tunnel", "/inspect"):
+        if self.path not in ("/status", "/runtime", "/runtime/log", "/inspect", "/processes"):
             self.not_here()
             return
         claim = self.authorized()
@@ -549,8 +513,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
-        elif self.path == "/tunnel":
-            self.tunnel()
+        elif self.path == "/processes":
+            self.reply(200, {"processes": list_processes()})
         elif self.path == "/inspect":
             self.close_connection = True
             self.send_response(200)
@@ -559,20 +523,6 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             write_inspect(self.wfile)
             self.wfile.flush()
-
-    def tunnel(self):
-        self.close_connection = True
-        self.send_response(101)
-        self.send_header("Connection", "Upgrade")
-        self.send_header("Upgrade", "monolith-tunnel")
-        self.end_headers()
-        self.wfile.flush()
-        tunnel = Tunnel(self.connection, self.rfile)
-        TUNNELS.put(tunnel)
-        while not tunnel.claimed.wait(KEEPALIVE_S):
-            if not tunnel.keepalive():
-                return
-        tunnel.done.wait()
 
     def do_PUT(self):
         if self.path != "/runtime/bundle":
@@ -624,13 +574,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path not in ("/runtime/start", "/probe/egress"):
             self.not_here()
             return
-        if self.authorized() is None:
+        claim = self.authorized()
+        if claim is None:
             return
         body = self.json_body()
         if body is None:
             return
         if self.path == "/runtime/start":
-            spec, error = validate_start(body)
+            spec, error = validate_start(body, claim)
             if error:
                 self.reply(400, {"error": error})
                 return

@@ -11,14 +11,17 @@
 //! binds it with a per-claim payload through the bind agent baked into the
 //! template (KTD10). When the pool is empty it falls back to a cold clone and
 //! says so. The runtime is then delivered and started through the same bind
-//! agent (`delivery.rs`, U8). The agent's credential proxy runs on the
-//! control-plane host, never in a guest (U7, stage 1): the guest reaches it
-//! through the egress relay (`crate::relay`), and the bind payload, the
-//! bundle and the runtime's environment carry placeholders, never a secret.
+//! agent (`delivery.rs`, U8). The agent's credential proxy runs in its
+//! tenant's proxy guest (`tenant_proxy.rs`, U7 stage 2), never on the control
+//! plane and never in the agent's guest: each generation gets a route there,
+//! the agent guest's egress lock admits only that proxy's front, and the bind
+//! payload, the bundle and the runtime's environment carry placeholders and
+//! the route credential, never a secret.
 pub mod client;
 pub mod delivery;
 pub mod network;
 pub mod pool;
+pub mod tenant_proxy;
 
 use crate::runtimes::{GuestClass, GUEST_RUNTIME_PORT};
 use crate::substrate::{
@@ -38,6 +41,16 @@ use std::time::{Duration, Instant};
 /// guest without it.
 pub const OWNER_MARKER: &str = "monolith-owned";
 pub const OWNER_TAG: &str = "monolith";
+
+/// What a cloned guest is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestRole {
+    /// Runs one agent's runtime; pooled or cold-cloned per claim.
+    Agent,
+    /// The tenant's long-lived proxy guest. `agent_address` is its address
+    /// on the tenant's VLAN (`net1`), when the target maps one.
+    Proxy { agent_address: Option<Ipv4Addr> },
+}
 
 /// Resolved driver settings. Every field is required to touch the cluster.
 #[derive(Debug, Clone)]
@@ -271,6 +284,22 @@ impl ProxmoxDriver {
         tenant: &str,
         timeout: Duration,
     ) -> Result<(), FabricError> {
+        self.clone_guest(vmid, address, tenant, GuestRole::Agent, timeout)
+    }
+
+    /// `clone_and_start` for either role. An agent guest's only NIC is on
+    /// its tenant's VLAN when the target maps one. A proxy guest keeps
+    /// `net0` on the untagged bridge (control plane, upstream) and, with a
+    /// VLAN, gets `net1` on the tenant's segment for its agents; it is
+    /// marked `role=proxy` and tagged `monolith-proxy`, and is never pooled.
+    pub fn clone_guest(
+        &self,
+        vmid: u32,
+        address: Ipv4Addr,
+        tenant: &str,
+        role: GuestRole,
+        timeout: Duration,
+    ) -> Result<(), FabricError> {
         let settings = self.settings()?;
         let client = self.client()?;
         let vlan = self.tenant_vlan(tenant)?;
@@ -278,11 +307,14 @@ impl ProxmoxDriver {
         let deadline = Instant::now() + timeout;
         let node = encode(&settings.node);
         let hostname = hostname(vmid);
-        let description = format!(
+        let mut description = format!(
             "{OWNER_MARKER} target={} tenant={}",
             self.target_name,
             tag_slug(tenant)
         );
+        if let GuestRole::Proxy { .. } = role {
+            description.push_str(" role=proxy");
+        }
         client
             .run_task(
                 &settings.node,
@@ -299,16 +331,27 @@ impl ProxmoxDriver {
             )
             .map_err(|error| self.api_error(&format!("could not clone template into {vmid}"), error))?;
         let guest = self.guest_path(vmid)?;
+        let (net0_vlan, memory, tags) = match role {
+            GuestRole::Agent => (vlan, settings.memory_mb, format!("{OWNER_TAG};tenant-{}", tag_slug(tenant))),
+            GuestRole::Proxy { .. } => (
+                None,
+                tenant_proxy::PROXY_MEMORY_MB.max(settings.memory_mb),
+                format!("{OWNER_TAG};tenant-{};{}", tag_slug(tenant), tenant_proxy::PROXY_TAG),
+            ),
+        };
         let mut config = vec![
             (
                 "net0",
-                network::net0(&settings.bridge, address, settings.prefix_len, settings.gateway, vlan),
+                network::net0(&settings.bridge, address, settings.prefix_len, settings.gateway, net0_vlan),
             ),
-            ("memory", settings.memory_mb.to_string()),
+            ("memory", memory.to_string()),
             ("swap", "0".to_owned()),
             ("onboot", "0".to_owned()),
-            ("tags", format!("{OWNER_TAG};tenant-{}", tag_slug(tenant))),
+            ("tags", tags),
         ];
+        if let (GuestRole::Proxy { agent_address: Some(agent_address) }, Some(tag)) = (role, vlan) {
+            config.push(("net1", network::net1_tenant(&settings.bridge, agent_address, settings.prefix_len, tag)));
+        }
         if let Some(cores) = settings.cores {
             config.push(("cores", cores.to_string()));
         }
@@ -469,24 +512,25 @@ impl Substrate for ProxmoxDriver {
         let bundle = delivery::stage_bundle(&recipe, &request.proxy.agent_ca, request.generation_dir)
             .map_err(|message| FabricError::new(codes::SOURCE_FAILED, message))?;
         request.clock.mark("bundle");
-        let session = format!(
-            "{}-g{}-{}",
-            request.agent,
-            request.generation,
-            crate::state::timestamp_millis()
-        );
-        // The proxy first, on this host: the agent never runs without its
-        // boundary, and the boundary never runs in a guest.
-        let (proxy, ports) = substrate::start_local_proxy(request, journal, &session)?;
-        request.clock.mark("proxy_start");
+        // The tenant's proxy guest first: the agent never runs without its
+        // boundary, and the boundary never runs on this host or in the
+        // agent's guest (U7, stage 2).
+        let proxy = self.ensure_proxy(request.tenant)?;
+        let egress = proxy.egress();
+        let route = tenant_proxy::Route::new(request.agent, request.generation)?;
+        let route_resource = self.route_resource(&proxy, &route);
+        request.clock.mark("proxy_ready");
         // From here every resource is journaled; on an error the control
         // plane clears what was touched, in reverse order.
+        journal.touching(&route_resource)?;
         let warm = crate::runtimes::lookup(request.runtime).and_then(|adapter| adapter.warm(GUEST_RUNTIME_PORT));
+        let egress_key = egress.to_string();
         let claim = self.claim_for(
             request.tenant,
             request.agent,
             request.generation,
             warm.as_ref().map(|w| w.key.as_str()),
+            Some(&egress_key),
             journal,
         )?;
         request.clock.mark(match (&claim.go_token, claim.pooled) {
@@ -495,50 +539,17 @@ impl Substrate for ProxmoxDriver {
             (None, false) => "claim_cold_clone",
         });
         pool::spawn_refill(&self.target_name, request.tenant, warm.as_ref().map(|_| request.runtime));
+        tenant_proxy::check_bind_api(&claim.status, claim.vmid, &self.target_name)?;
         // The per-guest credential stays with the control plane, beside the
         // generation it belongs to.
         let credential_path = request.generation_dir.join("guest-credential");
         crate::state::atomic_write(&credential_path, claim.credential.as_bytes(), 0o600)
             .map_err(|error| FabricError::io(codes::STATE_FAILED, "could not record the guest credential", error))?;
-        if let Some(go_token) = &claim.go_token {
-            // A warm guest already runs its launcher: start the relay, then
-            // hand the launcher the agent's files and environment.
-            let _ = std::fs::remove_file(&bundle);
-            let relay = delivery::start_relay(
-                request,
-                journal,
-                &session,
-                &format!("{}:{}", claim.address, settings.bind_port),
-                &credential_path,
-                ports.tunnel,
-            )?;
-            request.clock.mark("relay_start");
-            let proxy_env = request
-                .proxy
-                .agent_env_with_ca(&delivery::guest_proxy_url(), &delivery::guest_ca_path());
-            let body = delivery::go_body(&recipe, proxy_env, &request.proxy.agent_ca)
-                .map_err(|message| FabricError::new(codes::SOURCE_FAILED, message))?;
-            delivery::send_go(
-                claim.address,
-                recipe.port,
-                go_token,
-                &body,
-                std::time::Instant::now() + std::time::Duration::from_secs(60),
-            )
-            .map_err(|message| {
-                FabricError::new(codes::SUBSTRATE_FAILED, format!("guest {}: {message}", claim.vmid))
-                    .next(format!("monolith agent logs {}", request.agent))
-            })?;
-            request.clock.mark("go");
-            return Ok(Created {
-                resources: vec![proxy, claim.resource, relay],
-                endpoint: crate::runtimes::Endpoint {
-                    base_url: format!("http://{}:{}", claim.address, recipe.port),
-                    control_key: request.control_key.to_owned(),
-                },
-                proxy_management: format!("http://127.0.0.1:{}", ports.management),
-            });
-        }
+        // The agent reaches its route in the proxy guest directly, with the
+        // route's credential in the proxy URL; its lock admits nothing else.
+        let proxy_env = request
+            .proxy
+            .agent_env_with_ca(&route.url(egress), &delivery::guest_ca_path());
         let channel = GuestChannel::new(claim.address, settings.bind_port, &claim.credential);
         let delivery_error = |step: &str, error: ChannelError| match error {
             ChannelError::Missing(_) => FabricError::new(
@@ -556,52 +567,75 @@ impl Substrate for ProxmoxDriver {
             )
             .next(format!("monolith agent logs {}", request.agent)),
         };
-        // Raising the guest's memory is a Proxmox API call; it runs beside
-        // the upload, and both finish before the runtime starts.
-        let (resized, uploaded) = std::thread::scope(|scope| {
-            let resize = (recipe.memory_mb > settings.memory_mb)
-                .then(|| scope.spawn(|| self.set_memory(claim.vmid, recipe.memory_mb)));
-            let uploaded = channel.put_bundle(&bundle);
-            let resized = resize.map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|_| Err(FabricError::new(codes::SUBSTRATE_FAILED, "the memory resize panicked")))
-            });
-            (resized, uploaded)
+        // The route starts in the proxy guest while the runtime is delivered;
+        // the runtime starts (or takes go) only once both are done, so its
+        // first request finds its proxy.
+        let source = Some(claim.address);
+        let (routed, delivered) = std::thread::scope(|scope| {
+            let routed = scope.spawn(|| self.put_route(&proxy, &route, source, request.proxy));
+            let delivered = if claim.go_token.is_some() {
+                let _ = std::fs::remove_file(&bundle);
+                Ok(())
+            } else {
+                let resize = (recipe.memory_mb > settings.memory_mb)
+                    .then(|| scope.spawn(|| self.set_memory(claim.vmid, recipe.memory_mb)));
+                let uploaded = channel.put_bundle(&bundle);
+                let _ = std::fs::remove_file(&bundle);
+                let resized = resize.map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(FabricError::new(codes::SUBSTRATE_FAILED, "the memory resize panicked"))
+                    })
+                });
+                uploaded
+                    .map_err(|e| delivery_error("deliver the runtime bundle", e))
+                    .and_then(|_| resized.unwrap_or(Ok(())))
+            };
+            let routed = routed
+                .join()
+                .unwrap_or_else(|_| Err(FabricError::new(codes::PROXY_FAILED, "the route request panicked")));
+            (routed, delivered)
         });
-        let _ = std::fs::remove_file(&bundle);
-        uploaded.map_err(|e| delivery_error("deliver the runtime bundle", e))?;
-        if let Some(resized) = resized {
-            resized?;
+        routed.map_err(|e| e.next(format!("monolith agent logs {} --stream egress", request.agent)))?;
+        journal.created(&route_resource)?;
+        delivered?;
+        request.clock.mark(if claim.go_token.is_some() { "route" } else { "upload" });
+        if let Some(go_token) = &claim.go_token {
+            // A warm guest already runs its launcher (locked to this proxy
+            // when it was warmed): hand it the agent's files and environment.
+            let body = delivery::go_body(&recipe, proxy_env, &request.proxy.agent_ca)
+                .map_err(|message| FabricError::new(codes::SOURCE_FAILED, message))?;
+            delivery::send_go(
+                claim.address,
+                recipe.port,
+                go_token,
+                &body,
+                std::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .map_err(|message| {
+                FabricError::new(codes::SUBSTRATE_FAILED, format!("guest {}: {message}", claim.vmid))
+                    .next(format!("monolith agent logs {}", request.agent))
+            })?;
+            request.clock.mark("go");
+        } else {
+            channel
+                .start(&delivery::start_body(&recipe, proxy_env, egress))
+                .map_err(|e| delivery_error("start the runtime", e))?;
+            request.clock.mark("runtime_start");
         }
-        request.clock.mark("upload");
-        let relay = delivery::start_relay(
-            request,
-            journal,
-            &session,
-            &format!("{}:{}", claim.address, settings.bind_port),
-            &credential_path,
-            ports.tunnel,
-        )?;
-        request.clock.mark("relay_start");
-        let proxy_env = request
-            .proxy
-            .agent_env_with_ca(&delivery::guest_proxy_url(), &delivery::guest_ca_path());
-        channel
-            .start(&delivery::start_body(&recipe, proxy_env))
-            .map_err(|e| delivery_error("start the runtime", e))?;
-        request.clock.mark("runtime_start");
         Ok(Created {
-            resources: vec![proxy, claim.resource, relay],
+            resources: vec![route_resource, claim.resource],
             endpoint: crate::runtimes::Endpoint {
                 base_url: format!("http://{}:{}", claim.address, recipe.port),
                 control_key: request.control_key.to_owned(),
             },
-            proxy_management: format!("http://127.0.0.1:{}", ports.management),
+            proxy_management: None,
         })
     }
 
     fn alive(&self, resource: &Resource) -> Result<bool, FabricError> {
+        if resource.kind == ResourceKind::ProxyRoute {
+            return self.route_alive(resource);
+        }
         if resource.kind != ResourceKind::Guest {
             return Ok(substrate::process_alive(resource));
         }
@@ -612,6 +646,9 @@ impl Substrate for ProxmoxDriver {
     }
 
     fn destroy(&self, resource: &Resource) -> Result<(), FabricError> {
+        if resource.kind == ResourceKind::ProxyRoute {
+            return self.delete_route(resource);
+        }
         if resource.kind != ResourceKind::Guest {
             return substrate::stop_process(resource);
         }
@@ -629,6 +666,7 @@ impl Substrate for ProxmoxDriver {
     fn collect_logs(&self, generation_dir: &std::path::Path, resources: &[Resource], log_path: &std::path::Path) {
         let Some(address) = resources
             .iter()
+            .filter(|r| r.kind == ResourceKind::Guest)
             .find_map(|r| r.guest.as_ref())
             .and_then(|g| g.address.as_deref())
             .and_then(|a| a.parse::<Ipv4Addr>().ok())
@@ -643,6 +681,24 @@ impl Substrate for ProxmoxDriver {
         if let Ok(text) = channel.log() {
             let _ = crate::state::atomic_write(log_path, text.as_bytes(), 0o600);
         }
+    }
+
+    fn proxy_placement(&self) -> crate::proxy::Placement {
+        crate::proxy::Placement::Remote
+    }
+
+    fn rotate_secrets(
+        &self,
+        _generation_dir: &std::path::Path,
+        resources: &[Resource],
+        _management: Option<&str>,
+        secrets: &[(String, String)],
+    ) -> Result<(), FabricError> {
+        self.rotate_route(resources, secrets)
+    }
+
+    fn collect_audit(&self, resources: &[Resource], audit_path: &std::path::Path) {
+        self.collect_route_audit(resources, audit_path);
     }
 }
 

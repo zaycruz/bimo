@@ -81,8 +81,13 @@ pub enum ResourceKind {
     ProxyProcess,
     /// A Proxmox guest.
     Guest,
-    /// The control-plane end of a guest's egress tunnel to its proxy.
+    /// Retired: the control-plane end of a guest's egress tunnel to a
+    /// proxy on this host (bind agent API 2). Kept so old records load; a
+    /// driver destroys one as a local process.
     RelayProcess,
+    /// One agent generation's route in its tenant's proxy guest: the
+    /// agent's own iron-proxy instance there and its front credential.
+    ProxyRoute,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,8 +197,10 @@ pub struct CreateRequest<'a> {
 pub struct Created {
     pub resources: Vec<Resource>,
     pub endpoint: Endpoint,
-    /// The proxy's management API, used to reload rotated secrets.
-    pub proxy_management: String,
+    /// A local proxy's management API, used to reload rotated secrets.
+    /// None when the proxy runs elsewhere (the driver rotates through its
+    /// own channel).
+    pub proxy_management: Option<String>,
 }
 
 pub trait Substrate {
@@ -211,6 +218,32 @@ pub trait Substrate {
     /// substrate whose runtime does not write `log_path` directly. Best
     /// effort: a failure leaves the log as it was.
     fn collect_logs(&self, _generation_dir: &Path, _resources: &[Resource], _log_path: &Path) {}
+    /// Where this substrate runs an agent's credential proxy. A remote
+    /// proxy's CA key and secrets are never written on this host.
+    fn proxy_placement(&self) -> crate::proxy::Placement {
+        crate::proxy::Placement::Local
+    }
+    /// Rotate secret values in a running agent's proxy without restarting
+    /// the agent. The default rewrites a local proxy's secret files and
+    /// reloads it through its management API.
+    fn rotate_secrets(
+        &self,
+        generation_dir: &Path,
+        _resources: &[Resource],
+        management: Option<&str>,
+        secrets: &[(String, String)],
+    ) -> Result<(), FabricError> {
+        let management = management.ok_or_else(|| {
+            FabricError::new(
+                codes::PROXY_FAILED,
+                "the running agent has no credential proxy on record, so its secrets cannot be rotated in place",
+            )
+        })?;
+        crate::proxy::rotate(&generation_dir.join("proxy"), management, secrets)
+    }
+    /// Copy a remote proxy's audit records into `audit_path`, for a
+    /// substrate whose proxy does not write it directly. Best effort.
+    fn collect_audit(&self, _resources: &[Resource], _audit_path: &Path) {}
 }
 
 /// Pick the driver for a target. Unconfigured or unusable targets fail with a
@@ -296,7 +329,7 @@ impl Substrate for LocalDriver {
                 base_url: format!("http://127.0.0.1:{port}"),
                 control_key: request.control_key.to_owned(),
             },
-            proxy_management: format!("http://127.0.0.1:{}", ports.management),
+            proxy_management: Some(format!("http://127.0.0.1:{}", ports.management)),
         })
     }
 

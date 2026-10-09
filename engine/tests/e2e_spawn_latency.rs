@@ -12,9 +12,9 @@
 //! What the clock covers (R3, KTD7): `monolith agent apply` of the example
 //! spec through the real CLI, from the request to the runtime accepting its
 //! first task, as the CLI reports it in `ready_ms` with its phase breakdown.
-//! That is spec validation, source, prepare, the credential proxy, the pool
-//! claim and late bind (KTD10), the relay, delivery or go, and the first-task
-//! probe. Pools are filled before each sample, off the clock, the way the
+//! That is spec validation, source, prepare, the tenant proxy guest's health
+//! check, the pool claim and late bind (KTD10), the agent's route in the
+//! proxy guest (beside delivery), go or start, and the first-task probe. Pools are filled before each sample, off the clock, the way the
 //! pool refill keeps them filled in service. Hermes runs in the examples'
 //! tenant on warm guests; eve runs in its own tenant (`bench-eve`, the same
 //! key under that tenant's handle) on plain pooled guests.
@@ -42,10 +42,17 @@
 //!   STOP verdict must be explicit, with its numbers);
 //! - guests the run created are left on the cluster after it ends or fails.
 //!
+//! The proxy guests of the measured tenants are started before anything is
+//! timed and checked again after every settle (`monolith proxy up`), so a
+//! sample never pays for a proxy guest's creation or its re-provisioning
+//! after the node's restart; both are reported.
+//!
 //! Settings: `MONOLITH_BENCH_RUNS` (pooled applies per runtime, default 6),
 //! `MONOLITH_BENCH_COLD_RUNS` (cold clones, claim only, default 2),
 //! `MONOLITH_BENCH_RUNTIMES` (default `hermes eve`), `MONOLITH_BENCH_SETTLE_S`,
-//! `MONOLITH_BENCH_UPTIME_S`.
+//! `MONOLITH_BENCH_UPTIME_S`, `MONOLITH_BENCH_ISOLATION` (default 1; 0 skips
+//! the tenant-isolation claim, which needs a third tenant's proxy guest and
+//! more guests at once).
 mod common;
 
 use common::live_gate::{gate, live_driver, repo, write_report, Gate, Recorder, Sweeper};
@@ -139,7 +146,8 @@ impl Cli {
 
 impl Drop for Cli {
     fn drop(&mut self) {
-        // Never leave a guest, proxy or relay behind, pass or fail.
+        // Never leave an agent guest or route behind, pass or fail (the
+        // sweeper drains the pools and takes the proxy guests down).
         for name in self.names.borrow().clone() {
             let _ = self.run(&["agent", "destroy", &name]);
         }
@@ -414,6 +422,7 @@ fn pooled_apply_reaches_first_task_under_one_second_on_the_cluster() {
     let path = |p: &str| repo().join(p).to_string_lossy().into_owned();
     let mut env = BTreeMap::new();
     env.insert("MONOLITH_IRON_PROXY_BIN".to_owned(), tools["IRON_PROXY_BIN"].clone());
+    env.insert("MONOLITH_IRON_PROXY_GUEST_BIN".to_owned(), tools["IRON_PROXY_LINUX_BIN"].clone());
     env.insert("MONOLITH_NODE_BIN".to_owned(), format!("{}/node", tools["NODE_BIN_DIR"]));
     env.insert("MONOLITH_NPM_CACHE".to_owned(), path("target/e2e-tools/npm-cache"));
     env.insert("MONOLITH_BUILD_CACHE".to_owned(), path(".monolith/cache"));
@@ -431,6 +440,36 @@ fn pooled_apply_reaches_first_task_under_one_second_on_the_cluster() {
         env,
         names: Default::default(),
     };
+
+    // Each measured tenant's proxy guest, off the clock.
+    let proxy_tenants: Vec<&str> = runtimes
+        .iter()
+        .map(|r| if r == "hermes" { TENANT } else { EVE_TENANT })
+        .collect();
+    let mut proxy_checks: Vec<Value> = Vec::new();
+    let proxy_up = |cli: &Cli, tenant: &str, when: &str, checks: &mut Vec<Value>| {
+        let started = Instant::now();
+        let (code, envelope) = cli.run(&["proxy", "up", "--target", &target, "--tenant", tenant]);
+        if code != 0 && envelope["error"]["code"] == "target_unavailable" {
+            let reason = format!("{} (next: {})", envelope["error"]["message"], envelope["next"]);
+            let report =
+                write_report(SUITE, "BLOCKED", json!({"reason": reason, "target": target, "r3_evidence": false}));
+            panic!("BLOCKED: {reason} Report: {}", report.display());
+        }
+        assert_eq!(code, 0, "proxy up {tenant} ({when}) failed: {envelope:#}");
+        let result = &envelope["result"];
+        checks.push(json!({
+            "tenant": tenant,
+            "when": when,
+            "ms": round_ms(started.elapsed().as_secs_f64() * 1000.0),
+            "changed": envelope["changed"],
+            "vmid": result["vmid"],
+            "provisions": result["provisions"],
+        }));
+    };
+    for tenant in &proxy_tenants {
+        proxy_up(&cli, tenant, "start", &mut proxy_checks);
+    }
 
     // Cold path, claim only (clone, configure, start, bind): context for
     // what the pool saves. Never counted toward R3.
@@ -518,6 +557,11 @@ fn pooled_apply_reaches_first_task_under_one_second_on_the_cluster() {
         let tenants: Vec<&str> = plans.iter().filter(|p| round < p.total).map(|p| p.tenant).collect();
         let waited = settle(&cli, &driver, &target, &tenants, settle_s, uptime_s);
         settle_waits.push(waited);
+        // The proxy guests are older than any pooled guest; past the restart
+        // they may need provisioning again, which must not land on a sample.
+        for tenant in &tenants {
+            proxy_up(&cli, tenant, &format!("round {round}"), &mut proxy_checks);
+        }
         for plan in plans.iter_mut().filter(|p| round < p.total) {
             let filled = cli.fill(&target, plan.tenant, plan.warm);
             for vmid in filled["ready"].as_array().into_iter().flatten() {
@@ -580,7 +624,8 @@ fn pooled_apply_reaches_first_task_under_one_second_on_the_cluster() {
     // Tenant isolation: with the tenant's own pool empty and another
     // tenant's warm guests ready, a claim must clone, never take theirs.
     let mut isolation = Value::Null;
-    if let Some(plan) = plans.iter().find(|p| p.warm.is_some()) {
+    let check_isolation = env_count("MONOLITH_BENCH_ISOLATION", 1) != 0;
+    if let Some(plan) = plans.iter().find(|p| p.warm.is_some() && check_isolation) {
         let others = cli.fill(&target, OTHER_TENANT, plan.warm);
         let other_vmids: Vec<u64> = others["ready"].as_array().unwrap().iter().filter_map(Value::as_u64).collect();
         for vmid in &other_vmids {
@@ -679,7 +724,8 @@ fn pooled_apply_reaches_first_task_under_one_second_on_the_cluster() {
         "runtimes": per_runtime,
         "unclaimed_warm_guest": unclaimed_checks,
         "settle": {"min_guest_age_s": settle_s, "min_uptime_s": uptime_s, "waited_s": settle_waits, "why": "every new container on pve-node-a is restarted from outside Monolith about three minutes after its first start (tailscale is installed into it); samples use guests past that restart and its boot aftermath, and a fill after it re-warms guests the restart emptied"},
-        "tenant_isolation": isolation,
+        "tenant_isolation": if check_isolation { isolation } else { json!("skipped (MONOLITH_BENCH_ISOLATION=0)") },
+        "proxy_guests": proxy_checks,
         "cold_clone_claim_only": {"stats": stats(&cold), "samples": cold},
         "drained": drained,
         "transcript": dir.join("transcript.jsonl"),
@@ -801,7 +847,11 @@ fn write_benchmark_doc(detail: &Value, report: &Path) {
          Generated by `MONOLITH_PROXMOX_LIVE=1 cargo test --test e2e_spawn_latency -- --nocapture`.\n\
          Machine-readable report: `{report}`. The mechanism and its decisions are in `templates/README.md`, \"Warm runtimes\".\n\n\
          ## Verdict\n\n{verdicts}\n\n\
-         ## Before (2026-10-08, same cluster, same clock)\n\n\
+         ## Before: credential proxy on the control plane (U7 stage 1, 2026-10-09)\n\n\
+         - Report `.monolith/reports/20261009T033408Z-spawn-latency-8754.json`: Hermes on a warm guest p50 834 ms, p95 1004 ms; \
+         eve on a pooled guest p50 1622 ms. `proxy_plan`, `proxy_start` and `relay_start` (about 87 ms together) ran iron-proxy \
+         and a relay to it on the control plane.\n\n\
+         ## Before that (2026-10-08, same cluster, same clock)\n\n\
          - eve on a pooled guest: 7.8 s (`eve build` on every apply 5.6 s, bundle 0.4 s, upload 0.3 s, Node start to first task 1.2 s).\n\
          - Hermes on a pooled guest: 11.9 s (a lazy PyPI install of `discord.py` at start 8.5 to 9.7 s, imports 1.1 s, skills sync 0.4 s, \
          and the probe stopping its own run before ready).\n\
@@ -816,8 +866,10 @@ fn write_benchmark_doc(detail: &Value, report: &Path) {
          | Runtime | Path | n | p50 ms | p95 ms | min ms | max ms |\n|---|---|---|---|---|---|---|\n{rows}\n\
          R3 threshold: p95 under {threshold} ms, per runtime.\n\n\
          Median time per apply phase (ms):\n\n{breakdowns}\n\
-         `proxy_plan`, `proxy_start` and `relay_start` are the credential proxy and the relay to it on the control plane; \
-         they move when iron-proxy moves to a per-tenant proxy guest.\n\n\
+         The credential proxy runs in the tenant's proxy guest: `proxy_plan` mints the agent's CA (no local config, no process), \
+         `proxy_ready` is the proxy guest's health check, and the agent's route starts there beside the upload (`upload`) \
+         or before go (`route`). No proxy or relay process runs on the control plane.\n\n\
+         - Proxy guests (`monolith proxy up`, off the clock): {proxies}\n\
          - Cold clone, claim only (clone, start, bind; no runtime): p50 {cold_p50} ms, p95 {cold_p95} ms (n {cold_n}); not counted toward R3.\n\
          - Unclaimed warm guests checked (no task before go, no tenant material): {unclaimed}\n\
          - Tenant isolation: {isolation}\n",
@@ -836,6 +888,7 @@ fn write_benchmark_doc(detail: &Value, report: &Path) {
         cold_n = cold["n"],
         unclaimed = detail["unclaimed_warm_guest"],
         isolation = detail["tenant_isolation"],
+        proxies = detail["proxy_guests"],
         settle = detail["settle"]["why"].as_str().unwrap_or_default(),
     );
     let path = repo().join("docs/benchmarks/spawn-latency.md");

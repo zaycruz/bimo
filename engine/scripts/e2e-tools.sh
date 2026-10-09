@@ -5,6 +5,9 @@
 #
 #   hermes-agent 0.15.2 (PyPI, via uv)    -> HERMES_BIN
 #   iron-proxy   0.52.0 (GitHub release)   -> IRON_PROXY_BIN, sha256-pinned
+#   iron-proxy   0.52.0 linux_amd64        -> IRON_PROXY_LINUX_BIN, sha256-pinned:
+#                the build the Proxmox driver uploads into a tenant's proxy
+#                guest through the bind agent (docs/credential-boundary.md)
 #   node         24.21.0 (nodejs.org)      -> NODE_BIN_DIR, sha256-pinned (eve needs Node 24+)
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -44,6 +47,26 @@ if [ ! -x "$IRON_DIR/iron-proxy" ]; then
   tar -xzf "$IRON_DIR/$IRON_TAR" -C "$IRON_DIR"
 fi
 echo "IRON_PROXY_BIN=$IRON_DIR/iron-proxy"
+
+# The proxy guest's build, whatever this host is: the driver delivers it to
+# the guest in the proxy bundle, so no template carries iron-proxy.
+IRON_LINUX_SHA=caae756f0aa7d87fc6ba2843bbae663b67b29d1b3eddd43a55925b39c1b2ab94
+IRON_LINUX_DIR="$TOOLS/iron-proxy-$IRON_VERSION-linux_amd64"
+IRON_LINUX_TAR="iron-proxy_${IRON_VERSION}_linux_amd64.tar.gz"
+if [ ! -x "$IRON_LINUX_DIR/iron-proxy" ]; then
+  mkdir -p "$IRON_LINUX_DIR"
+  curl -fsSL -o "$IRON_LINUX_DIR/$IRON_LINUX_TAR" \
+    "https://github.com/ironsh/iron-proxy/releases/download/v$IRON_VERSION/$IRON_LINUX_TAR"
+  ACTUAL=$(shasum -a 256 "$IRON_LINUX_DIR/$IRON_LINUX_TAR" | cut -d' ' -f1)
+  if [ "$ACTUAL" != "$IRON_LINUX_SHA" ]; then
+    echo "e2e-tools: iron-proxy linux_amd64 checksum mismatch: got $ACTUAL, want $IRON_LINUX_SHA" >&2
+    rm -f "$IRON_LINUX_DIR/$IRON_LINUX_TAR"
+    exit 1
+  fi
+  tar -xzf "$IRON_LINUX_DIR/$IRON_LINUX_TAR" -C "$IRON_LINUX_DIR"
+  chmod 0755 "$IRON_LINUX_DIR/iron-proxy"
+fi
+echo "IRON_PROXY_LINUX_BIN=$IRON_LINUX_DIR/iron-proxy"
 
 NODE_VERSION=24.21.0
 case "$(uname -s)-$(uname -m)" in

@@ -75,6 +75,11 @@ struct WarmSecrets {
     claim_id: String,
     credential: String,
     go_token: String,
+    /// The tenant proxy endpoint (`address:port`) the guest's egress lock
+    /// admits. A claim takes the guest only while it still names the
+    /// tenant's current proxy guest.
+    #[serde(default)]
+    egress: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -128,7 +133,7 @@ pub fn pool_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".monolith").join("pools"))
 }
 
-struct Locked {
+pub(super) struct Locked {
     _lock: File,
     path: PathBuf,
     state: PoolState,
@@ -210,19 +215,21 @@ impl ProxmoxDriver {
         generation: u64,
         journal: &mut dyn ResourceJournal,
     ) -> Result<Claim, FabricError> {
-        self.claim_for(tenant, agent, generation, None, journal)
+        self.claim_for(tenant, agent, generation, None, None, journal)
     }
 
     /// `claim`, preferring a guest of this tenant whose warm runtime has the
     /// key `warm` (the caller then sends it go), then an unwarmed pooled
     /// guest, then a cold clone. A guest warmed for another runtime is never
-    /// taken, and nothing ever crosses tenants.
+    /// taken, and nothing ever crosses tenants. A warm guest whose egress
+    /// lock names another proxy endpoint than `egress` is not taken either.
     pub fn claim_for(
         &self,
         tenant: &str,
         agent: &str,
         generation: u64,
         warm: Option<&str>,
+        egress: Option<&str>,
         journal: &mut dyn ResourceJournal,
     ) -> Result<Claim, FabricError> {
         self.tenant_vlan(tenant)?;
@@ -265,7 +272,7 @@ impl ProxmoxDriver {
                 return self.cold_claim(tenant, agent, generation, journal);
             };
             let bound = match &guest.warm {
-                Some(key) => self.check_warm(&guest, key).map(|(secrets, status)| {
+                Some(key) => self.check_warm(&guest, key, egress).map(|(secrets, status)| {
                     (secrets.claim_id, secrets.credential, status, Some(secrets.go_token))
                 }),
                 None => self
@@ -455,6 +462,10 @@ impl ProxmoxDriver {
     /// launcher and starts it under the egress lock with a go token minted
     /// for that guest. A guest that fails to warm is destroyed.
     pub fn fill_warm(&self, tenant: &str, recipe: &WarmRecipe) -> Result<FillReport, FabricError> {
+        // A warm runtime starts under the egress lock, which names the
+        // tenant's proxy guest: that guest comes first.
+        let proxy = self.ensure_proxy(tenant)?;
+        let egress = proxy.egress();
         let mut report = self.fill(tenant)?;
         let version = self.template_version()?;
         let work = pool_dir().join(format!("{}-warm", self.target_name));
@@ -507,7 +518,7 @@ impl ProxmoxDriver {
             .cloned()
             .collect();
         for guest in warmed {
-            if self.check_warm(&guest, &recipe.key).is_err() {
+            if self.check_warm(&guest, &recipe.key, Some(&egress.to_string())).is_err() {
                 let mut locked = self.locked()?;
                 if let Some(entry) = locked
                     .state
@@ -548,7 +559,7 @@ impl ProxmoxDriver {
                 }
             };
             let Some(guest) = picked else { break };
-            match self.warm_guest(&guest, recipe, &bundle, &version) {
+            match self.warm_guest(&guest, recipe, &bundle, &version, egress) {
                 Ok(()) => {
                     let mut locked = self.locked()?;
                     if let Some(entry) = locked.state.guests.iter_mut().find(|g| g.vmid == guest.vmid) {
@@ -592,7 +603,14 @@ impl ProxmoxDriver {
         Ok(report)
     }
 
-    fn warm_guest(&self, guest: &PoolGuest, recipe: &WarmRecipe, bundle: &std::path::Path, version: &str) -> Result<(), String> {
+    fn warm_guest(
+        &self,
+        guest: &PoolGuest,
+        recipe: &WarmRecipe,
+        bundle: &std::path::Path,
+        version: &str,
+        egress: super::tenant_proxy::Egress,
+    ) -> Result<(), String> {
         let settings = self.settings().map_err(|e| e.message)?.clone();
         if recipe.memory_mb > settings.memory_mb {
             self.set_memory(guest.vmid, recipe.memory_mb).map_err(|e| e.message)?;
@@ -614,6 +632,7 @@ impl ProxmoxDriver {
             claim_id,
             credential: credential.clone(),
             go_token: go_token.clone(),
+            egress: Some(egress.to_string()),
         };
         let text = serde_json::to_vec(&secrets).map_err(|e| e.to_string())?;
         crate::state::atomic_write(&self.warm_secrets_path(guest.vmid), &text, 0o600)
@@ -621,7 +640,7 @@ impl ProxmoxDriver {
         let channel = GuestChannel::new(guest.address, settings.bind_port, &credential);
         channel.put_bundle(bundle).map_err(|e| e.to_string())?;
         channel
-            .start(&super::delivery::warm_start_body(recipe, &go_token))
+            .start(&super::delivery::warm_start_body(recipe, &go_token, egress))
             .map_err(|e| e.to_string())?;
         // A guest counts as warm only once its runtime has loaded and listens
         // for go; a claim of a guest still loading would wait for it.
@@ -631,11 +650,14 @@ impl ProxmoxDriver {
     /// Before a warm guest is handed out: its bind agent must still hold the
     /// pool binding this control plane made, for this tenant and this warm
     /// key, and its warm runtime must be running.
-    fn check_warm(&self, guest: &PoolGuest, key: &str) -> Result<(WarmSecrets, Value), String> {
+    fn check_warm(&self, guest: &PoolGuest, key: &str, egress: Option<&str>) -> Result<(WarmSecrets, Value), String> {
         let text = fs::read(self.warm_secrets_path(guest.vmid))
             .map_err(|e| format!("the warm guest's credential is missing: {e}"))?;
         let secrets: WarmSecrets =
             serde_json::from_slice(&text).map_err(|e| format!("the warm guest's credential is unreadable: {e}"))?;
+        if egress.is_some() && secrets.egress.as_deref() != egress {
+            return Err("the warm guest's egress lock names another proxy endpoint".to_owned());
+        }
         let port = self.settings().map_err(|e| e.message)?.bind_port;
         let channel = GuestChannel::new(guest.address, port, &secrets.credential);
         let status = channel.status().map_err(|e| e.to_string())?;
@@ -678,27 +700,72 @@ impl ProxmoxDriver {
     /// Reserve a VMID and an address under the pool lock and record the
     /// guest as `cloning` before anything is created.
     fn reserve(&self, tenant: &str, agent: Option<&str>, version: &str) -> Result<PoolGuest, FabricError> {
+        let node = self.settings()?.node.clone();
+        let mut reserved = None;
+        self.reserve_slot(1, |locked, vmid, addresses| {
+            let pid = std::process::id();
+            let guest = PoolGuest {
+                vmid,
+                node,
+                tenant: tenant.to_owned(),
+                address: addresses[0],
+                state: GuestState::Cloning,
+                template_version: Some(version.to_owned()),
+                created_at_ms: now_ms(),
+                owner_pid: Some(pid),
+                owner_start: crate::process::process_start_time(pid),
+                claimed_by: agent.map(str::to_owned),
+                claimed_at_ms: agent.map(|_| now_ms()),
+                warm: None,
+            };
+            locked.state.guests.push(guest.clone());
+            locked.save()?;
+            reserved = Some(guest);
+            Ok(())
+        })?;
+        reserved.ok_or_else(|| FabricError::new(codes::STATE_FAILED, "the reservation recorded nothing"))
+    }
+
+    /// Pick a free VMID and `count` free addresses under the pool lock and
+    /// let `record` write them down before the lock is released. Free means
+    /// held by no guest the token can see, no pool record and no tenant
+    /// proxy record (`tenant_proxy.rs`).
+    pub(super) fn reserve_slot(
+        &self,
+        count: usize,
+        record: impl FnOnce(&mut Locked, u32, &[Ipv4Addr]) -> Result<(), FabricError>,
+    ) -> Result<(u32, Vec<Ipv4Addr>), FabricError> {
         let settings = self.settings()?.clone();
         let visible = self.visible_guests()?;
         let mut used_addresses = self.addresses_in_use(&visible)?;
-        let visible_ids: BTreeSet<u32> = visible
+        let mut visible_ids: BTreeSet<u32> = visible
             .iter()
             .filter_map(|g| g.get("vmid").and_then(Value::as_u64))
             .map(|v| v as u32)
             .collect();
         let mut locked = self.locked()?;
+        for proxy in self.proxy_records() {
+            visible_ids.insert(proxy.vmid);
+            used_addresses.insert(proxy.address);
+            used_addresses.insert(proxy.agent_address);
+        }
         let recorded: BTreeSet<u32> = locked.state.guests.iter().map(|g| g.vmid).collect();
         used_addresses.extend(locked.state.guests.iter().map(|g| g.address));
-        let address = settings.addresses.allocate(&used_addresses).ok_or_else(|| {
-            FabricError::new(
-                codes::SUBSTRATE_FAILED,
-                format!(
-                    "no free address in {}-{} on target '{}'",
-                    settings.addresses.first, settings.addresses.last, self.target_name
-                ),
-            )
-            .next("drain an idle pool (monolith pool drain) or widen address_range")
-        })?;
+        let mut addresses = Vec::new();
+        for _ in 0..count {
+            let address = settings.addresses.allocate(&used_addresses).ok_or_else(|| {
+                FabricError::new(
+                    codes::SUBSTRATE_FAILED,
+                    format!(
+                        "no free address in {}-{} on target '{}'",
+                        settings.addresses.first, settings.addresses.last, self.target_name
+                    ),
+                )
+                .next("drain an idle pool (monolith pool drain) or widen address_range")
+            })?;
+            used_addresses.insert(address);
+            addresses.push(address);
+        }
         let mut vmid = None;
         for candidate in settings.vmid_low..=settings.vmid_high {
             if recorded.contains(&candidate) || visible_ids.contains(&candidate) {
@@ -716,24 +783,8 @@ impl ProxmoxDriver {
             )
         })?;
         self.check_scope(vmid)?;
-        let pid = std::process::id();
-        let guest = PoolGuest {
-            vmid,
-            node: settings.node.clone(),
-            tenant: tenant.to_owned(),
-            address,
-            state: GuestState::Cloning,
-            template_version: Some(version.to_owned()),
-            created_at_ms: now_ms(),
-            owner_pid: Some(pid),
-            owner_start: crate::process::process_start_time(pid),
-            claimed_by: agent.map(str::to_owned),
-            claimed_at_ms: agent.map(|_| now_ms()),
-            warm: None,
-        };
-        locked.state.guests.push(guest.clone());
-        locked.save()?;
-        Ok(guest)
+        record(&mut locked, vmid, &addresses)?;
+        Ok((vmid, addresses))
     }
 
     fn mark(&self, vmid: u32, state: GuestState, agent: Option<&str>) -> Result<(), FabricError> {
@@ -775,11 +826,22 @@ impl ProxmoxDriver {
     }
 
     fn bind_with(&self, guest: &PoolGuest, claim_id: String, payload: Value) -> Result<(String, String, Value), String> {
+        self.bind_at(guest.address, guest.vmid, claim_id, payload)
+    }
+
+    /// Bind the guest `vmid` at `address` with `payload`; see `bind`.
+    pub(super) fn bind_at(
+        &self,
+        address: Ipv4Addr,
+        vmid: u32,
+        claim_id: String,
+        payload: Value,
+    ) -> Result<(String, String, Value), String> {
         let port = self.settings().map_err(|e| e.message)?.bind_port;
         let credential = random_hex(32)?;
-        let expected = hostname(guest.vmid);
+        let expected = hostname(vmid);
         let agent_http = bind_http(Duration::from_secs(3));
-        let base = format!("http://{}:{port}", guest.address);
+        let base = format!("http://{address}:{port}");
         let mut response = agent_http
             .post(format!("{base}/bind"))
             .send_json(json!({
@@ -794,7 +856,7 @@ impl ProxmoxDriver {
             return Err(format!("bind refused with HTTP {status}: {body}"));
         }
         if body.get("hostname").and_then(Value::as_str) != Some(expected.as_str()) {
-            return Err(format!("the guest at {} is not {expected}: {body}", guest.address));
+            return Err(format!("the guest at {address} is not {expected}: {body}"));
         }
         let mut response = agent_http
             .get(format!("{base}/status"))
@@ -916,7 +978,7 @@ fn owner_alive(guest: &PoolGuest) -> bool {
     }
 }
 
-fn random_hex(bytes: usize) -> Result<String, String> {
+pub(super) fn random_hex(bytes: usize) -> Result<String, String> {
     let mut buffer = vec![0u8; bytes];
     File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut buffer))
@@ -953,6 +1015,6 @@ fn wait_until_warm(address: Ipv4Addr, port: u16, limit: Duration) -> Result<(), 
     Err(format!("the warm runtime did not come up within {}s ({last})", limit.as_secs()))
 }
 
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     crate::state::timestamp_millis() as u64
 }

@@ -37,7 +37,7 @@ MEMORY_MB=${MEMORY_MB:-256}
 BIND_PORT=${BIND_PORT:-7070}
 # Build-time memory: pip and the Node unpack need more than a guest's 256 MB.
 BUILD_MEMORY_MB=${BUILD_MEMORY_MB:-1024}
-TEMPLATE_VERSION=${TEMPLATE_VERSION:-debian13-bind-v3}
+TEMPLATE_VERSION=${TEMPLATE_VERSION:-debian13-bind-v4}
 NODE_VERSION=${NODE_VERSION:-24.21.0}
 NODE_SHA256=${NODE_SHA256:-6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff}
 HERMES_VERSION=${HERMES_VERSION:-0.15.2}
@@ -167,7 +167,7 @@ pct exec "$VMID" -- python3 -c "
 import json, urllib.request
 body = json.load(urllib.request.urlopen('http://127.0.0.1:$BIND_PORT/health', timeout=5))
 assert body['state'] == 'unbound', body
-assert body.get('api') == 2, body
+assert body.get('api') == 3, body
 print('bind agent:', body)
 "
 

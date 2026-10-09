@@ -371,7 +371,7 @@ impl Fabric {
             {
                 let mut rotated = Vec::new();
                 if record.secrets_digest.as_deref() != Some(digest.as_str()) {
-                    rotated = self.rotate_secrets(&dir, record, &secret_values, &digest)?;
+                    rotated = self.rotate_secrets(driver.as_ref(), &dir, record, &secret_values, &digest)?;
                 }
                 let record = read_record(&dir)?.unwrap_or_else(|| record.clone());
                 return Ok(Outcome {
@@ -455,7 +455,7 @@ impl Fabric {
             endpoint: Some(created.endpoint.base_url.clone()),
             ready_ms: Some(ready_ms),
             first_task_id: Some(task_id.clone()),
-            proxy_management: Some(created.proxy_management.clone()),
+            proxy_management: created.proxy_management.clone(),
             secrets_digest: Some(digest),
             updated_at_ms: now_ms(),
         };
@@ -480,6 +480,7 @@ impl Fabric {
         let mut retired = Vec::new();
         if let Some(old) = previous.as_ref().filter(|r| r.status == AgentStatus::Ready) {
             let old_driver = self.driver(&old.target)?;
+            old_driver.collect_audit(&old.resources, &dir.join("logs").join("egress-audit.jsonl"));
             for resource in old.resources.iter().rev() {
                 journal.write(JournalEntry {
                     resource: Some(resource.clone()),
@@ -523,20 +524,20 @@ impl Fabric {
     /// placeholders do not change.
     fn rotate_secrets(
         &self,
+        driver: &dyn Substrate,
         dir: &Path,
         record: &AgentRecord,
         secrets: &[(String, String)],
         digest: &str,
     ) -> Result<Vec<String>, FabricError> {
-        let management = record.proxy_management.as_deref().ok_or_else(|| {
-            FabricError::new(
-                codes::PROXY_FAILED,
-                "the running agent has no credential proxy on record, so its secrets cannot be rotated in place",
+        driver
+            .rotate_secrets(
+                &dir.join(format!("gen-{}", record.generation)),
+                &record.resources,
+                record.proxy_management.as_deref(),
+                secrets,
             )
-            .next(format!("monolith agent destroy {}, then apply again", record.name))
-        })?;
-        let proxy_dir = dir.join(format!("gen-{}", record.generation)).join("proxy");
-        proxy::rotate(&proxy_dir, management, secrets)?;
+            .map_err(|error| error.next(format!("monolith agent destroy {}, then apply again", record.name)))?;
         let mut updated = record.clone();
         updated.secrets_digest = Some(digest.to_owned());
         updated.updated_at_ms = now_ms();
@@ -606,6 +607,7 @@ impl Fabric {
             generation_dir,
             agent_dir.join("logs").join("egress-audit.jsonl"),
             upstream_deny_cidrs,
+            driver.proxy_placement(),
         )
         .map_err(fail)?;
         clock.mark("proxy_plan");
@@ -872,6 +874,8 @@ impl Fabric {
             });
         }
         let driver = self.driver(&record.target)?;
+        // A remote proxy's audit goes with its route; keep a copy first.
+        driver.collect_audit(&record.resources, &dir.join("logs").join("egress-audit.jsonl"));
         let mut journal = Journal::open(&dir, record.generation, &record.target)?;
         let mut destroyed = Vec::new();
         for resource in record.resources.iter().rev() {
@@ -931,12 +935,17 @@ impl Fabric {
                 .next("use --stream agent, egress or journal"));
             }
         };
-        if stream == "agent" {
-            // A guest substrate keeps the runtime's output in the guest;
-            // fetch it into the agent log first. Best effort.
+        if stream == "agent" || stream == "egress" {
+            // A guest substrate keeps the runtime's output in the guest and
+            // a remote proxy keeps its audit with it; fetch them first. Best
+            // effort.
             if let Some(record) = read_record(&dir)?.filter(|r| r.status == AgentStatus::Ready) {
                 if let Ok(driver) = self.driver(&record.target) {
-                    driver.collect_logs(&dir.join(format!("gen-{}", record.generation)), &record.resources, &file);
+                    if stream == "agent" {
+                        driver.collect_logs(&dir.join(format!("gen-{}", record.generation)), &record.resources, &file);
+                    } else {
+                        driver.collect_audit(&record.resources, &file);
+                    }
                 }
             }
         }

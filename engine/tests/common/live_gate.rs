@@ -128,8 +128,9 @@ impl monolith::substrate::ResourceJournal for Recorder {
     }
 }
 
-/// Destroys every guest it was told about when dropped, so a failing live
-/// run leaves nothing behind on the cluster.
+/// Destroys every guest it was told about when dropped, drains the tenants'
+/// pools and takes down their proxy guests, so a failing live run leaves
+/// nothing behind on the cluster.
 pub struct Sweeper<'a> {
     pub driver: &'a monolith::proxmox::ProxmoxDriver,
     pub vmids: std::cell::RefCell<Vec<u32>>,
@@ -161,6 +162,10 @@ impl Drop for Sweeper<'_> {
             if let Err(error) = self.driver.drain(Some(tenant)) {
                 eprintln!("sweeper: could not drain {tenant}: {error}");
             }
+            // The tenant's proxy guest goes last, after every agent.
+            if let Err(error) = self.driver.proxy_down(tenant, true) {
+                eprintln!("sweeper: could not take down {tenant}'s proxy guest: {error}");
+            }
         }
     }
 }
@@ -171,4 +176,23 @@ fn git_head(dir: &Path) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// The pool's members on the cluster (VMIDs), through the API.
+pub fn pool_members(driver: &monolith::proxmox::ProxmoxDriver) -> Vec<u64> {
+    let pool = driver.settings().expect("settings").pool.clone();
+    let data = driver
+        .api_get(&format!("/pools/{pool}"))
+        .expect("driver ready")
+        .expect("the pool is readable");
+    // GET /pools/{id} answers the pool; GET /pools?poolid= a list of one.
+    let members = if data.is_array() { data[0]["members"].clone() } else { data["members"].clone() };
+    let mut vmids: Vec<u64> = members
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["vmid"].as_u64())
+        .collect();
+    vmids.sort_unstable();
+    vmids
 }

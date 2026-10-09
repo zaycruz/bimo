@@ -71,6 +71,8 @@ agent record), rewrites the secret files atomically and calls the proxy's
 result has `changed: true` and lists the variables in `rotated`; the journal
 gets a `secrets_rotated` event. If the proxy rejects the reload, the running
 proxy keeps its previous configuration and apply fails with `proxy_failed`.
+On Proxmox the new values go to the agent's route in its tenant's proxy
+guest, which reloads the same way.
 The E2E suite confirms rotation against the live proxy by sending a request
 through it and checking the upstream receives the new value.
 
@@ -123,42 +125,98 @@ upstream_deny_cidrs = ["169.254.169.254/32"]
 
 ## On Proxmox
 
-Stage 1 (U7, minimal): the agent's iron-proxy runs on the control-plane
-host, exactly as on `local`, listening on loopback only. It never runs in a
-guest, so the CA key, the secret files and the real values never enter one.
-The runtime runs inside its guest (U8, `src/proxmox/delivery.rs`) and gets
-the same table as above, with two differences:
+Stage 2 (U7, KTD4, KTD5, KTD10): each tenant has one always-on **proxy
+guest** on the target, and every agent generation of that tenant gets a
+**route** there: its own iron-proxy instance with its own CA, secret files
+and allowlist. Nothing of the boundary runs on the control-plane host (no
+iron-proxy, no relay), and nothing of it runs in the agent's guest.
 
-- its proxy variables point at `http://127.0.0.1:7071` inside the guest, a
-  listener the bind agent opens; each connection to it is carried to the
-  proxy by the egress relay (`src/relay.rs`, resource `relay_process`), over
-  connections the relay opens to the bind agent with the per-guest
-  credential (`GET /tunnel`). The proxy is never exposed on the network.
-- its CA certificate travels in the runtime bundle
-  (`/srv/monolith/runtime/trust/monolith-agent-ca.pem`); the key does not.
+Code: `src/proxmox/tenant_proxy.rs` (the proxy guest's lifecycle and routes),
+`src/proxmox/tenant_proxy.py` (the supervisor that runs in it),
+`templates/bind-agent/monolith-bind-agent.py` (API 3: the egress locks).
 
-What crosses into the guest: the bind payload (identity only), the bundle
-(the built runtime, its config source and the CA certificate) and the start
-request (program, arguments, the runtime's environment with placeholders and
-the control key, ports). None carries a real secret.
+The proxy guest:
 
-Confinement in the guest: the runtime runs as the unprivileged user
-`monolith-agent`, under the bind agent's unit (`ProtectSystem=strict`, private
-`/tmp`; it can write only its runtime directory). An nftables rule the bind
-agent installs before it starts the runtime rejects every packet that user
-sends except to the loopback egress port and its own port, so a client that
-ignores the proxy variables fails instead of leaking. If the rule cannot be
-installed the runtime is not started.
+- a linked clone of the golden template in the target's pool and VMID
+  range, with the ownership marker, `role=proxy` in its description and the
+  `monolith-proxy` tag. Its record is
+  `<pool dir>/<target>-proxies/<tenant>.json` (mode 0600: it holds the bind
+  credential and the control token), never the pool state, so pool fill,
+  drain and claim never touch it. `monolith proxy up|status|down` manages it;
+  `agent apply` starts it when it is missing.
+- bound like any guest (payload `role: "proxy"`), then given a bundle with
+  the supervisor and the Linux iron-proxy build through the bind agent. No
+  template change carries iron-proxy.
+- the supervisor runs as `monolith-agent` under the bind agent's **upstream**
+  lock: loopback and DNS are open, IPv6 and the private, link-local,
+  carrier-grade NAT and multicast ranges are refused, the rest is open. Each
+  route's iron-proxy also refuses those ranges upstream
+  (`upstream_deny_cidrs`), so a route can reach only public hosts on its
+  allowlist.
+- route files (CA key, management key, secret values, config) live in
+  `/dev/shm/monolith-proxy/routes/<route>` (tmpfs, mode 0700/0600) and in the
+  control plane's memory while it applies; never on the control plane's disk.
+
+The agent guest:
+
+- its proxy variables are `http://<route>:<token>@<proxy guest>:3128`. The
+  front listener on 3128 requires that credential as `Proxy-Authorization:
+  Basic` (sent by curl, Python's httpx, requests and aiohttp, and Node's
+  `NODE_USE_ENV_PROXY`), checks the token against its SHA-256 (the control
+  plane keeps no copy of the token), checks that the connection comes from
+  the route's agent guest address, strips the credential and hands the
+  connection to the route's iron-proxy. Anything else gets `407` and a line
+  in the proxy guest's refusal log.
+- its bind agent installs the **proxy** lock before the runtime starts: the
+  runtime user may reach its own port on loopback and the proxy guest's
+  front (address and port), nothing else. A warm guest is locked when its
+  launcher starts at fill, to the tenant's proxy guest, and a claim checks
+  that the lock still names it.
+- its CA certificate travels in the runtime bundle (or in the go body); the
+  key does not.
+
+Tenant refusal: every guest of the test target shares `vmbr0`, so tenant
+separation is enforced at the application layer. An agent of tenant B never
+gets a route in tenant A's proxy guest, its lock does not admit A's address,
+and A's front refuses B's credential, a forged token, no credential, and
+A's own credential from any other address. Handles stay tenant-scoped (an
+agent of B cannot name `A/...`). With `tenant_vlans` set, the proxy guest
+gets a second NIC on the tenant's VLAN (`net1`, no gateway), agents are
+locked to that address and agent guests attach only to that VLAN; this path
+is built but not yet exercised live.
+
+Secret delivery: secrets reach the proxy guest only in the route request,
+over the supervisor's control API (bearer token, held only by the control
+plane), at apply time, the same late binding as a warm runtime's go. A
+rotation sends only the new values (`POST /routes/<route>/secrets`); the
+route's iron-proxy re-reads its files on `POST /v1/reload`. The audit log is
+fetched from the proxy guest into `<state-root>/<agent>/logs/egress-audit.jsonl`
+(per route in `egress-audit.d/`) before a generation is retired or destroyed
+and when logs are read.
+
+Restarts: pve-node-a restarts every new container about three minutes after its
+first start (an outside mechanism installs Tailscale). A restart empties
+tmpfs: the binding, the supervisor and every route. The supervisor's boot id
+changes, so the next `proxy up` or apply provisions the guest again (same
+VMID, same address). Routes are not re-sent: agents whose routes were lost
+fail closed (`407`, `status` shows the route dead) until they are applied
+again. Secrets are never kept anywhere to re-send them.
+
+The Linux iron-proxy: the pinned upstream release
+`iron-proxy_0.52.0_linux_amd64.tar.gz`, downloaded and checked by
+`scripts/e2e-tools.sh` (it prints `IRON_PROXY_LINUX_BIN`). The control plane
+reads it from `MONOLITH_IRON_PROXY_GUEST_BIN` (default
+`target/e2e-tools/iron-proxy-0.52.0-linux_amd64/iron-proxy`), refuses any
+file whose SHA-256 is not the pinned build, and delivers it in the proxy
+guest's bundle. This was the simplest dependable choice: no cross build, no
+template change, one binary for every proxy guest.
 
 Proof: `tests/e2e_proxmox_agents.rs` (live, `MONOLITH_PROXMOX_LIVE=1`)
-applies the eve and Hermes examples to the proxmox target, asks each for an
-answer through its runtime, checks the proxy's audit log for the swap,
-downloads the guest's state and every process's environment (`GET /inspect`)
-and searches it for the real value, and checks that a direct connection from
-the runtime user is refused.
-
-Not yet: KTD4's always-on per-tenant proxy guest and KTD5's per-tenant
-segments. Until the segments are provisioned, guests share `vmbr0`, so the
-runtime's API port and an unbound pooled guest's bind port are reachable from
-that segment (both authenticated, the first bind trust-on-first-use), and the
-control-plane host must stay up for its agents' egress.
+starts proxy guests for two tenants, waits past the restart window, applies
+eve and Hermes for tenant A and Hermes for tenant B, asks each for an answer,
+checks the audit log for the swap, searches the agent guest's state and
+every process's environment for the real value, probes the runtime user's
+egress (only the proxy front connects), checks the cross-tenant refusals
+above, destroys everything and checks that the pool on the cluster holds only
+the template. It needs a template whose bind agent speaks API 3
+(`templates/README.md`).

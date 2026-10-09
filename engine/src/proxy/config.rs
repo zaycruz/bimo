@@ -8,12 +8,16 @@
 //!   a reload. Its placeholder is swapped in any header, and only on requests
 //!   to the secret's declared hosts.
 use super::{ProxyPlan, ProxyPorts};
+use std::path::Path;
 
 fn quote(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
 }
 
-pub fn render(plan: &ProxyPlan, bind_host: &str, ports: ProxyPorts) -> String {
+/// `dir` is the proxy's directory on the host it runs on (its CA and secret
+/// files are read from there); `deny` overrides the plan's upstream deny
+/// list (a remote proxy's host decides its own).
+pub fn render(plan: &ProxyPlan, dir: &Path, bind_host: &str, ports: ProxyPorts, deny: Option<&[String]>) -> String {
     let spec = &plan.spec;
     let mut domains = Vec::new();
     let mut cidrs = Vec::new();
@@ -43,14 +47,14 @@ pub fn render(plan: &ProxyPlan, bind_host: &str, ports: ProxyPorts) -> String {
     ] {
         out.push_str(&format!("  {key}: {}\n", quote(&format!("{bind_host}:{port}"))));
     }
-    if let Some(cidrs) = &plan.upstream_deny_cidrs {
+    if let Some(cidrs) = deny.or(plan.upstream_deny_cidrs.as_deref()) {
         out.push_str(&format!("  upstream_deny_cidrs: {}\n", list(cidrs)));
     }
     out.push_str("tls:\n");
     out.push_str(&format!(
         "  ca_cert: {}\n  ca_key: {}\n",
-        quote(&plan.dir.join("ca.crt").to_string_lossy()),
-        quote(&plan.dir.join("ca.key").to_string_lossy())
+        quote(&dir.join("ca.crt").to_string_lossy()),
+        quote(&dir.join("ca.key").to_string_lossy())
     ));
     out.push_str("transforms:\n");
     out.push_str("  - name: allowlist\n    config:\n");
@@ -66,7 +70,7 @@ pub fn render(plan: &ProxyPlan, bind_host: &str, ports: ProxyPorts) -> String {
                 .unwrap_or_default();
             out.push_str(&format!(
                 "        - source: {{type: file, path: {}}}\n",
-                quote(&plan.secret_file(&secret.env).to_string_lossy())
+                quote(&super::secret_file(dir, &secret.env).to_string_lossy())
             ));
             out.push_str("          replace:\n");
             out.push_str(&format!("            proxy_value: {}\n", quote(&placeholder)));

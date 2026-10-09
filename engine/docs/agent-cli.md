@@ -63,10 +63,11 @@ Exit status: `0` on success, `2` for `usage`, `1` for any other error.
   runtime's auth state, and commits. `ready_ms` is request to first accepted
   task, timed by the control plane (KTD7). On `local` each generation is two
   resources: the agent's credential proxy (`proxy_process`), started first,
-  and the runtime (`agent_process`). On a proxmox target it is three: the
-  proxy on the control-plane host, the `guest` the runtime runs in, and the
-  `relay_process` that carries the guest's egress to the proxy; see
-  `docs/credential-boundary.md`. The previous
+  and the runtime (`agent_process`). On a proxmox target it is two: the
+  agent's `proxy_route` in its tenant's proxy guest (started with or before
+  the agent; `monolith proxy up|status|down` manages the proxy guest itself)
+  and the `guest` the runtime runs in; see `docs/credential-boundary.md`.
+  Records from before the proxy guest may still list a `relay_process`. The previous
   generation is retired only after the new one commits. An unchanged, healthy
   agent returns `changed: false` with nothing created, restarted or
   rewritten. If only a secret's value changed, apply reloads the running

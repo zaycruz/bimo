@@ -111,7 +111,7 @@
       "type": "object",
       "required": ["kind", "id"],
       "properties": {
-        "kind": { "enum": ["agent_process", "proxy_process", "guest", "relay_process"] },
+        "kind": { "enum": ["agent_process", "proxy_process", "guest", "relay_process", "proxy_route"] },
         "id": { "type": "string", "minLength": 1 },
         "process": {
           "type": "object",
@@ -191,7 +191,7 @@
         "rotated": { "type": "array", "items": { "type": "string" }, "description": "Secret env names whose values were rotated in the running proxy by reload, without a restart." },
         "phases": {
           "type": "array",
-          "description": "Where ready_ms went: each apply step in order, timed from the request. Names include validate, source, prepare, proxy_plan, bundle, proxy_start, claim_warm|claim_pooled|claim_cold_clone, upload, relay_start, go, runtime_start and 'first_task_accepted after N probe(s)'.",
+          "description": "Where ready_ms went: each apply step in order, timed from the request. Names include validate, source, prepare, proxy_plan, bundle, proxy_start (local), proxy_ready (proxmox: the tenant proxy guest's health check), claim_warm|claim_pooled|claim_cold_clone, upload, route (proxmox, warm: the agent's route in the proxy guest), go, runtime_start and 'first_task_accepted after N probe(s)'. relay_start appears only in records from before the proxy guest.",
           "items": {
             "type": "object",
             "additionalProperties": false,
