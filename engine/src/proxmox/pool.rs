@@ -10,7 +10,9 @@
 //! separate CLI invocations share it. Every guest is recorded before it is
 //! cloned (`cloning`, with the filler's pid), so a filler that dies leaves a
 //! record the next fill clears.
+use super::delivery::GuestChannel;
 use super::{hostname, ProxmoxDriver};
+use crate::runtimes::WarmRecipe;
 use crate::substrate::{codes, FabricError, Resource, ResourceJournal};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -57,6 +59,22 @@ pub struct PoolGuest {
     pub claimed_by: Option<String>,
     #[serde(default)]
     pub claimed_at_ms: Option<u64>,
+    /// Set when the guest runs a warm runtime (its `WarmRecipe` key). Such a
+    /// guest was bound to its tenant's pool when it was warmed; a claim
+    /// sends its go request instead of binding it. Its credential and go
+    /// token are kept beside the pool state, not in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm: Option<String>,
+}
+
+/// What the control plane keeps for a warm guest (mode 0600, one file per
+/// guest under `<pool dir>/<target>-warm/`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WarmSecrets {
+    claim_id: String,
+    credential: String,
+    go_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +103,8 @@ pub struct Claim {
     pub template_version: String,
     /// The bind agent's `/status` reply after the bind.
     pub status: Value,
+    /// For a warm guest: the token its warm runtime takes go with.
+    pub go_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -97,6 +117,8 @@ pub struct FillReport {
     pub retired: Vec<u32>,
     pub cleared: Vec<u32>,
     pub ready: Vec<u32>,
+    /// Guests that now run a warm runtime (`fill_warm`).
+    pub warmed: Vec<u32>,
     pub errors: Vec<String>,
 }
 
@@ -168,6 +190,7 @@ impl ProxmoxDriver {
 
     /// Drop a destroyed guest from the pool state.
     pub fn forget(&self, vmid: u32) -> Result<(), FabricError> {
+        let _ = fs::remove_file(self.warm_secrets_path(vmid));
         let mut locked = self.locked()?;
         let before = locked.state.guests.len();
         locked.state.guests.retain(|g| g.vmid != vmid);
@@ -187,17 +210,41 @@ impl ProxmoxDriver {
         generation: u64,
         journal: &mut dyn ResourceJournal,
     ) -> Result<Claim, FabricError> {
+        self.claim_for(tenant, agent, generation, None, journal)
+    }
+
+    /// `claim`, preferring a guest of this tenant whose warm runtime has the
+    /// key `warm` (the caller then sends it go), then an unwarmed pooled
+    /// guest, then a cold clone. A guest warmed for another runtime is never
+    /// taken, and nothing ever crosses tenants.
+    pub fn claim_for(
+        &self,
+        tenant: &str,
+        agent: &str,
+        generation: u64,
+        warm: Option<&str>,
+        journal: &mut dyn ResourceJournal,
+    ) -> Result<Claim, FabricError> {
         self.tenant_vlan(tenant)?;
         loop {
             let picked = {
                 let mut locked = self.locked()?;
                 let current = locked.state.template_version.clone();
-                let index = locked.state.guests.iter().position(|g| {
+                let usable = |g: &PoolGuest| {
                     g.tenant == tenant
                         && g.state == GuestState::Ready
                         && current.is_some()
                         && g.template_version == current
-                });
+                };
+                let index = warm
+                    .and_then(|key| {
+                        locked
+                            .state
+                            .guests
+                            .iter()
+                            .position(|g| usable(g) && g.warm.as_deref() == Some(key))
+                    })
+                    .or_else(|| locked.state.guests.iter().position(|g| usable(g) && g.warm.is_none()));
                 match index {
                     None => None,
                     Some(index) => {
@@ -217,8 +264,16 @@ impl ProxmoxDriver {
             let Some((guest, resource, version)) = picked else {
                 return self.cold_claim(tenant, agent, generation, journal);
             };
-            match self.bind(&guest, agent, generation, &version) {
-                Ok((claim_id, credential, status)) => {
+            let bound = match &guest.warm {
+                Some(key) => self.check_warm(&guest, key).map(|(secrets, status)| {
+                    (secrets.claim_id, secrets.credential, status, Some(secrets.go_token))
+                }),
+                None => self
+                    .bind(&guest, agent, generation, &version)
+                    .map(|(claim_id, credential, status)| (claim_id, credential, status, None)),
+            };
+            match bound {
+                Ok((claim_id, credential, status, go_token)) => {
                     journal.created(&resource)?;
                     return Ok(Claim {
                         resource,
@@ -229,13 +284,17 @@ impl ProxmoxDriver {
                         pooled: true,
                         template_version: version,
                         status,
+                        go_token,
                     });
                 }
                 Err(_) => {
-                    // A pooled guest that will not bind is retired, never
-                    // retried; try the next one.
-                    let _ = self.destroy_guest(guest.vmid);
-                    let _ = self.forget(guest.vmid);
+                    // A pooled guest that will not bind, or a warm guest
+                    // that lost its warm runtime, is never retried and never
+                    // handed out. It becomes a dead record (Cloning, no
+                    // owner) that the next fill or drain destroys, so the
+                    // destroy (about 2 s) stays off the request path; try
+                    // the next one.
+                    self.mark(guest.vmid, GuestState::Cloning, None)?;
                 }
             }
         }
@@ -282,6 +341,7 @@ impl ProxmoxDriver {
             pooled: false,
             template_version: version,
             status,
+            go_token: None,
         })
     }
 
@@ -389,6 +449,213 @@ impl ProxmoxDriver {
         Ok(report)
     }
 
+    /// `fill`, then start the warm runtime `recipe` in every ready, unwarmed
+    /// guest of the tenant. Warming binds the guest to the tenant's pool (a
+    /// payload with the tenant and the warm key, no agent), uploads the
+    /// launcher and starts it under the egress lock with a go token minted
+    /// for that guest. A guest that fails to warm is destroyed.
+    pub fn fill_warm(&self, tenant: &str, recipe: &WarmRecipe) -> Result<FillReport, FabricError> {
+        let mut report = self.fill(tenant)?;
+        let version = self.template_version()?;
+        let work = pool_dir().join(format!("{}-warm", self.target_name));
+        fs::create_dir_all(&work)
+            .map_err(|e| FabricError::io(codes::STATE_FAILED, "could not create the warm pool directory", e))?;
+        let stage = work.join(format!("stage-{}", std::process::id()));
+        fs::create_dir_all(&stage)
+            .map_err(|e| FabricError::io(codes::STATE_FAILED, "could not create the warm staging directory", e))?;
+        let bundle = super::delivery::stage_warm_bundle(recipe, &stage)
+            .map_err(|message| FabricError::new(codes::SOURCE_FAILED, message));
+        let bundle = match bundle {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&stage);
+                return Err(error);
+            }
+        };
+        // Guests warmed with an older launcher for this runtime are never
+        // claimed again; retire them.
+        let family = recipe.key.rsplit_once('-').map_or(recipe.key.as_str(), |(family, _)| family);
+        let outdated: Vec<u32> = self
+            .locked()?
+            .state
+            .guests
+            .iter()
+            .filter(|g| g.tenant == tenant && g.state == GuestState::Ready)
+            .filter(|g| {
+                g.warm.as_deref().is_some_and(|key| {
+                    key != recipe.key && key.rsplit_once('-').map_or(key, |(f, _)| f) == family
+                })
+            })
+            .map(|g| g.vmid)
+            .collect();
+        for vmid in outdated {
+            self.destroy_guest(vmid)?;
+            self.forget(vmid)?;
+            report.retired.push(vmid);
+        }
+        // A guest restarted since it was warmed has lost its binding and its
+        // runtime (both live in tmpfs). Mark it unwarmed so the loop below
+        // binds and warms it again; one that cannot be rebound is destroyed
+        // there. (Seen on pve-node-a: something outside Monolith restarts every
+        // new container about three minutes after its first start.)
+        let warmed: Vec<PoolGuest> = self
+            .locked()?
+            .state
+            .guests
+            .iter()
+            .filter(|g| g.tenant == tenant && g.state == GuestState::Ready && g.warm.as_deref() == Some(&recipe.key))
+            .cloned()
+            .collect();
+        for guest in warmed {
+            if self.check_warm(&guest, &recipe.key).is_err() {
+                let mut locked = self.locked()?;
+                if let Some(entry) = locked
+                    .state
+                    .guests
+                    .iter_mut()
+                    .find(|g| g.vmid == guest.vmid && g.state == GuestState::Ready)
+                {
+                    entry.warm = None;
+                }
+                locked.save()?;
+                let _ = fs::remove_file(self.warm_secrets_path(guest.vmid));
+            }
+        }
+        let mut retried = BTreeSet::new();
+        loop {
+            // Take one unwarmed guest at a time under the lock, marked as
+            // being worked on by this process, so a concurrent claim cannot
+            // bind it while it is warmed.
+            let picked = {
+                let mut locked = self.locked()?;
+                let pid = std::process::id();
+                let found = locked.state.guests.iter_mut().find(|g| {
+                    g.tenant == tenant
+                        && g.state == GuestState::Ready
+                        && g.warm.is_none()
+                        && g.template_version.as_deref() == Some(version.as_str())
+                });
+                match found {
+                    None => None,
+                    Some(guest) => {
+                        guest.state = GuestState::Cloning;
+                        guest.owner_pid = Some(pid);
+                        guest.owner_start = crate::process::process_start_time(pid);
+                        let guest = guest.clone();
+                        locked.save()?;
+                        Some(guest)
+                    }
+                }
+            };
+            let Some(guest) = picked else { break };
+            match self.warm_guest(&guest, recipe, &bundle, &version) {
+                Ok(()) => {
+                    let mut locked = self.locked()?;
+                    if let Some(entry) = locked.state.guests.iter_mut().find(|g| g.vmid == guest.vmid) {
+                        entry.state = GuestState::Ready;
+                        entry.owner_pid = None;
+                        entry.owner_start = None;
+                        entry.warm = Some(recipe.key.clone());
+                    }
+                    locked.save()?;
+                    report.warmed.push(guest.vmid);
+                }
+                Err(message) => {
+                    // A guest restarted while it was being warmed comes back
+                    // unbound and empty: warm it once more. Anything else,
+                    // or a second failure, retires it.
+                    let port = self.settings()?.bind_port;
+                    let restarted = !retried.contains(&guest.vmid)
+                        && wait_for_bind_agent(guest.address, port, &hostname(guest.vmid), Instant::now() + Duration::from_secs(60))
+                            .is_ok();
+                    if restarted {
+                        retried.insert(guest.vmid);
+                        let _ = fs::remove_file(self.warm_secrets_path(guest.vmid));
+                        self.mark(guest.vmid, GuestState::Ready, None)?;
+                    } else {
+                        let _ = self.destroy_guest(guest.vmid);
+                        let _ = self.forget(guest.vmid);
+                        report.errors.push(format!("guest {} would not warm: {message}", guest.vmid));
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&stage);
+        report.ready = self
+            .locked()?
+            .state
+            .guests
+            .iter()
+            .filter(|g| g.tenant == tenant && g.state == GuestState::Ready)
+            .map(|g| g.vmid)
+            .collect();
+        Ok(report)
+    }
+
+    fn warm_guest(&self, guest: &PoolGuest, recipe: &WarmRecipe, bundle: &std::path::Path, version: &str) -> Result<(), String> {
+        let settings = self.settings().map_err(|e| e.message)?.clone();
+        if recipe.memory_mb > settings.memory_mb {
+            self.set_memory(guest.vmid, recipe.memory_mb).map_err(|e| e.message)?;
+        }
+        let claim_id = format!("warm-{}-{}", guest.vmid, random_hex(8)?);
+        let (claim_id, credential, _status) = self.bind_with(
+            guest,
+            claim_id,
+            json!({
+                "tenant": guest.tenant,
+                "warm": recipe.key,
+                "target": self.target_name,
+                "template_version": version,
+                "issued_at_ms": now_ms(),
+            }),
+        )?;
+        let go_token = random_hex(32)?;
+        let secrets = WarmSecrets {
+            claim_id,
+            credential: credential.clone(),
+            go_token: go_token.clone(),
+        };
+        let text = serde_json::to_vec(&secrets).map_err(|e| e.to_string())?;
+        crate::state::atomic_write(&self.warm_secrets_path(guest.vmid), &text, 0o600)
+            .map_err(|e| format!("could not record the warm guest's credential: {e}"))?;
+        let channel = GuestChannel::new(guest.address, settings.bind_port, &credential);
+        channel.put_bundle(bundle).map_err(|e| e.to_string())?;
+        channel
+            .start(&super::delivery::warm_start_body(recipe, &go_token))
+            .map_err(|e| e.to_string())?;
+        // A guest counts as warm only once its runtime has loaded and listens
+        // for go; a claim of a guest still loading would wait for it.
+        wait_until_warm(guest.address, recipe.port, Duration::from_secs(90))
+    }
+
+    /// Before a warm guest is handed out: its bind agent must still hold the
+    /// pool binding this control plane made, for this tenant and this warm
+    /// key, and its warm runtime must be running.
+    fn check_warm(&self, guest: &PoolGuest, key: &str) -> Result<(WarmSecrets, Value), String> {
+        let text = fs::read(self.warm_secrets_path(guest.vmid))
+            .map_err(|e| format!("the warm guest's credential is missing: {e}"))?;
+        let secrets: WarmSecrets =
+            serde_json::from_slice(&text).map_err(|e| format!("the warm guest's credential is unreadable: {e}"))?;
+        let port = self.settings().map_err(|e| e.message)?.bind_port;
+        let channel = GuestChannel::new(guest.address, port, &secrets.credential);
+        let status = channel.status().map_err(|e| e.to_string())?;
+        if status.get("claim_id").and_then(Value::as_str) != Some(secrets.claim_id.as_str())
+            || status["payload"]["tenant"].as_str() != Some(guest.tenant.as_str())
+            || status["payload"]["warm"].as_str() != Some(key)
+        {
+            return Err(format!("the warm guest's binding does not match: {status}"));
+        }
+        let runtime = channel.runtime().map_err(|e| e.to_string())?;
+        if runtime.get("state").and_then(Value::as_str) != Some("running") {
+            return Err(format!("the warm runtime is not running: {runtime}"));
+        }
+        Ok((secrets, status))
+    }
+
+    fn warm_secrets_path(&self, vmid: u32) -> PathBuf {
+        pool_dir().join(format!("{}-warm", self.target_name)).join(format!("{vmid}.json"))
+    }
+
     /// Destroy the tenant's unclaimed guests (all tenants when `None`).
     /// Claimed guests belong to agents and are left alone.
     pub fn drain(&self, tenant: Option<&str>) -> Result<Vec<u32>, FabricError> {
@@ -462,6 +729,7 @@ impl ProxmoxDriver {
             owner_start: crate::process::process_start_time(pid),
             claimed_by: agent.map(str::to_owned),
             claimed_at_ms: agent.map(|_| now_ms()),
+            warm: None,
         };
         locked.state.guests.push(guest.clone());
         locked.save()?;
@@ -491,8 +759,23 @@ impl ProxmoxDriver {
         generation: u64,
         version: &str,
     ) -> Result<(String, String, Value), String> {
-        let port = self.settings().map_err(|e| e.message)?.bind_port;
         let claim_id = format!("claim-{}-{}", guest.vmid, random_hex(8)?);
+        self.bind_with(
+            guest,
+            claim_id,
+            json!({
+                "agent": agent,
+                "tenant": guest.tenant,
+                "generation": generation,
+                "target": self.target_name,
+                "template_version": version,
+                "issued_at_ms": now_ms(),
+            }),
+        )
+    }
+
+    fn bind_with(&self, guest: &PoolGuest, claim_id: String, payload: Value) -> Result<(String, String, Value), String> {
+        let port = self.settings().map_err(|e| e.message)?.bind_port;
         let credential = random_hex(32)?;
         let expected = hostname(guest.vmid);
         let agent_http = bind_http(Duration::from_secs(3));
@@ -502,14 +785,7 @@ impl ProxmoxDriver {
             .send_json(json!({
                 "claim_id": claim_id,
                 "credential": credential,
-                "payload": {
-                    "agent": agent,
-                    "tenant": guest.tenant,
-                    "generation": generation,
-                    "target": self.target_name,
-                    "template_version": version,
-                    "issued_at_ms": now_ms(),
-                },
+                "payload": payload,
             }))
             .map_err(|e| format!("bind request failed: {e}"))?;
         let status = response.status().as_u16();
@@ -578,7 +854,7 @@ pub fn wait_for_bind_agent(address: Ipv4Addr, port: u16, hostname: &str, deadlin
 /// pool is replenished off the request path. Only the CLI binary does this;
 /// library callers (and the live suites) fill explicitly. Set
 /// `MONOLITH_POOL_REFILL=0` to turn it off.
-pub fn spawn_refill(target: &str, tenant: &str) {
+pub fn spawn_refill(target: &str, tenant: &str, warm_runtime: Option<&str>) {
     if std::env::var("MONOLITH_POOL_REFILL").as_deref() == Ok("0") {
         return;
     }
@@ -588,6 +864,9 @@ pub fn spawn_refill(target: &str, tenant: &str) {
     }
     let mut command = std::process::Command::new(exe);
     command.args(["pool", "fill", "--target", target, "--tenant", tenant]);
+    if let Some(runtime) = warm_runtime {
+        command.args(["--warm", runtime]);
+    }
     let args: Vec<String> = std::env::args().collect();
     if let Some(index) = args.iter().position(|a| a == "--targets-config") {
         if let Some(path) = args.get(index + 1) {
@@ -643,6 +922,35 @@ fn random_hex(bytes: usize) -> Result<String, String> {
         .and_then(|mut f| f.read_exact(&mut buffer))
         .map_err(|e| format!("could not read /dev/urandom: {e}"))?;
     Ok(buffer.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Wait until the warm runtime on `address:port` answers as warm: HTTP 503
+/// with `{"state": "warm"}`, which it sends only after loading and while it
+/// waits for go.
+fn wait_until_warm(address: Ipv4Addr, port: u16, limit: Duration) -> Result<(), String> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .http_status_as_error(false)
+        .proxy(None)
+        .build()
+        .new_agent();
+    let started = Instant::now();
+    let mut last = String::from("no answer yet");
+    while started.elapsed() < limit {
+        match agent.get(format!("http://{address}:{port}/")).call() {
+            Ok(mut response) => {
+                let status = response.status().as_u16();
+                let body: Value = response.body_mut().read_json().unwrap_or_default();
+                if status == 503 && body["state"] == "warm" {
+                    return Ok(());
+                }
+                last = format!("HTTP {status}: {body}");
+            }
+            Err(error) => last = error.to_string(),
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!("the warm runtime did not come up within {}s ({last})", limit.as_secs()))
 }
 
 fn now_ms() -> u64 {

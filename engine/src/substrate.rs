@@ -116,10 +116,61 @@ pub trait ResourceJournal {
     fn created(&mut self, resource: &Resource) -> Result<(), FabricError>;
 }
 
+/// One step of an apply, timed from the apply request (the R3 clock).
+#[derive(Debug, Clone, Serialize)]
+pub struct Phase {
+    pub phase: String,
+    /// Milliseconds from the apply request to the end of this step.
+    pub at_ms: f64,
+    /// Milliseconds this step took (since the previous mark).
+    pub ms: f64,
+}
+
+/// Marks the end of each apply step against the request's clock, so the
+/// result shows where the time to ready went instead of one total.
+pub struct PhaseClock {
+    started: std::time::Instant,
+    marks: std::cell::RefCell<Vec<Phase>>,
+}
+
+impl PhaseClock {
+    pub fn new(started: std::time::Instant) -> Self {
+        Self {
+            started,
+            marks: Default::default(),
+        }
+    }
+
+    pub fn mark(&self, phase: &str) {
+        let at = self.started.elapsed().as_secs_f64() * 1000.0;
+        let mut marks = self.marks.borrow_mut();
+        let previous = marks.last().map_or(0.0, |m| m.at_ms);
+        marks.push(Phase {
+            phase: phase.to_owned(),
+            at_ms: (at * 10.0).round() / 10.0,
+            ms: ((at - previous) * 10.0).round() / 10.0,
+        });
+    }
+
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.started.elapsed()
+    }
+
+    pub fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    pub fn phases(&self) -> Vec<Phase> {
+        self.marks.borrow().clone()
+    }
+}
+
 /// What a driver needs to start one agent generation.
 pub struct CreateRequest<'a> {
     pub agent: &'a str,
     pub tenant: &'a str,
+    /// The spec's runtime name (a `runtimes::lookup` key).
+    pub runtime: &'a str,
     pub generation: u64,
     /// Per-generation directory owned by the control plane.
     pub generation_dir: &'a Path,
@@ -134,6 +185,8 @@ pub struct CreateRequest<'a> {
     /// points the agent's traffic at it and confines the agent so it cannot
     /// connect anywhere else or read the proxy's files.
     pub proxy: &'a ProxyPlan,
+    /// The apply's phase clock; drivers mark their own steps on it.
+    pub clock: &'a PhaseClock,
 }
 
 pub struct Created {
@@ -209,6 +262,7 @@ impl Substrate for LocalDriver {
 
         // The proxy first: the agent must never run without its boundary.
         let (proxy, ports) = start_local_proxy(request, journal, &session)?;
+        request.clock.mark("proxy_start");
 
         let port = free_local_port().map_err(port_error)?;
         let mut recipe = (request.recipe)("127.0.0.1", port)?;
@@ -235,6 +289,7 @@ impl Substrate for LocalDriver {
             ..pending
         };
         journal.created(&resource)?;
+        request.clock.mark("runtime_start");
         Ok(Created {
             resources: vec![proxy, resource],
             endpoint: Endpoint {

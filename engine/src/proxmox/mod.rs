@@ -55,6 +55,7 @@ pub struct Settings {
     pub tenant_vlans: BTreeMap<String, u16>,
     pub warm_pool_size: u32,
     pub memory_mb: u32,
+    pub cores: Option<u32>,
     pub bind_port: u16,
     pub tls: TlsMode,
 }
@@ -298,23 +299,21 @@ impl ProxmoxDriver {
             )
             .map_err(|error| self.api_error(&format!("could not clone template into {vmid}"), error))?;
         let guest = self.guest_path(vmid)?;
+        let mut config = vec![
+            (
+                "net0",
+                network::net0(&settings.bridge, address, settings.prefix_len, settings.gateway, vlan),
+            ),
+            ("memory", settings.memory_mb.to_string()),
+            ("swap", "0".to_owned()),
+            ("onboot", "0".to_owned()),
+            ("tags", format!("{OWNER_TAG};tenant-{}", tag_slug(tenant))),
+        ];
+        if let Some(cores) = settings.cores {
+            config.push(("cores", cores.to_string()));
+        }
         client
-            .run_task(
-                &settings.node,
-                "PUT",
-                &format!("{guest}/config"),
-                &[
-                    (
-                        "net0",
-                        network::net0(&settings.bridge, address, settings.prefix_len, settings.gateway, vlan),
-                    ),
-                    ("memory", settings.memory_mb.to_string()),
-                    ("swap", "0".to_owned()),
-                    ("onboot", "0".to_owned()),
-                    ("tags", format!("{OWNER_TAG};tenant-{}", tag_slug(tenant))),
-                ],
-                remaining(deadline),
-            )
+            .run_task(&settings.node, "PUT", &format!("{guest}/config"), &config, remaining(deadline))
             .map_err(|error| self.api_error(&format!("could not configure guest {vmid}"), error))?;
         client
             .run_task(&settings.node, "POST", &format!("{guest}/status/start"), &[], remaining(deadline))
@@ -469,6 +468,7 @@ impl Substrate for ProxmoxDriver {
         // Pack the bundle before touching anything, so a bad build wastes no guest.
         let bundle = delivery::stage_bundle(&recipe, &request.proxy.agent_ca, request.generation_dir)
             .map_err(|message| FabricError::new(codes::SOURCE_FAILED, message))?;
+        request.clock.mark("bundle");
         let session = format!(
             "{}-g{}-{}",
             request.agent,
@@ -478,17 +478,66 @@ impl Substrate for ProxmoxDriver {
         // The proxy first, on this host: the agent never runs without its
         // boundary, and the boundary never runs in a guest.
         let (proxy, ports) = substrate::start_local_proxy(request, journal, &session)?;
+        request.clock.mark("proxy_start");
         // From here every resource is journaled; on an error the control
         // plane clears what was touched, in reverse order.
-        let claim = self.claim(request.tenant, request.agent, request.generation, journal)?;
-        pool::spawn_refill(&self.target_name, request.tenant);
+        let warm = crate::runtimes::lookup(request.runtime).and_then(|adapter| adapter.warm(GUEST_RUNTIME_PORT));
+        let claim = self.claim_for(
+            request.tenant,
+            request.agent,
+            request.generation,
+            warm.as_ref().map(|w| w.key.as_str()),
+            journal,
+        )?;
+        request.clock.mark(match (&claim.go_token, claim.pooled) {
+            (Some(_), _) => "claim_warm",
+            (None, true) => "claim_pooled",
+            (None, false) => "claim_cold_clone",
+        });
+        pool::spawn_refill(&self.target_name, request.tenant, warm.as_ref().map(|_| request.runtime));
         // The per-guest credential stays with the control plane, beside the
         // generation it belongs to.
         let credential_path = request.generation_dir.join("guest-credential");
         crate::state::atomic_write(&credential_path, claim.credential.as_bytes(), 0o600)
             .map_err(|error| FabricError::io(codes::STATE_FAILED, "could not record the guest credential", error))?;
-        if recipe.memory_mb > settings.memory_mb {
-            self.set_memory(claim.vmid, recipe.memory_mb)?;
+        if let Some(go_token) = &claim.go_token {
+            // A warm guest already runs its launcher: start the relay, then
+            // hand the launcher the agent's files and environment.
+            let _ = std::fs::remove_file(&bundle);
+            let relay = delivery::start_relay(
+                request,
+                journal,
+                &session,
+                &format!("{}:{}", claim.address, settings.bind_port),
+                &credential_path,
+                ports.tunnel,
+            )?;
+            request.clock.mark("relay_start");
+            let proxy_env = request
+                .proxy
+                .agent_env_with_ca(&delivery::guest_proxy_url(), &delivery::guest_ca_path());
+            let body = delivery::go_body(&recipe, proxy_env, &request.proxy.agent_ca)
+                .map_err(|message| FabricError::new(codes::SOURCE_FAILED, message))?;
+            delivery::send_go(
+                claim.address,
+                recipe.port,
+                go_token,
+                &body,
+                std::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .map_err(|message| {
+                FabricError::new(codes::SUBSTRATE_FAILED, format!("guest {}: {message}", claim.vmid))
+                    .next(format!("monolith agent logs {}", request.agent))
+            })?;
+            request.clock.mark("go");
+            return Ok(Created {
+                resources: vec![proxy, claim.resource, relay],
+                endpoint: crate::runtimes::Endpoint {
+                    base_url: format!("http://{}:{}", claim.address, recipe.port),
+                    control_key: request.control_key.to_owned(),
+                },
+                proxy_management: format!("http://127.0.0.1:{}", ports.management),
+            });
         }
         let channel = GuestChannel::new(claim.address, settings.bind_port, &claim.credential);
         let delivery_error = |step: &str, error: ChannelError| match error {
@@ -507,9 +556,25 @@ impl Substrate for ProxmoxDriver {
             )
             .next(format!("monolith agent logs {}", request.agent)),
         };
-        let uploaded = channel.put_bundle(&bundle);
+        // Raising the guest's memory is a Proxmox API call; it runs beside
+        // the upload, and both finish before the runtime starts.
+        let (resized, uploaded) = std::thread::scope(|scope| {
+            let resize = (recipe.memory_mb > settings.memory_mb)
+                .then(|| scope.spawn(|| self.set_memory(claim.vmid, recipe.memory_mb)));
+            let uploaded = channel.put_bundle(&bundle);
+            let resized = resize.map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err(FabricError::new(codes::SUBSTRATE_FAILED, "the memory resize panicked")))
+            });
+            (resized, uploaded)
+        });
         let _ = std::fs::remove_file(&bundle);
         uploaded.map_err(|e| delivery_error("deliver the runtime bundle", e))?;
+        if let Some(resized) = resized {
+            resized?;
+        }
+        request.clock.mark("upload");
         let relay = delivery::start_relay(
             request,
             journal,
@@ -518,12 +583,14 @@ impl Substrate for ProxmoxDriver {
             &credential_path,
             ports.tunnel,
         )?;
+        request.clock.mark("relay_start");
         let proxy_env = request
             .proxy
             .agent_env_with_ca(&delivery::guest_proxy_url(), &delivery::guest_ca_path());
         channel
             .start(&delivery::start_body(&recipe, proxy_env))
             .map_err(|e| delivery_error("start the runtime", e))?;
+        request.clock.mark("runtime_start");
         Ok(Created {
             resources: vec![proxy, claim.resource, relay],
             endpoint: crate::runtimes::Endpoint {
@@ -650,6 +717,7 @@ fn resolve_settings(config: &ConfiguredTarget) -> Result<Settings, String> {
         tenant_vlans: driver.tenant_vlans.clone(),
         warm_pool_size: driver.warm_pool_size.unwrap_or(2).min(MAX_WARM_POOL_SIZE),
         memory_mb: driver.guest_memory_mb.unwrap_or(256),
+        cores: driver.guest_cores,
         bind_port: driver.bind_port.unwrap_or(7070),
         tls,
     })

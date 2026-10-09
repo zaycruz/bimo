@@ -26,6 +26,9 @@ pub struct LaunchContext<'a> {
     pub port: u16,
     /// Bearer credential the control plane uses for the readiness probe.
     pub control_key: &'a str,
+    /// True when the agent will run in a guest (only the guest recipe's
+    /// files travel), false on the local substrate.
+    pub guest: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +105,46 @@ pub struct GuestRecipe {
     /// Memory the guest needs while this runtime runs. A pooled guest with
     /// less is raised to this at claim.
     pub memory_mb: u32,
+    /// Set when `files` and `dirs` are fully determined by this key (a
+    /// build of a pinned revision): the driver may reuse a packed copy.
+    pub cache_key: Option<String>,
 }
+
+/// Where build outputs and packed bundles are kept between applies
+/// (`MONOLITH_BUILD_CACHE`, default `.monolith/cache`). Entries are keyed by
+/// content, never by agent, and hold no secret.
+pub fn build_cache_dir() -> PathBuf {
+    std::env::var_os("MONOLITH_BUILD_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".monolith").join("cache"))
+}
+
+/// A runtime started in a pooled guest before any agent is claimed (a warm
+/// runtime). It is generic per (tenant, runtime): it holds no secret, no
+/// control key and no agent configuration, and it serves no task. At claim
+/// the control plane sends it one authenticated go request
+/// (`WARM_GO_PATH` on its task port, bearer: the per-guest go token) with
+/// the agent's files, environment and CA, and only then does it start
+/// serving. See templates/README.md, "Warm runtimes".
+#[derive(Debug, Clone)]
+pub struct WarmRecipe {
+    /// Names what the pool holds; a claim takes only a guest warmed with
+    /// the same key. Changes when the launcher changes.
+    pub key: String,
+    /// Files written into the warm bundle, by path under the runtime root.
+    pub files: Vec<(String, Vec<u8>)>,
+    pub dirs: Vec<String>,
+    pub program: String,
+    pub args: Vec<String>,
+    /// No secret and nothing agent-specific belongs here.
+    pub env: BTreeMap<String, String>,
+    pub cwd: String,
+    pub port: u16,
+    pub memory_mb: u32,
+}
+
+/// Where a warm runtime takes its go request.
+pub const WARM_GO_PATH: &str = "/monolith/warm/go";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Probe {
@@ -132,6 +174,12 @@ pub trait RuntimeAdapter: Sync {
             self.name()
         ))
     }
+    /// A warm runtime the pool can start before claim, when the runtime has
+    /// a generic part worth starting early. `None` (the default) means a
+    /// claim delivers and starts the whole runtime.
+    fn warm(&self, _port: u16) -> Option<WarmRecipe> {
+        None
+    }
     /// The placeholder value the agent sees in place of a secret. Its shape
     /// must keep the runtime in the auth mode a real key would select.
     fn placeholder(&self, secret: &SecretRef, nonce: &str) -> String {
@@ -139,6 +187,9 @@ pub trait RuntimeAdapter: Sync {
     }
     /// Submit a trivial first task and report whether it was accepted.
     fn probe(&self, endpoint: &Endpoint) -> Probe;
+    /// After ready is recorded: wind down the probe's task (for example stop
+    /// a run so it spends no model tokens). Not part of the ready clock.
+    fn settle(&self, _endpoint: &Endpoint, _task_id: &str) {}
     /// After a successful probe: confirm the runtime is in the expected mode.
     /// Returns a description of what is wrong when it is not.
     fn state_check(&self, _endpoint: &Endpoint, _spec: &AgentSpec) -> Result<(), String> {

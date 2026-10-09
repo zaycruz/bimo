@@ -188,7 +188,21 @@
         "resources": { "type": "array", "items": { "$ref": "#/$defs/resource" } },
         "recovered": { "type": "array", "items": { "$ref": "#/$defs/remain" } },
         "retired": { "type": "array", "items": { "$ref": "#/$defs/resource" } },
-        "rotated": { "type": "array", "items": { "type": "string" }, "description": "Secret env names whose values were rotated in the running proxy by reload, without a restart." }
+        "rotated": { "type": "array", "items": { "type": "string" }, "description": "Secret env names whose values were rotated in the running proxy by reload, without a restart." },
+        "phases": {
+          "type": "array",
+          "description": "Where ready_ms went: each apply step in order, timed from the request. Names include validate, source, prepare, proxy_plan, bundle, proxy_start, claim_warm|claim_pooled|claim_cold_clone, upload, relay_start, go, runtime_start and 'first_task_accepted after N probe(s)'.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "at_ms", "ms"],
+            "properties": {
+              "phase": { "type": "string" },
+              "at_ms": { "type": "number" },
+              "ms": { "type": "number" }
+            }
+          }
+        }
       }
     },
     "status": {

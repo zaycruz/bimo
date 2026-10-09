@@ -29,7 +29,7 @@ USAGE:
   monolith agent logs <name>     [--stream agent|egress|journal] [--output json|text] [--state-root <dir>]
   monolith agent destroy <name>  [--output json|text] [--state-root <dir>] [--targets-config <file>]
   monolith agent list            [--output json|text] [--state-root <dir>] [--targets-config <file>]
-  monolith pool status|fill|drain --target <name> [--tenant <id>] [--output json|text] [--targets-config <file>]
+  monolith pool status|fill|drain --target <name> [--tenant <id>] [--warm <runtime>] [--output json|text] [--targets-config <file>]
   monolith targets [--targets-config <file>]
   monolith deploy <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
   monolith validate <manifest>
@@ -248,7 +248,7 @@ fn agent_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, 
     })
 }
 
-const POOL_FLAGS: &[&str] = &["--output", "--target", "--tenant", "--targets-config"];
+const POOL_FLAGS: &[&str] = &["--output", "--target", "--tenant", "--targets-config", "--warm"];
 
 /// `monolith pool <status|fill|drain>`: the per-tenant warm pool of a proxmox
 /// target (U6). Prints one envelope, like `monolith agent`.
@@ -295,8 +295,20 @@ fn pool_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, s
         "status" => output::Envelope::success(&command, false, driver.pool_state()?, Vec::new(), None),
         "fill" => {
             let tenant = tenant.ok_or_else(|| usage("'pool fill' needs --tenant <id>".to_owned()))?;
-            let report = driver.fill(&tenant)?;
-            let changed = !(report.created.is_empty() && report.retired.is_empty() && report.cleared.is_empty());
+            let report = match option_value(arguments, "--warm").map_err(usage)? {
+                None => driver.fill(&tenant)?,
+                Some(runtime) => {
+                    let recipe = monolith::runtimes::lookup(&runtime)
+                        .ok_or_else(|| usage(format!("unknown runtime '{runtime}' for --warm")))?
+                        .warm(monolith::runtimes::GUEST_RUNTIME_PORT)
+                        .ok_or_else(|| usage(format!("runtime '{runtime}' has no warm runtime")))?;
+                    driver.fill_warm(&tenant, &recipe)?
+                }
+            };
+            let changed = !(report.created.is_empty()
+                && report.retired.is_empty()
+                && report.cleared.is_empty()
+                && report.warmed.is_empty());
             output::Envelope::success(&command, changed, report, Vec::new(), None)
         }
         "drain" => {

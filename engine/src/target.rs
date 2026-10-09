@@ -151,6 +151,10 @@ pub struct ProxmoxDriverSettings {
     /// Memory per guest. Default 256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_memory_mb: Option<u32>,
+    /// vCPUs per guest (LXC `cores`). Default: the template's (1). Runtime
+    /// boot is CPU-bound, so a second core shortens time to ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_cores: Option<u32>,
     /// Port of the bind agent baked into the template. Default 7070.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_port: Option<u16>,
@@ -642,6 +646,11 @@ fn validate_driver_settings(settings: &ProxmoxDriverSettings) -> Result<(), Stri
     if let Some(size) = settings.warm_pool_size {
         if size > MAX_WARM_POOL_SIZE {
             return Err(format!("warm_pool_size {size} is above the cap of {MAX_WARM_POOL_SIZE}"));
+        }
+    }
+    if let Some(cores) = settings.guest_cores {
+        if cores == 0 || cores > 4 {
+            return Err(format!("guest_cores {cores} must be between 1 and 4"));
         }
     }
     if settings.tls_verify == Some(false) && settings.tls_ca_file.is_some() {

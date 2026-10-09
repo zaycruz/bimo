@@ -21,7 +21,7 @@ use crate::secrets::Handle;
 use crate::spec::{self, AgentSpec, LoadedSpec, Source};
 use crate::state;
 use crate::substrate::{
-    self, codes, CreateRequest, FabricError, Resource, ResourceJournal, Substrate,
+    self, codes, CreateRequest, FabricError, Phase, PhaseClock, Resource, ResourceJournal, Substrate,
 };
 use crate::target::{ResolvedTarget, TargetCatalog};
 use serde::{Deserialize, Serialize};
@@ -175,6 +175,9 @@ pub struct ApplyResult {
     /// control plane. Absent when nothing was started.
     pub ready_ms: Option<u64>,
     pub first_task_id: Option<String>,
+    /// Where `ready_ms` went: each apply step, timed from the request.
+    /// Empty when nothing was started.
+    pub phases: Vec<Phase>,
     pub resources: Vec<Resource>,
     pub recovered: Vec<Remain>,
     pub retired: Vec<Resource>,
@@ -384,6 +387,7 @@ impl Fabric {
                         endpoint: record.endpoint.clone(),
                         ready_ms: None,
                         first_task_id: None,
+                        phases: Vec::new(),
                         resources: record.resources.clone(),
                         recovered,
                         retired: Vec::new(),
@@ -402,6 +406,8 @@ impl Fabric {
         })?;
 
         let generation_dir = dir.join(format!("gen-{generation}"));
+        let clock = PhaseClock::new(started);
+        clock.mark("validate");
         let result = self.start_generation(
             &loaded,
             adapter,
@@ -412,7 +418,7 @@ impl Fabric {
             &control_key,
             &secret_values,
             target.upstream_deny_cidrs(),
-            started,
+            &clock,
         );
         let (created, ready_ms, task_id) = match result {
             Ok(value) => value,
@@ -503,6 +509,7 @@ impl Fabric {
                 endpoint: record.endpoint,
                 ready_ms: Some(ready_ms),
                 first_task_id: Some(task_id),
+                phases: clock.phases(),
                 resources: record.resources,
                 recovered,
                 retired,
@@ -558,7 +565,7 @@ impl Fabric {
         control_key: &str,
         secret_values: &[(String, String)],
         upstream_deny_cidrs: Option<Vec<String>>,
-        started: Instant,
+        clock: &PhaseClock,
     ) -> Result<(substrate::Created, u64, String), (FabricError, Vec<Resource>)> {
         let spec = &loaded.spec;
         let fail = |error: FabricError| (error, Vec::new());
@@ -568,6 +575,7 @@ impl Fabric {
         fs::create_dir_all(&home_dir)
             .map_err(|e| fail(FabricError::io(codes::STATE_FAILED, "could not create agent home", e)))?;
         materialize_source(loaded, &source_dir).map_err(fail)?;
+        clock.mark("source");
 
         let mut env = BTreeMap::new();
         for secret in &spec.secrets {
@@ -581,6 +589,7 @@ impl Fabric {
             bind_host: "127.0.0.1",
             port: 0,
             control_key,
+            guest: driver.kind() != "local",
         };
         adapter.prepare(&prepare_context).map_err(|message| {
             fail(FabricError::new(codes::SOURCE_FAILED, message).next(format!(
@@ -588,6 +597,7 @@ impl Fabric {
                 spec.runtime
             )))
         })?;
+        clock.mark("prepare");
         let log_path = agent_dir.join("logs").join("agent.log");
         let proxy_plan = ProxyPlan::prepare(
             spec,
@@ -598,6 +608,7 @@ impl Fabric {
             upstream_deny_cidrs,
         )
         .map_err(fail)?;
+        clock.mark("proxy_plan");
         let recipe = |bind_host: &str, port: u16| {
             let context = LaunchContext {
                 spec,
@@ -606,6 +617,7 @@ impl Fabric {
                 bind_host,
                 port,
                 control_key,
+                guest: false,
             };
             let mut recipe = adapter.launch(&context).map_err(|message| {
                 FabricError::new(codes::RUNTIME_UNAVAILABLE, message)
@@ -635,6 +647,7 @@ impl Fabric {
         let request = CreateRequest {
             agent: &spec.name,
             tenant: &spec.tenant_id,
+            runtime: &spec.runtime,
             generation: journal.generation,
             generation_dir,
             log_path: &log_path,
@@ -642,6 +655,7 @@ impl Fabric {
             guest_recipe: &guest_recipe,
             control_key,
             proxy: &proxy_plan,
+            clock,
         };
         let created = match driver.create(&request, journal) {
             Ok(created) => created,
@@ -658,16 +672,20 @@ impl Fabric {
             driver.collect_logs(generation_dir, &created.resources, &log_path);
             (error, created.resources.clone())
         };
+        let mut probes = 0u32;
         loop {
+            probes += 1;
             match adapter.probe(&created.endpoint) {
                 Probe::Accepted(task_id) => {
-                    let ready_ms = started.elapsed().as_millis() as u64;
+                    clock.mark(&format!("first_task_accepted after {probes} probe(s)"));
+                    let ready_ms = clock.elapsed_ms();
                     journal
                         .write(JournalEntry {
                             detail: Some(format!("ready_ms={ready_ms} task={task_id}")),
                             ..journal.entry("ready")
                         })
                         .map_err(|e| (e, created.resources.clone()))?;
+                    adapter.settle(&created.endpoint, &task_id);
                     if let Err(message) = adapter.state_check(&created.endpoint, spec) {
                         return Err(failed(
                             FabricError::new(codes::RUNTIME_STATE, message).next(
@@ -704,7 +722,7 @@ impl Fabric {
                     ));
                 }
             }
-            if started.elapsed() > timeout {
+            if clock.elapsed() > timeout {
                 return Err(failed(
                     FabricError::new(
                         codes::PROBE_FAILED,

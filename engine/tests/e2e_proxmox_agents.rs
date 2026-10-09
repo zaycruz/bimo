@@ -25,7 +25,7 @@
 //! - the run "passes" without reaching the cluster or the provider.
 mod common;
 
-use common::live_gate::{gate, live_driver, repo, write_report, Gate};
+use common::live_gate::{gate, live_driver, repo, write_report, Gate, Sweeper};
 use monolith::proxmox::delivery::GuestChannel;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -81,6 +81,22 @@ impl Cli {
         text.push('\n');
         fs::write(self.dir.join("transcript.jsonl"), text).unwrap();
         (output.status.code().unwrap_or(-1), envelope)
+    }
+}
+
+impl Cli {
+    fn pool(&self, args: &[&str]) -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_monolith"))
+            .arg("pool")
+            .args(args)
+            .args(["--output", "json", "--targets-config"])
+            .arg(&self.targets)
+            .envs(&self.env)
+            .output()
+            .expect("could not run monolith");
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+        assert!(output.status.success(), "monolith pool {args:?} failed: {envelope:#}");
+        envelope
     }
 }
 
@@ -232,6 +248,9 @@ fn eve_and_hermes_run_in_proxmox_guests_and_answer_without_the_real_secret() {
         panic!("BLOCKED: {reason} Report: {}", report.display());
     }
 
+    // Drains the tenant's pool when the run ends, pass or fail, after the
+    // agents themselves are destroyed (it is dropped after `cli`).
+    let _sweeper = Sweeper::new(&driver, &["demo"]);
     let tools = tools();
     let dir = repo().join("target/e2e-proxmox-agents").join(std::process::id().to_string());
     let _ = fs::remove_dir_all(&dir);
@@ -258,12 +277,29 @@ fn eve_and_hermes_run_in_proxmox_guests_and_answer_without_the_real_secret() {
         let name = format!("e2e-pve-{runtime}");
         cli.names.push(name.clone());
         let spec = spec(&cli, runtime, &name, &target);
+        // Hermes runs on a warm guest: its runtime was pre-started at fill
+        // and gets the agent's files and environment by go at claim.
+        let warm = runtime == "hermes";
+        if warm {
+            cli.pool(&["fill", "--target", &target, "--tenant", "demo", "--warm", "hermes"]);
+        }
         let started = Instant::now();
         let (code, envelope) = cli.run(&["apply", spec.to_str().unwrap()]);
         assert_eq!(code, 0, "apply {name} failed: {envelope:#}");
         let result = &envelope["result"];
         let ready_ms = result["ready_ms"].as_u64().expect("ready_ms");
         assert!(result["first_task_id"].as_str().is_some_and(|t| !t.is_empty()), "AE1: no first task");
+        let claim = result["phases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p["phase"].as_str())
+            .find(|p| p.starts_with("claim_"))
+            .unwrap_or("none")
+            .to_owned();
+        if warm {
+            assert_eq!(claim, "claim_warm", "hermes was not placed on a warm guest");
+        }
 
         // AE1 on the cluster: the runtime answers from the guest; the proxy
         // and the relay run on the control plane.
@@ -321,6 +357,7 @@ fn eve_and_hermes_run_in_proxmox_guests_and_answer_without_the_real_secret() {
         let mut files = Vec::new();
         files_under(&unpacked, &mut files);
         let mut runtime_environ = None;
+        let mut go_record = None;
         for file in &files {
             let bytes = fs::read(file).unwrap();
             let shown = file.strip_prefix(&unpacked).unwrap().display().to_string();
@@ -328,11 +365,32 @@ fn eve_and_hermes_run_in_proxmox_guests_and_answer_without_the_real_secret() {
             if shown.ends_with("/environ") && contains(&bytes, b"OPENROUTER_API_KEY=") {
                 runtime_environ = Some(String::from_utf8_lossy(&bytes).into_owned());
             }
+            if shown.ends_with(".monolith-warm-go.json") {
+                go_record = Some(serde_json::from_slice::<Value>(&bytes).expect("the go record is JSON"));
+            }
             for forbidden in ["ca.key", "iron-proxy.yaml", "management.key"] {
                 assert!(!shown.ends_with(forbidden), "proxy material {forbidden} is in the guest at {shown}");
             }
         }
-        let environ = runtime_environ.expect("the runtime's process environment was captured");
+        // A warm runtime's /proc environ is the launcher's pre-claim
+        // environment; the environment it runs the agent with is the one in
+        // its go record (mode 0600 in the runtime root).
+        let environ = if warm {
+            assert!(
+                runtime_environ.is_none(),
+                "a process environment holds the agent's placeholder; the launcher's should not"
+            );
+            let go = go_record.expect("the warm runtime's go record was captured");
+            go["env"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join("\0")
+        } else {
+            runtime_environ.expect("the runtime's process environment was captured")
+        };
         assert!(environ.split('\0').any(|kv| kv == "HTTPS_PROXY=http://127.0.0.1:7071"), "runtime egress goes to the relay");
         assert!(
             environ.split('\0').any(|kv| kv.starts_with("OPENROUTER_API_KEY=") && kv.len() > "OPENROUTER_API_KEY=".len()),
@@ -368,6 +426,7 @@ fn eve_and_hermes_run_in_proxmox_guests_and_answer_without_the_real_secret() {
                 "vmid": vmid,
                 "address": address.to_string(),
                 "ready_ms": ready_ms,
+                "claim": claim,
                 "apply_wall_ms": started.elapsed().as_millis() as u64,
                 "answer_excerpt": answer.chars().take(120).collect::<String>(),
                 "answer_has_word": answer.to_lowercase().contains(ANSWER_WORD),
