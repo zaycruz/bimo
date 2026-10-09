@@ -484,7 +484,7 @@ pub fn redact_terminal(value: &mut serde_json::Value) {
         _ => {}
     }
 }
-fn redact(s: &str) -> String {
+pub fn redact(s: &str) -> String {
     s.lines()
         .map(|line| {
             let upper = line.to_ascii_uppercase();

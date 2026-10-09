@@ -1,4 +1,7 @@
-use monolith::{capabilities, durability, manifest, protocol, runtime, state, validation};
+use monolith::{
+    capabilities, durability, fabric, manifest, output, protocol, runtime, state, substrate, target,
+    validation,
+};
 
 use std::env;
 use std::fs;
@@ -19,17 +22,40 @@ use validation::validate;
 const HELP: &str = r#"monolith - local agent factory foundation
 
 USAGE:
+  monolith agent validate <spec> [--output json|text] [--targets-config <file>]
+  monolith agent plan <spec>     [--output json|text] [--state-root <dir>] [--targets-config <file>]
+  monolith agent apply <spec>    [--output json|text] [--state-root <dir>] [--targets-config <file>]
+  monolith agent status <name>   [--output json|text] [--state-root <dir>] [--targets-config <file>]
+  monolith agent logs <name>     [--stream agent|egress|journal] [--output json|text] [--state-root <dir>]
+  monolith agent destroy <name>  [--output json|text] [--state-root <dir>] [--targets-config <file>]
+  monolith agent list            [--output json|text] [--state-root <dir>] [--targets-config <file>]
+  monolith pool status|fill|drain --target <name> [--tenant <id>] [--output json|text] [--targets-config <file>]
+  monolith targets [--targets-config <file>]
+  monolith deploy <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
   monolith validate <manifest>
-  monolith plan <manifest> [--state-dir <dir>]
-  monolith apply <manifest> [--state-dir <dir>]
-  monolith status <state-dir>
-  monolith send <state-dir> --from <pod> --to <pod> --kind <kind> --payload <text>
-  monolith logs <state-dir> <pod>
-  monolith destroy <state-dir>
-  monolith demo <manifest> [--state-dir <dir>]
+  monolith plan <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+  monolith apply <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+  monolith status <state-dir> [--target <name>] [--targets-config <file>]
+  monolith send <state-dir> --from <pod> --to <pod> --kind <kind> --payload <text> [--target <name>] [--targets-config <file>]
+  monolith logs <state-dir> <pod> [--target <name>] [--targets-config <file>]
+  monolith destroy <state-dir> [--target <name>] [--targets-config <file>]
+  monolith demo <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+
+'monolith agent' runs spec-declared agents (Hermes, eve) on a substrate
+named by the spec's placement: 'local' or a configured proxmox target. With
+'--output json' every agent command prints one JSON envelope; see
+docs/agent-cli.md. The state root defaults to .monolith/agents.
 
 The demo uses local child processes and durable JSON inboxes. The pod-process
 subcommand is an internal runtime used by apply and demo.
+
+Factory manifests run on 'local'. Spec-declared agents run on 'local' or a
+named proxmox target in .monolith/targets.toml. The proxmox driver claims a
+guest from the tenant's warm pool (or clones one cold), binds it, delivers
+the runtime bundle through the guest's bind agent and runs it there; the
+agent's credential proxy stays on this host and the guest reaches it through
+a relay (see templates/README.md). 'monolith pool' keeps a target's
+per-tenant warm pool. 'ssh' is reserved and has no driver.
 "#;
 const MAX_TOOL_CALLS_PER_TURN: usize = 32;
 
@@ -80,6 +106,10 @@ fn run() -> Result<(), String> {
             print!("{HELP}");
             Ok(())
         }
+        "agent" => std::process::exit(command_agent(&rest)),
+        "pool" => std::process::exit(command_pool(&rest)),
+        "targets" => command_targets(&rest),
+        "deploy" => command_deploy(&rest),
         "validate" => command_validate(&rest),
         "plan" => command_plan(&rest),
         "apply" => command_apply(&rest),
@@ -89,11 +119,252 @@ fn run() -> Result<(), String> {
         "destroy" => command_destroy(&rest),
         "demo" => command_demo(&rest),
         "pod-process" => command_pod_process(&rest),
+        // Internal: the control-plane end of a guest's egress tunnel,
+        // started by the proxmox driver (src/relay.rs).
+        "relay" => std::process::exit(monolith::relay::main(&rest)),
         other => Err(format!("unknown command '{other}'. Run 'monolith help'.")),
     }
 }
 
+const AGENT_FLAGS: &[&str] = &["--output", "--state-root", "--targets-config", "--stream"];
+
+/// `monolith agent <verb>`: the agent-native control plane. Always returns an
+/// exit code after printing exactly one envelope (json) or a summary (text).
+fn command_agent(arguments: &[String]) -> i32 {
+    let verb = arguments.first().cloned().unwrap_or_default();
+    let rest = arguments.get(1..).unwrap_or_default();
+    let format = match option_value(rest, "--output")
+        .map_err(|message| substrate::FabricError::new(substrate::codes::USAGE, message))
+        .and_then(|value| output::Format::parse(value.as_deref()))
+    {
+        Ok(format) => format,
+        Err(error) => {
+            let json = rest.windows(2).any(|w| w[0] == "--output" && w[1] == "json");
+            let format = if json { output::Format::Json } else { output::Format::Text };
+            return output::Envelope::failure(&verb, error).emit(format);
+        }
+    };
+    let envelope = match agent_envelope(&verb, rest) {
+        Ok(envelope) => envelope,
+        Err(error) => output::Envelope::failure(if verb.is_empty() { "agent" } else { &verb }, error),
+    };
+    envelope.emit(format)
+}
+
+fn agent_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, substrate::FabricError> {
+    use substrate::{codes, FabricError};
+    let usage = |message: String| FabricError::new(codes::USAGE, message).next("monolith help");
+    for argument in arguments {
+        if argument.starts_with("--") && !AGENT_FLAGS.contains(&argument.as_str()) {
+            return Err(usage(format!("unknown option '{argument}' for 'agent {verb}'")));
+        }
+    }
+    for flag in AGENT_FLAGS {
+        option_value(arguments, flag).map_err(usage)?;
+    }
+    let positionals = positional_arguments(arguments);
+    let expected = match verb {
+        "list" => 0,
+        "validate" | "plan" | "apply" | "status" | "logs" | "destroy" => 1,
+        "" => return Err(usage("missing agent command".to_owned())),
+        other => return Err(usage(format!("unknown agent command '{other}'"))),
+    };
+    if positionals.len() != expected {
+        return Err(usage(format!(
+            "'agent {verb}' takes {expected} positional argument(s), got {}",
+            positionals.len()
+        )));
+    }
+    if verb != "logs" && option_value(arguments, "--stream").ok().flatten().is_some() {
+        return Err(usage(format!("--stream applies only to 'agent logs', not 'agent {verb}'")));
+    }
+    let loaded = target::load_catalog_from_cli(arguments)
+        .map_err(|message| FabricError::new(codes::TARGET_UNKNOWN, message))?;
+    let state_root = option_value(arguments, "--state-root")
+        .map_err(usage)?
+        .map(PathBuf::from)
+        .unwrap_or_else(fabric::Fabric::default_state_root);
+    let fabric = fabric::Fabric::new(state_root, loaded.catalog);
+    let argument = positionals.first().copied().unwrap_or_default();
+    let started = Instant::now();
+    Ok(match verb {
+        "validate" => {
+            let result = fabric.validate(Path::new(argument))?;
+            output::Envelope::success(
+                verb,
+                false,
+                &result,
+                vec![format!("monolith agent plan {argument}")],
+                None,
+            )
+        }
+        "plan" => {
+            let result = fabric.plan(Path::new(argument))?;
+            let next = if result.action == "none" {
+                vec![format!("monolith agent status {}", result.name)]
+            } else {
+                vec![format!("monolith agent apply {argument}")]
+            };
+            let key = Some(result.idempotency_key.clone());
+            output::Envelope::success(verb, false, &result, next, key)
+        }
+        "apply" => {
+            let outcome = fabric.apply(Path::new(argument), started)?;
+            let key = Some(outcome.result.idempotency_key.clone());
+            let next = vec![format!("monolith agent status {}", outcome.result.name)];
+            output::Envelope::success(verb, outcome.changed, &outcome.result, next, key)
+        }
+        "status" => {
+            let result = fabric.status(argument)?;
+            let mut next = Vec::new();
+            if !result.remains.is_empty() {
+                next.push(format!(
+                    "{} resource(s) remain from an interrupted run; 'monolith agent apply <spec>' converges or 'monolith agent destroy {}' clears them",
+                    result.remains.len(),
+                    result.name
+                ));
+            }
+            if result.status == "degraded" {
+                next.push(format!("monolith agent logs {}", result.name));
+            }
+            output::Envelope::success(verb, false, &result, next, None)
+        }
+        "logs" => {
+            let stream = option_value(arguments, "--stream")
+                .map_err(usage)?
+                .unwrap_or_else(|| "agent".to_owned());
+            let result = fabric.logs(argument, &stream)?;
+            output::Envelope::success(verb, false, &result, Vec::new(), None)
+        }
+        "destroy" => {
+            let outcome = fabric.destroy(argument)?;
+            output::Envelope::success(verb, outcome.changed, &outcome.result, Vec::new(), None)
+        }
+        "list" => {
+            let result = fabric.list()?;
+            output::Envelope::success(verb, false, &result, Vec::new(), None)
+        }
+        _ => unreachable!(),
+    })
+}
+
+const POOL_FLAGS: &[&str] = &["--output", "--target", "--tenant", "--targets-config"];
+
+/// `monolith pool <status|fill|drain>`: the per-tenant warm pool of a proxmox
+/// target (U6). Prints one envelope, like `monolith agent`.
+fn command_pool(arguments: &[String]) -> i32 {
+    let verb = arguments.first().cloned().unwrap_or_default();
+    let rest = arguments.get(1..).unwrap_or_default();
+    let command = format!("pool {verb}");
+    let json = rest.windows(2).any(|w| w[0] == "--output" && w[1] == "json");
+    let format = if json { output::Format::Json } else { output::Format::Text };
+    let envelope = match pool_envelope(&verb, rest) {
+        Ok(envelope) => envelope,
+        Err(error) => output::Envelope::failure(&command, error),
+    };
+    envelope.emit(format)
+}
+
+fn pool_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, substrate::FabricError> {
+    use substrate::{codes, FabricError};
+    let usage = |message: String| FabricError::new(codes::USAGE, message).next("monolith help");
+    for argument in arguments {
+        if argument.starts_with("--") && !POOL_FLAGS.contains(&argument.as_str()) {
+            return Err(usage(format!("unknown option '{argument}' for 'pool {verb}'")));
+        }
+    }
+    if !positional_arguments(arguments).is_empty() {
+        return Err(usage(format!("'pool {verb}' takes no positional arguments")));
+    }
+    let target_name = option_value(arguments, "--target")
+        .map_err(usage)?
+        .ok_or_else(|| usage("--target <name> is required".to_owned()))?;
+    let tenant = option_value(arguments, "--tenant").map_err(usage)?;
+    let loaded = target::load_catalog_from_cli(arguments)
+        .map_err(|message| FabricError::new(codes::TARGET_UNKNOWN, message))?;
+    let resolved = loaded
+        .catalog
+        .resolve(Some(&target_name))
+        .map_err(|message| FabricError::new(codes::TARGET_UNKNOWN, message))?;
+    if resolved.kind != target::DeploymentTarget::Proxmox {
+        return Err(usage(format!("target '{target_name}' is not a proxmox target")));
+    }
+    let driver = monolith::proxmox::ProxmoxDriver::from_target(&resolved)?;
+    let command = format!("pool {verb}");
+    Ok(match verb {
+        "status" => output::Envelope::success(&command, false, driver.pool_state()?, Vec::new(), None),
+        "fill" => {
+            let tenant = tenant.ok_or_else(|| usage("'pool fill' needs --tenant <id>".to_owned()))?;
+            let report = driver.fill(&tenant)?;
+            let changed = !(report.created.is_empty() && report.retired.is_empty() && report.cleared.is_empty());
+            output::Envelope::success(&command, changed, report, Vec::new(), None)
+        }
+        "drain" => {
+            let destroyed = driver.drain(tenant.as_deref())?;
+            let changed = !destroyed.is_empty();
+            output::Envelope::success(&command, changed, serde_json::json!({ "destroyed": destroyed }), Vec::new(), None)
+        }
+        "" => return Err(usage("missing pool command (status, fill or drain)".to_owned())),
+        other => return Err(usage(format!("unknown pool command '{other}'"))),
+    })
+}
+
+fn command_targets(arguments: &[String]) -> Result<(), String> {
+    let loaded = target::load_catalog_from_cli(arguments)?;
+    println!("default target: {}", loaded.catalog.default_target);
+    if let Some(path) = loaded.config_path {
+        println!("targets config: {}", path.display());
+    } else {
+        println!("targets config: none");
+    }
+    for target in &loaded.catalog.targets {
+        println!("target {} {}", target.name, target.detail_line());
+    }
+    Ok(())
+}
+
+fn command_deploy(arguments: &[String]) -> Result<(), String> {
+    let loaded = target::load_catalog_from_cli(arguments)?;
+    let requested = target::requested_target_name(arguments)?;
+    let resolved = loaded.catalog.resolve(requested.as_deref())?;
+    // Every deploy goes through the substrate driver lookup, so an unusable
+    // target fails with the driver's own reason (for example a missing token).
+    let driver = substrate::driver_for(&resolved).map_err(|error| {
+        let mut text = format!("target '{}' cannot run 'deploy': {}", resolved.name, error);
+        for hint in &error.next {
+            text.push_str(&format!("\nnext: {hint}"));
+        }
+        text
+    })?;
+    if driver.kind() != "local" {
+        return Err(format!(
+            "target '{}' uses the {} driver, which runs spec-declared agents, not factory manifests; \
+             set placement.substrate = \"{}\" in an agent spec and run 'monolith agent apply <spec>'",
+            resolved.name,
+            driver.kind(),
+            resolved.name
+        ));
+    }
+    let manifest_path = required_positional(arguments, 0, "manifest")?;
+    let manifest = load_manifest(manifest_path)?;
+    let state_dir = manifest_state_dir(
+        manifest_path,
+        &manifest,
+        option_value(arguments, "--state-dir")?,
+    );
+    println!(
+        "deploy target={} kind={} runtime={} artifacts={}",
+        resolved.name, resolved.kind, resolved.runtime, resolved.artifact_lifecycle
+    );
+    let state = runtime::apply(&state_dir, &manifest)
+        .map_err(|error| format!("could not apply factory: {error}"))?;
+    println!("applied factory '{}'", state.factory_name);
+    print_pod_summary(&state);
+    Ok(())
+}
+
 fn command_validate(arguments: &[String]) -> Result<(), String> {
+    resolve_target(arguments, "validate")?;
     let manifest_path = required_positional(arguments, 0, "manifest")?;
     let manifest = load_manifest(manifest_path)?;
     println!(
@@ -105,6 +376,7 @@ fn command_validate(arguments: &[String]) -> Result<(), String> {
 }
 
 fn command_plan(arguments: &[String]) -> Result<(), String> {
+    resolve_target(arguments, "plan")?;
     let manifest_path = required_positional(arguments, 0, "manifest")?;
     let manifest = load_manifest(manifest_path)?;
     let state_dir = manifest_state_dir(
@@ -151,6 +423,7 @@ fn command_plan(arguments: &[String]) -> Result<(), String> {
 }
 
 fn command_apply(arguments: &[String]) -> Result<(), String> {
+    resolve_target(arguments, "apply")?;
     let manifest_path = required_positional(arguments, 0, "manifest")?;
     let manifest = load_manifest(manifest_path)?;
     let state_dir = manifest_state_dir(
@@ -162,25 +435,12 @@ fn command_apply(arguments: &[String]) -> Result<(), String> {
         .map_err(|error| format!("could not apply factory: {error}"))?;
 
     println!("applied factory '{}'", state.factory_name);
-    for pod in state.pods.values() {
-        println!(
-            "pod {} engine={} status={} pid={} session={} delivery={} terminal={} restarts={} restart_required={} failure={}",
-            pod.name,
-            pod.engine,
-            pod.status,
-            display_pid(pod.pid),
-            pod.session.as_deref().unwrap_or("-"),
-            pod.active_delivery.as_deref().unwrap_or("-"),
-            pod.terminal_result.as_deref().unwrap_or("-"),
-            pod.restart.count,
-            pod.restart.restart_required,
-            pod.last_failure.as_deref().unwrap_or("-")
-        );
-    }
+    print_pod_summary(&state);
     Ok(())
 }
 
 fn command_status(arguments: &[String]) -> Result<(), String> {
+    resolve_target(arguments, "status")?;
     let state_dir = required_positional(arguments, 0, "state directory")?;
     let state_dir = Path::new(state_dir);
     let mut current = state::read_state(state_dir)
@@ -212,6 +472,7 @@ fn command_status(arguments: &[String]) -> Result<(), String> {
 }
 
 fn command_send(arguments: &[String]) -> Result<(), String> {
+    resolve_target(arguments, "send")?;
     let state_dir = required_positional(arguments, 0, "state directory")?;
     let state_dir = Path::new(state_dir);
     let from = required_option(arguments, "--from")?;
@@ -247,6 +508,7 @@ fn command_send(arguments: &[String]) -> Result<(), String> {
 }
 
 fn command_logs(arguments: &[String]) -> Result<(), String> {
+    resolve_target(arguments, "logs")?;
     let state_dir = required_positional(arguments, 0, "state directory")?;
     let pod = required_positional(arguments, 1, "pod")?;
     let output = runtime::logs(Path::new(state_dir), pod)
@@ -256,6 +518,7 @@ fn command_logs(arguments: &[String]) -> Result<(), String> {
 }
 
 fn command_destroy(arguments: &[String]) -> Result<(), String> {
+    resolve_target(arguments, "destroy")?;
     let state_dir = required_positional(arguments, 0, "state directory")?;
     let state_dir = Path::new(state_dir);
     let mut current = state::read_state(state_dir)
@@ -276,6 +539,7 @@ fn command_destroy(arguments: &[String]) -> Result<(), String> {
 }
 
 fn command_demo(arguments: &[String]) -> Result<(), String> {
+    resolve_target(arguments, "demo")?;
     let manifest_path = required_positional(arguments, 0, "manifest")?;
     let manifest = load_manifest(manifest_path)?;
     let state_dir = manifest_state_dir(
@@ -973,10 +1237,9 @@ fn required_positional<'a>(
     index: usize,
     label: &str,
 ) -> Result<&'a str, String> {
-    arguments
+    positional_arguments(arguments)
         .get(index)
-        .map(String::as_str)
-        .filter(|value| !value.starts_with("--"))
+        .copied()
         .ok_or_else(|| format!("missing {label}. Run 'monolith help'."))
 }
 
@@ -985,9 +1248,16 @@ fn required_option(arguments: &[String], flag: &str) -> Result<String, String> {
 }
 
 fn option_value(arguments: &[String], flag: &str) -> Result<Option<String>, String> {
-    let Some(index) = arguments.iter().position(|argument| argument == flag) else {
+    let mut matches = arguments
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.as_str() == flag);
+    let Some((index, _)) = matches.next() else {
         return Ok(None);
     };
+    if matches.next().is_some() {
+        return Err(format!("duplicate {flag}"));
+    }
     arguments
         .get(index + 1)
         .cloned()
@@ -995,7 +1265,101 @@ fn option_value(arguments: &[String], flag: &str) -> Result<Option<String>, Stri
         .ok_or_else(|| format!("missing value for {flag}"))
 }
 
+fn positional_arguments(arguments: &[String]) -> Vec<&str> {
+    let mut values = Vec::new();
+    let mut skip_next = false;
+    for argument in arguments {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if argument.starts_with("--") {
+            skip_next = true;
+            continue;
+        }
+        values.push(argument.as_str());
+    }
+    values
+}
+
+fn resolve_target(arguments: &[String], command: &str) -> Result<target::ResolvedTarget, String> {
+    let loaded = target::load_catalog_from_cli(arguments)?;
+    let requested = target::requested_target_name(arguments)?;
+    let selection = loaded.catalog.resolve(requested.as_deref())?;
+    selection.ensure_supported(command)?;
+    if selection.kind != target::DeploymentTarget::Local {
+        return Err(format!(
+            "target '{}' is a {} target; '{command}' manages local factory processes only. \
+             Spec-declared agents run on it through 'monolith agent apply <spec>'",
+            selection.name, selection.kind
+        ));
+    }
+    Ok(selection)
+}
+
+fn print_pod_summary(state: &state::FactoryState) {
+    for pod in state.pods.values() {
+        println!(
+            "pod {} engine={} status={} pid={} session={} delivery={} terminal={} restarts={} restart_required={} failure={}",
+            pod.name,
+            pod.engine,
+            pod.status,
+            display_pid(pod.pid),
+            pod.session.as_deref().unwrap_or("-"),
+            pod.active_delivery.as_deref().unwrap_or("-"),
+            pod.terminal_result.as_deref().unwrap_or("-"),
+            pod.restart.count,
+            pod.restart.restart_required,
+            pod.last_failure.as_deref().unwrap_or("-")
+        );
+    }
+}
+
 fn display_pid(pid: Option<u32>) -> String {
     pid.map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{option_value, positional_arguments, required_positional};
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn required_positional_ignores_long_options_anywhere() {
+        let arguments = args(&[
+            "--target",
+            "local",
+            "examples/demo.toml",
+            "--state-dir",
+            "/tmp/demo",
+        ]);
+        assert_eq!(
+            required_positional(&arguments, 0, "manifest").unwrap(),
+            "examples/demo.toml"
+        );
+    }
+
+    #[test]
+    fn positional_arguments_skip_option_values() {
+        let arguments = args(&[
+            "state-dir",
+            "--from",
+            "planner",
+            "--to",
+            "worker",
+            "--payload",
+            "hello",
+        ]);
+        assert_eq!(positional_arguments(&arguments), vec!["state-dir"]);
+    }
+
+    #[test]
+    fn option_value_rejects_duplicate_flags() {
+        let arguments = args(&["--target", "local", "--target", "ssh"]);
+        assert_eq!(option_value(&arguments, "--target").unwrap_err(), "duplicate --target");
+    }
 }

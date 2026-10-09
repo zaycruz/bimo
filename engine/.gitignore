@@ -1,3 +1,6 @@
 /target
 .omx/
 graphify-out/
+# Machine-local Monolith state: agents, warm-pool state, live target, test reports.
+/.monolith/
+__pycache__/

@@ -12,17 +12,28 @@ memory.
 ## Commands
 
 ```text
+monolith targets [--targets-config <file>]
+monolith deploy <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
 monolith validate <manifest>
-monolith plan <manifest> [--state-dir <dir>]
-monolith apply <manifest> [--state-dir <dir>]
-monolith status <state-dir>
-monolith send <state-dir> --from <pod> --to <pod> --kind <kind> --payload <text>
-monolith logs <state-dir> <pod>
-monolith destroy <state-dir>
-monolith demo <manifest> [--state-dir <dir>]
+monolith plan <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+monolith apply <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+monolith status <state-dir> [--target <name>] [--targets-config <file>]
+monolith send <state-dir> --from <pod> --to <pod> --kind <kind> --payload <text> [--target <name>] [--targets-config <file>]
+monolith logs <state-dir> <pod> [--target <name>] [--targets-config <file>]
+monolith destroy <state-dir> [--target <name>] [--targets-config <file>]
+monolith demo <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
 ```
 
 `pod-process` is an internal runtime subcommand used by `apply` and `demo`.
+
+Current implementation:
+
+- `local` works today and preserves the existing single-host process model.
+- `proxmox` has a driver (U5) and a per-tenant warm pool (U6) that create,
+  bind and destroy LXC guests through the Proxmox API; no runtime runs inside a
+  guest yet (U8). See `templates/README.md`. `ssh` is reserved, with no driver.
+- Named targets can be declared in `.monolith/targets.toml`; only targets of
+  kind `local` are executable in this release.
 
 ## Process hierarchy
 
@@ -37,6 +48,42 @@ monolith apply
 The factory owns the pod process. The pod process owns the worker adapter.
 The adapter owns the model loop. No worker process receives a direct
 state-directory capability.
+
+## Local-first target seam
+
+Monolith now keeps deployment target selection separate from workflow/runtime
+execution.
+
+- The manifest still describes the workflow and worker runtime only.
+- The worker protocol still defines local pod-to-worker execution only.
+- The CLI target decides where that controller/runtime should execute.
+
+This is intentionally not a general plugin system yet. There is one working
+target implementation today (`local`), so the code uses a built-in target
+module instead of an early plugin registry. See `docs/local-first-targets.md`
+for the target model and the planned `ssh` / `proxmox` expansion path.
+
+Example targets file:
+
+```toml
+schema_version = 1
+default_target = "local"
+
+[[targets]]
+kind = "proxmox"
+name = "homelab-lxc"
+api_url = "https://pve-node-b:8006/api2/json"
+token_env = "MONOLITH_PROXMOX_TOKEN"
+cluster = "homelab"
+node = "pve-node-b"
+guest_type = "lxc"
+guest_id = 203
+artifact_lifecycle = "persistent"
+```
+
+The `targets` command reports whether the target is autodetected or
+configured, whether the target's secret reference env var is present, and
+whether the current build can actually execute that target.
 
 ## Worker protocol boundary
 
@@ -137,11 +184,25 @@ implementation that completes the same contract without Rust changes.
   prevent PID-reuse confusion.
 - State directories reject symlinks and use `0o700`/`0o600` permissions.
 
+## Spec-declared agents
+
+`monolith agent validate|plan|apply|status|logs|destroy|list` deploys an agent
+(Hermes or eve) from a TOML spec onto a named target. Each agent runs behind
+its own credential proxy and holds only placeholders for its secrets.
+
+- Spec format: `docs/agent-spec.md`
+- Commands, JSON envelopes and state: `docs/agent-cli.md`
+- Credential boundary and its local limits: `docs/credential-boundary.md`
+
+Today only the `local` target runs agents. The Proxmox driver, guest template
+and pool are not built yet.
+
 ## Development
 
 ```bash
 cargo build
 cargo test
 sh tests/acceptance_worker.sh   # golden path with the deterministic fixture
+sh tests/acceptance_fabric.sh   # agent fabric E2E; live Proxmox only with MONOLITH_PROXMOX_LIVE=1
 cd workers/pi-core && npm test
 ```
