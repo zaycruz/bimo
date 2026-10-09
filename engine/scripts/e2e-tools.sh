@@ -3,7 +3,7 @@
 # target/e2e-tools (gitignored). Idempotent: a tool already installed at the
 # pinned version is left alone. Prints KEY=path lines for the test harness.
 #
-#   hermes-agent 0.15.2 (PyPI, via uv)    -> HERMES_BIN
+#   hermes-agent 0.15.2 + aiohttp (PyPI, via uv) -> HERMES_BIN
 #   iron-proxy   0.52.0 (GitHub release)   -> IRON_PROXY_BIN, sha256-pinned
 #   iron-proxy   0.52.0 linux_amd64        -> IRON_PROXY_LINUX_BIN, sha256-pinned:
 #                the build the Proxmox driver uploads into a tenant's proxy
@@ -15,12 +15,16 @@ TOOLS="$ROOT/target/e2e-tools"
 mkdir -p "$TOOLS"
 
 HERMES_VERSION=0.15.2
+# The gateway's API server (the task API the fabric probes) needs aiohttp,
+# which hermes-agent only pulls in through its messaging extras. Same pin as
+# scripts/build-template.sh.
+HERMES_AIOHTTP_VERSION=3.13.3
 HERMES_DIR="$TOOLS/hermes-$HERMES_VERSION"
-if [ ! -x "$HERMES_DIR/bin/hermes" ]; then
+if [ ! -x "$HERMES_DIR/bin/hermes" ] || ! "$HERMES_DIR/bin/python" -c "import aiohttp" >/dev/null 2>&1; then
   command -v uv >/dev/null 2>&1 || { echo "e2e-tools: uv is required to install hermes-agent (brew install uv)" >&2; exit 1; }
   rm -rf "$HERMES_DIR"
   uv venv --quiet --python 3.12 "$HERMES_DIR" >&2
-  VIRTUAL_ENV="$HERMES_DIR" uv pip install --quiet "hermes-agent==$HERMES_VERSION" >&2
+  VIRTUAL_ENV="$HERMES_DIR" uv pip install --quiet "hermes-agent==$HERMES_VERSION" "aiohttp==$HERMES_AIOHTTP_VERSION" >&2
 fi
 echo "HERMES_BIN=$HERMES_DIR/bin/hermes"
 
