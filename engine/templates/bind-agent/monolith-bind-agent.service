@@ -1,0 +1,24 @@
+[Unit]
+Description=Monolith bind agent (claim-time binding and runtime delivery, KTD10)
+After=network.target
+
+[Service]
+Type=simple
+Environment=MONOLITH_BIND_PORT=7070
+ExecStart=/usr/bin/python3 /usr/local/lib/monolith/monolith-bind-agent.py
+Restart=always
+RestartSec=1
+# Only the bind agent stops the runtime it supervises; a restart of this
+# unit kills the runtime with it, and the agent relaunches it from
+# /run/monolith/runtime.json.
+KillMode=control-group
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/run/monolith /srv/monolith
+RuntimeDirectory=monolith
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

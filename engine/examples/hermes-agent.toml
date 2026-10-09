@@ -1,0 +1,21 @@
+# A Hermes agent declared with the runtime-agnostic agent spec.
+# See docs/agent-spec.md.
+schema_version = 1
+name = "demo-hermes"
+tenant_id = "demo"
+runtime = "hermes"
+
+[source]
+kind = "config"
+path = "hermes-agent"
+
+[[secrets]]
+env = "OPENROUTER_API_KEY"
+handle = "demo/openrouter"
+hosts = ["openrouter.ai"]
+
+[egress]
+allow = ["openrouter.ai"]
+
+[placement]
+substrate = "local"

@@ -1,0 +1,1 @@
+{"protocol":"agent-worker/v1","direction":"worker_to_control","type":"hello","factory_gen":1,"pod":"worker","session":"stale","seq":2,"payload":{}}
