@@ -13,7 +13,7 @@ runtime = "eve"
 [source]
 kind = "git"
 repo = "../target/eve-agent.git"
-rev = "47d6aacd68bb93366fd64ba45d52b19f6ed14c9f"
+rev = "05b6fa5d3791a97e489dbc5c066648207bca1263"
 
 [[secrets]]
 env = "OPENROUTER_API_KEY"
