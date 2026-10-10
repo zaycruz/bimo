@@ -106,21 +106,21 @@ with an OpenRouter API key stored in a vault.
 
 ### 1. Install
 
-Bimo is not published to the npm registry. Download the v0.6.0 release
+Bimo is not published to the npm registry. Download the v0.7.0 release
 tarball and checksum, verify the exact file, then install it globally:
 
 ```bash
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/bimo/releases/download/v0.6.0/bimo-workflow-0.6.0.tgz
+  https://github.com/zaycruz/bimo/releases/download/v0.7.0/bimo-workflow-0.7.0.tgz
 curl --fail --location --remote-name \
-  https://github.com/zaycruz/bimo/releases/download/v0.6.0/bimo-workflow-0.6.0.tgz.sha256
+  https://github.com/zaycruz/bimo/releases/download/v0.7.0/bimo-workflow-0.7.0.tgz.sha256
 
 # macOS
-shasum --algorithm 256 --check bimo-workflow-0.6.0.tgz.sha256
+shasum --algorithm 256 --check bimo-workflow-0.7.0.tgz.sha256
 # Linux
-sha256sum --check bimo-workflow-0.6.0.tgz.sha256
+sha256sum --check bimo-workflow-0.7.0.tgz.sha256
 
-npm install --global ./bimo-workflow-0.6.0.tgz
+npm install --global ./bimo-workflow-0.7.0.tgz
 ```
 
 The tarball is platform-independent Node.js, so the same download serves
@@ -276,8 +276,8 @@ two entries today:
 
 | Runtime | Agent CLI | Default image tag | Selection |
 | --- | --- | --- | --- |
-| `opencode` | `opencode run` (pinned in the image) | `bimo-workflow:0.6.0` | Default, or `--agent-runtime opencode` |
-| `pi` | `pi -p` (pinned `@earendil-works/pi-coding-agent` in the image) | `bimo-workflow:0.6.0-pi` | `--agent-runtime pi` |
+| `opencode` | `opencode run` (pinned in the image) | `bimo-workflow:0.7.0` | Default, or `--agent-runtime opencode` |
+| `pi` | `pi -p` (pinned `@earendil-works/pi-coding-agent` in the image) | `bimo-workflow:0.7.0-pi` | `--agent-runtime pi` |
 
 `bimo deploy` and `bimo organize` accept `--agent-runtime NAME`. The name is
 validated against the registry, baked into the image with
@@ -286,7 +286,7 @@ and passed to every agent container as `BIMO_AGENT_RUNTIME`. Bounded output,
 the role timeout, the kill-tree, the gateway-only network, and the
 `/handoff/result.json` contract are enforced by the dispatcher and are
 identical for every runtime. Without `--image`, the default tag is
-`bimo-workflow:0.6.0` for `opencode` and `bimo-workflow:0.6.0-<name>` for any
+`bimo-workflow:0.7.0` for `opencode` and `bimo-workflow:0.7.0-<name>` for any
 other entry. With `pi`, `--model` keeps the usual `openrouter/<id>` form —
 the adapter maps it to the image's `bimo-gateway` provider, and pi accepts
 ids beyond the declared list (the declaration pins context-window metadata
@@ -731,8 +731,8 @@ and `--json`; sequential deploys also accept `--port`. `logs` accepts `--run`,
 `--image`, `--follow`, and `--json`.
 
 Defaults are port `8080`, model `openrouter/deepseek/deepseek-v4-flash`, agent
-runtime `opencode`, and image tag `bimo-workflow:0.6.0` (a non-default
-`--agent-runtime` derives `bimo-workflow:0.6.0-<name>` instead).
+runtime `opencode`, and image tag `bimo-workflow:0.7.0` (a non-default
+`--agent-runtime` derives `bimo-workflow:0.7.0-<name>` instead).
 `--account` selects a 1Password account;
 `--json` requests machine-readable output.
 
@@ -772,7 +772,7 @@ records against target-host root.
 Each successful verification creates a separate artifact snapshot that Bimo
 treats as immutable: it is created once, permission-locked, and mounted by the
 retained app read-only. Bimo performs automatic rollback only when replacing
-the current app fails; v0.6.0 has no user-facing rollback command or remote
+the current app fails; v0.7.0 has no user-facing rollback command or remote
 artifact backup.
 
 The fixed pod uses the same deployment root but keeps private run records under
@@ -793,7 +793,7 @@ and private temporary roots. The pod does not resume a partial Planner, writer,
 or checker attempt. Confirm no controller or publisher is active, preserve the
 run records for diagnosis, then recover only that dedicated deployment root
 before starting a new run. An interrupted durable publication can be resumed
-with `bimo publish`; v0.6.0 has no general user-facing resume command for
+with `bimo publish`; v0.7.0 has no general user-facing resume command for
 runs.
 
 ## Security boundary
@@ -869,7 +869,7 @@ Never put a credential in a task, prompt, workflow file, repository file,
 - History and artifacts remain on one target host. There is no database, remote
   backup, or user-invoked rollback.
 - Organizer audit runs are retained on the target and are not automatically
-  pruned in v0.6.0.
+  pruned in v0.7.0.
 - Pod publication stops at an isolated, draft pull request. It does not approve,
   mark ready, merge, deploy, or delete the branch.
 
