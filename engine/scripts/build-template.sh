@@ -1,10 +1,10 @@
 #!/bin/sh
-# Build the Monolith golden LXC template (U6). Run ON THE PROXMOX NODE as
-# root, by an operator. Monolith never runs this and never SSHes to a node;
+# Build the Bimo engine golden LXC template (U6). Run ON THE PROXMOX NODE as
+# root, by an operator. The engine never runs this and never SSHes to a node;
 # the driver only clones the finished template through the API.
 #
-#   scp -r scripts/build-template.sh templates/bind-agent root@pve-node-a:/root/monolith-template/
-#   ssh root@pve-node-a 'sh /root/monolith-template/build-template.sh'
+#   scp -r scripts/build-template.sh templates/bind-agent root@<node>:/root/monolith-template/
+#   ssh root@<node> 'sh /root/monolith-template/build-template.sh'
 #
 # What it does, in order:
 #   1. creates CT $VMID from $OSTEMPLATE (or reuses an existing, non-template
@@ -23,7 +23,9 @@
 #      clone gets its own, cleans apt caches;
 #   5. shuts it down cleanly and converts it with 'pct template'.
 #
-# Settings (environment, with defaults for the pve-node-a test pool):
+# Settings (environment). PARK_IP and GATEWAY have no default: pass the
+# parking address and gateway of your template network, for example
+# PARK_IP=192.0.2.239/25 GATEWAY=192.0.2.129.
 set -eu
 VMID=${VMID:-9000}
 OSTEMPLATE=${OSTEMPLATE:-local:vztmpl/debian-13-standard_13.6-1_amd64.tar.zst}
@@ -31,8 +33,8 @@ STORAGE=${STORAGE:-local-lvm}
 DISK_GB=${DISK_GB:-6}
 POOL=${POOL:-pool-monolith-test}
 BRIDGE=${BRIDGE:-vmbr0}
-PARK_IP=${PARK_IP:-192.0.2.239/25}
-GATEWAY=${GATEWAY:-192.0.2.129}
+PARK_IP=${PARK_IP:?set PARK_IP to the template parking address, for example 192.0.2.239/25}
+GATEWAY=${GATEWAY:?set GATEWAY to the template network gateway, for example 192.0.2.129}
 MEMORY_MB=${MEMORY_MB:-256}
 BIND_PORT=${BIND_PORT:-7070}
 # Build-time memory: pip and the Node unpack need more than a guest's 256 MB.

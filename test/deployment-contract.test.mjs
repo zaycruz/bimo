@@ -60,7 +60,7 @@ test("Hermes Aurum service and local inference remain explicitly unsupported for
 
 test("the closed target and job template choices retain exact canonical data", () => {
   for (const target of [{ kind: "local" }, { kind: "ssh", host: "deploy@server.example" },
-    { kind: "proxmox-lxc", proxmox: "root@pve-05", vmid: "113" }]) {
+    { kind: "proxmox-lxc", proxmox: "root@pve-node-c", vmid: "113" }]) {
     for (const runtime of ["pi", "opencode"]) {
       for (const template of ["react-solo", "react-app", "parallel-engineering-pod"]) {
         const value = validateDeploymentManifest(manifest({ target, runtime, workload: { template } }));

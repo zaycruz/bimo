@@ -66,10 +66,10 @@ test("legacy and explicit SSH targets resolve to the same closed built-in adapte
 });
 
 test("legacy and explicit Proxmox LXC targets retain the pct execution boundary", () => {
-  const legacy = resolveDeploymentTarget({ proxmox: "root@pve-05", vmid: "212" });
+  const legacy = resolveDeploymentTarget({ proxmox: "root@pve-node-c", vmid: "212" });
   const explicit = resolveDeploymentTarget({
     target: "proxmox-lxc",
-    proxmox: "root@pve-05",
+    proxmox: "root@pve-node-c",
     vmid: "212",
   });
 
@@ -79,7 +79,7 @@ test("legacy and explicit Proxmox LXC targets retain the pct execution boundary"
     args: [
       "-o", "BatchMode=yes",
       "-o", "StrictHostKeyChecking=yes",
-      "root@pve-05",
+      "root@pve-node-c",
       "pct", "exec", "212", "--",
       "docker", "info",
     ],
@@ -92,8 +92,8 @@ test("target selection rejects ambiguous or incomplete adapter configuration", (
     [{ target: "local", host: "builder.example" }, /--host is not valid with --target local/],
     [{ target: "ssh" }, /--host is required with --target ssh/],
     [{ target: "ssh", host: "builder.example", vmid: "212" }, /--vmid is only valid/],
-    [{ target: "proxmox-lxc", proxmox: "pve-05" }, /--vmid must be numeric/],
-    [{ host: "builder.example", proxmox: "pve-05", vmid: "212" }, /use only one target/],
+    [{ target: "proxmox-lxc", proxmox: "pve-node-c" }, /--vmid must be numeric/],
+    [{ host: "builder.example", proxmox: "pve-node-c", vmid: "212" }, /use only one target/],
   ]) {
     assert.throws(() => resolveDeploymentTarget(options), pattern);
   }
@@ -139,7 +139,7 @@ test("deploymentsRootForTarget returns the shared deployments root per adapter",
     "/var/lib/bimo/deployments",
   );
   assert.equal(
-    deploymentsRootForTarget(resolveDeploymentTarget({ proxmox: "root@pve-05", vmid: "212" })),
+    deploymentsRootForTarget(resolveDeploymentTarget({ proxmox: "root@pve-node-c", vmid: "212" })),
     "/var/lib/bimo/deployments",
   );
   assert.throws(() => deploymentsRootForTarget({ kind: "other" }), /invalid deployment target root/);
