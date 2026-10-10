@@ -642,7 +642,7 @@ test("deploy builds with the AGENT_RUNTIME build-arg and defaults the opencode i
   const docker = entries.filter(entry => entry.tool === "docker").map(entry => entry.args);
   const build = docker.find(command => command[0] === "build");
   assert.ok(build);
-  assert.equal(build[build.indexOf("--tag") + 1], "bimo-workflow:0.6.0");
+  assert.equal(build[build.indexOf("--tag") + 1], "bimo-workflow:0.7.0");
   assert.equal(build[build.indexOf("--build-arg") + 1], "AGENT_RUNTIME=opencode");
   const envelope = entries.find(entry => entry.tool === "local-controller-envelope");
   assert.ok(envelope.fields.includes("agentRuntime"));
@@ -680,7 +680,7 @@ test("deploy and organize accept --agent-runtime pi and derive the pi image tag"
   const deployDocker = deployEntries.filter(entry => entry.tool === "docker").map(entry => entry.args);
   const build = deployDocker.find(command => command[0] === "build");
   assert.ok(build);
-  assert.equal(build[build.indexOf("--tag") + 1], "bimo-workflow:0.6.0-pi");
+  assert.equal(build[build.indexOf("--tag") + 1], "bimo-workflow:0.7.0-pi");
   assert.equal(build[build.indexOf("--build-arg") + 1], "AGENT_RUNTIME=pi");
   const deployEnvelope = deployEntries.find(entry => entry.tool === "local-controller-envelope");
   assert.ok(deployEnvelope.fields.includes("agentRuntime"));
@@ -700,7 +700,7 @@ test("deploy and organize accept --agent-runtime pi and derive the pi image tag"
   const organizeDocker = organizeEntries.filter(entry => entry.tool === "docker").map(entry => entry.args);
   const organizeBuild = organizeDocker.find(command => command[0] === "build");
   assert.ok(organizeBuild);
-  assert.equal(organizeBuild[organizeBuild.indexOf("--tag") + 1], "bimo-workflow:0.6.0-pi");
+  assert.equal(organizeBuild[organizeBuild.indexOf("--tag") + 1], "bimo-workflow:0.7.0-pi");
 });
 
 test("an explicit --agent-runtime fails closed when the built image lacks the runtime env", async t => {
