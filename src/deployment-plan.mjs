@@ -75,7 +75,9 @@ export function formatDeploymentPlan(plan) {
     `Valid deployment intent: ${plan.identity}`,
     `Lifecycle: ${plan.manifest.lifecycle}; runtime: ${plan.manifest.runtime}; target: ${plan.manifest.target.kind}`,
     `Source digest: ${plan.sourceDigest}`,
-    "Plan only. Execution is not supported through this command.",
+    plan.executionSupported
+      ? "Plan only. Execute it with bimo agent apply on this manifest."
+      : "Plan only. Execution is not supported through this command.",
     ...plan.limitations.map(value => `- ${value}`),
     "",
   ].join("\n");

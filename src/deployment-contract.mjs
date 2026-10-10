@@ -1,6 +1,8 @@
 import { resolveDeploymentTarget } from "./deployment-target.mjs";
 
 const ID = /^[a-z][a-z0-9-]{0,31}$/u;
+const ENGINE_TARGET = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+const ENGINE_HANDLE = /^[a-z0-9-]{1,63}\/[a-z0-9._-]{1,63}$/u;
 const SECRET_REF = /^op:\/\/[^/\u0000-\u001f\u007f]{1,255}\/[^/\u0000-\u001f\u007f]{1,255}\/[^/\u0000-\u001f\u007f]{1,255}$/u;
 const MANIFEST_FIELDS = [
   "schemaVersion", "clientId", "agentId", "lifecycle", "runtime", "target",
@@ -56,10 +58,32 @@ function validateTarget(target) {
     resolveDeploymentTarget({ target: kind, proxmox: target.proxmox, vmid: target.vmid }, { home: "/" });
     return Object.freeze({ kind, proxmox: target.proxmox, vmid: target.vmid });
   }
+  if (kind === "engine") {
+    // A named target of the Bimo engine (local, or a Proxmox target in its
+    // targets file). Planning does not read the targets file.
+    assertExactFields(target, ["kind", "name"], "target");
+    if (typeof target.name !== "string" || !ENGINE_TARGET.test(target.name)) fail("engine target name is invalid");
+    return Object.freeze({ kind, name: target.name });
+  }
   fail("target kind is unsupported");
 }
 
-function validateWorkload(lifecycle, runtime, workload) {
+function validateEngineConfigPath(value) {
+  if (typeof value !== "string" || value.length < 1 || value.length > 1_024
+      || /[\u0000-\u001f\u007f]/u.test(value) || value.startsWith("/") || value.includes("\\")) {
+    fail("engine workload config must be a relative directory path");
+  }
+  return value;
+}
+
+function validateWorkload(lifecycle, runtime, workload, target) {
+  if (target.kind === "engine") {
+    // The engine runs Hermes from a configuration directory (HERMES_HOME),
+    // relative to the manifest.
+    if (lifecycle !== "service" || runtime !== "hermes") fail("engine targets run Hermes services only");
+    assertExactFields(workload, ["config"], "workload");
+    return Object.freeze({ config: validateEngineConfigPath(workload.config) });
+  }
   if (lifecycle === "job" && ["opencode", "pi"].includes(runtime)) {
     assertExactFields(workload, ["template"], "workload");
     if (!TEMPLATES.includes(workload.template)) fail("job template is unsupported");
@@ -73,13 +97,19 @@ function validateWorkload(lifecycle, runtime, workload) {
   fail("runtime and lifecycle combination is unsupported");
 }
 
-function validateModel(model, secretRefs) {
+function validateModel(model, secretRefs, target) {
   assertExactFields(model, ["provider", "fallback"], "model");
   assertExactFields(secretRefs, ["model"], "secretRefs");
   if (!["openrouter", "local"].includes(model.provider) || model.fallback !== "disabled") {
     fail("model policy is unsupported");
   }
-  if (model.provider === "openrouter") {
+  if (target.kind === "engine") {
+    // The engine resolves a tenant-scoped handle in its target's secret source.
+    if (model.provider !== "openrouter") fail("engine targets support the openrouter model provider only");
+    if (typeof secretRefs.model !== "string" || !ENGINE_HANDLE.test(secretRefs.model)) {
+      fail("engine model secret must be a TENANT/NAME handle");
+    }
+  } else if (model.provider === "openrouter") {
     if (typeof secretRefs.model !== "string" || !SECRET_REF.test(secretRefs.model)) {
       fail("model secret must be a 1Password reference");
     }
@@ -111,8 +141,8 @@ export function validateDeploymentManifest(input) {
   const clientId = validateIdentity(input.clientId, "client ID");
   const agentId = validateIdentity(input.agentId, "agent ID");
   const target = validateTarget(input.target);
-  const workload = validateWorkload(input.lifecycle, input.runtime, input.workload);
-  const model = validateModel(input.model, input.secretRefs);
+  const workload = validateWorkload(input.lifecycle, input.runtime, input.workload, target);
+  const model = validateModel(input.model, input.secretRefs, target);
   const limits = validateLimits(input.limits);
   return Object.freeze({
     schemaVersion: 1, clientId, agentId, lifecycle: input.lifecycle, runtime: input.runtime,
@@ -122,6 +152,21 @@ export function validateDeploymentManifest(input) {
 
 export function planDeployment(input) {
   const manifest = validateDeploymentManifest(input);
+  if (manifest.target.kind === "engine") {
+    return Object.freeze({
+      schemaVersion: 1,
+      planOnly: true,
+      executionSupported: true,
+      identity: `${manifest.clientId}/${manifest.agentId}`,
+      manifest,
+      limitations: Object.freeze([
+        "Plan only: no deployment or durable identity has been created.",
+        "Execute with bimo agent apply on this manifest; the Bimo engine places the agent on the named target.",
+        "The engine sizes guests from the target configuration; the manifest's limits are not applied.",
+        "The secret handle, the target and the configuration directory are checked by bimo agent validate, not by this command.",
+      ]),
+    });
+  }
   const limitations = [
     "Plan only: no deployment or durable identity has been created.",
     "Resource limits, credential bindings and client isolation have not been applied or enforced.",

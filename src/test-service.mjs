@@ -42,6 +42,7 @@ export function parseServiceStatus(stdout, unit) {
 }
 
 function serviceTarget(target) {
+  if (target.kind === "engine") fail("engine targets are run with bimo agent, not bimo service");
   if (target.kind === "local") return Object.freeze({ kind: "local" });
   return resolveDeploymentTarget(Object.freeze({ ...target, target: target.kind }));
 }

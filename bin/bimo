@@ -1,11 +1,29 @@
 #!/usr/bin/env node
 
 const command = process.argv[2];
+
+// `bimo engine ...` and `bimo pool ...` always reach the Bimo engine.
+// `bimo agent VERB` and `bimo proxy VERB` reach it for the engine's verbs;
+// the in-container `bimo agent --...` and `bimo proxy --...` start with a flag.
+async function routesToEngine(group, verb) {
+  if (group === "engine" || group === "pool") return true;
+  if (group !== "agent" && group !== "proxy") return false;
+  const { ENGINE_VERBS } = await import("../src/engine.mjs");
+  return ENGINE_VERBS[group].includes(verb);
+}
 if (command === "source-verify") {
   process.argv.splice(2, 1);
   const { main } = await import("../src/source-verify.mjs");
   main().catch(error => {
     process.stderr.write(`bimo source-verify: ${error.message}\n`);
+    process.exitCode = 1;
+  });
+} else if (await routesToEngine(command, process.argv[3])) {
+  const { main } = await import("../src/engine.mjs");
+  main(command, process.argv.slice(3)).then(code => {
+    process.exitCode = code;
+  }, error => {
+    process.stderr.write(`bimo ${command}: ${error.message}\n`);
     process.exitCode = 1;
   });
 } else {

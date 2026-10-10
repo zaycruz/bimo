@@ -2614,6 +2614,10 @@ const COMMAND_HELP = {
   "prepare-pi-image": "bimo prepare-pi-image SOURCE OUTPUT --base-image IMAGE [--json]\n  Prepare a locked Pi verification image context from a trusted checkout. Does not build or deploy.",
   service: "bimo service status|start|stop|restart FILE [--json]\n  Manage a pre-provisioned test-only Hermes unit. No provisioning or credential resolution.",
   plan: "bimo plan FILE [--json]\n  Validate operator-owned deployment intent offline. No execution, credential resolution, or resource reservation.",
+  engine: "bimo engine ARGS...\n  Run the Bimo engine (bimo-engine) with ARGS unchanged; bimo engine help lists its commands.",
+  agent: "bimo agent validate|plan|apply SPEC|MANIFEST.json | status|logs|destroy NAME | list [--output json|text] [--state-root DIR] [--targets-config FILE]\n  Run a spec-declared agent through the Bimo engine. A deployment manifest whose target kind is engine is rendered into .bimo/specs/ first.",
+  pool: "bimo pool status|fill|drain --target NAME [--tenant ID] [--warm RUNTIME] [--output json|text] [--targets-config FILE]\n  Keep a Bimo engine target's per-tenant warm pool.",
+  proxy: "bimo proxy up|status|down --target NAME [--tenant ID] [--force] [--output json|text] [--targets-config FILE]\n  Start, show or stop a tenant's credential-proxy guest on a Bimo engine target.",
   list: "bimo list [--json]\n  List the installed workflow and pod templates.",
   targets: "bimo targets [--json]\n  Probe the local Docker daemon and list the built-in deployment targets.",
   validate: "bimo validate TEMPLATE [--json]\n  Validate one installed template and print its digest.",
@@ -2645,6 +2649,10 @@ function usage() {
   bimo doctor [--deployment NAME] [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--secret-ref op://VAULT/ITEM/FIELD] [--json]
   bimo cancel --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] [--run ID] [--json]
   bimo publish --deployment NAME [--target local | --target ssh --host HOST | --target proxmox-lxc --proxmox HOST --vmid ID] --github-secret-ref op://VAULT/ITEM/FIELD [--run ID] [--json]
+  bimo agent validate|plan|apply SPEC|MANIFEST.json | status|logs|destroy NAME | list [--output json|text]
+  bimo pool status|fill|drain --target NAME [--tenant ID] [--output json|text]
+  bimo proxy up|status|down --target NAME [--tenant ID] [--output json|text]
+  bimo engine ARGS...
   bimo help [COMMAND]
 `;
 }
