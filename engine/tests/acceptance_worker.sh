@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# The example manifests name their workers relative to the engine directory.
+cd "$ROOT"
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/monolith-worker.XXXXXX")
 trap '"$ROOT/target/debug/bimo-engine" destroy "$STATE" >/dev/null 2>&1 || true; rm -rf "$STATE"' EXIT
 cargo build --manifest-path "$ROOT/Cargo.toml"
