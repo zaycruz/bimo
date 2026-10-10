@@ -1,44 +1,89 @@
-# Monolith — local agent factory foundation
+# Bimo engine
 
-Monolith is a Rust control plane for a small local agent factory. It reads a
-TOML manifest that declares pods, starts each pod as a supervised child
-process, and delivers durable work messages between pods over a versioned
-JSONL worker protocol.
+The Bimo engine (`bimo-engine`) is the Rust runtime fabric behind Bimo. It
+places spec-declared agents (Hermes and eve) on a named target, the local
+machine or a Proxmox cluster, runs each one behind its own credential proxy,
+and reports every step as one JSON envelope. It also keeps the earlier local
+agent factory: a TOML manifest of pods, supervised child processes and a
+versioned JSONL worker protocol.
 
-This release is local and single-host. It does not add remote deployment, a
-hosted control plane, multi-tenancy, billing, or durable model conversation
-memory.
-
-## Commands
+Users reach it through the `bimo` CLI (see `../docs/engine.md` for the seam,
+the names and the manifest bridge):
 
 ```text
-monolith targets [--targets-config <file>]
-monolith deploy <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
-monolith validate <manifest>
-monolith plan <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
-monolith apply <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
-monolith status <state-dir> [--target <name>] [--targets-config <file>]
-monolith send <state-dir> --from <pod> --to <pod> --kind <kind> --payload <text> [--target <name>] [--targets-config <file>]
-monolith logs <state-dir> <pod> [--target <name>] [--targets-config <file>]
-monolith destroy <state-dir> [--target <name>] [--targets-config <file>]
-monolith demo <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+bimo agent validate|plan|apply <spec.toml | manifest.json>
+bimo agent status|logs|destroy <name>
+bimo agent list
+bimo pool status|fill|drain --target <name> [--tenant <id>]
+bimo proxy up|status|down --target <name> [--tenant <id>]
+bimo engine <any bimo-engine arguments>     # for example: bimo engine help
 ```
 
-`pod-process` is an internal runtime subcommand used by `apply` and `demo`.
+`bimo` finds the binary through `BIMO_ENGINE_BIN`, then the newest
+`engine/target/{release,debug}/bimo-engine`, then `PATH`.
 
-Current implementation:
+## Agents
 
-- `local` works today and preserves the existing single-host process model.
-- `proxmox` has a driver (U5) and a per-tenant warm pool (U6) that create,
-  bind and destroy LXC guests through the Proxmox API; no runtime runs inside a
-  guest yet (U8). See `templates/README.md`. `ssh` is reserved, with no driver.
-- Named targets can be declared in `.monolith/targets.toml`; only targets of
-  kind `local` are executable in this release.
+- Spec format: `docs/agent-spec.md` (examples: `examples/hermes-agent.toml`,
+  `examples/eve-agent.toml`).
+- Commands, JSON envelopes and state: `docs/agent-cli.md`.
+- Credential boundary and its local limits: `docs/credential-boundary.md`.
+- Proxmox golden template, bind agent, warm pool and proxy guests:
+  `templates/README.md`.
+- Measured readiness: `docs/benchmarks/spawn-latency.md`.
+
+Local state lives under `.bimo/` in the working directory (agents, pools,
+reports, `targets.toml`). A directory that only has the earlier `.monolith/`
+layout keeps working; `docs/naming.md` lists every renamed and kept name.
+
+## Targets
+
+`local` always exists. Proxmox targets are declared in `.bimo/targets.toml`
+(`--targets-config FILE` points elsewhere). Keep real
+addresses, node names and token IDs in that file, which stays out of git; the
+committed example uses documentation placeholders:
+
+```toml
+schema_version = 1
+default_target = "local"
+
+[[targets]]
+kind = "proxmox"
+name = "homelab-lxc"
+api_url = "https://pve-node-a:8006/api2/json"
+token_env = "BIMO_PROXMOX_TOKEN"     # user@realm!tokenid=secret, read from the environment only
+node = "pve-node-a"
+pool = "pool-monolith-test"
+template_id = 9000
+vmid_range = [9100, 9199]
+address_range = "192.0.2.230-192.0.2.238"
+gateway = "192.0.2.129"
+```
+
+The full field list is in `examples/targets.toml` and
+`docs/local-first-targets.md`. `bimo engine targets` reports each target,
+whether its token variable is set and whether this build can execute it.
+
+## Factory commands
+
+```text
+bimo engine targets [--targets-config <file>]
+bimo engine deploy <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+bimo engine validate <manifest>
+bimo engine plan|apply <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+bimo engine status|destroy <state-dir> [--target <name>] [--targets-config <file>]
+bimo engine send <state-dir> --from <pod> --to <pod> --kind <kind> --payload <text>
+bimo engine logs <state-dir> <pod>
+bimo engine demo <manifest> [--state-dir <dir>]
+```
+
+Factory manifests run on `local` only. `pod-process` is an internal runtime
+subcommand used by `apply` and `demo`.
 
 ## Process hierarchy
 
 ```text
-monolith apply
+bimo engine apply
   └── Rust factory process
         └── Rust pod process
               └── selected worker adapter
@@ -48,42 +93,6 @@ monolith apply
 The factory owns the pod process. The pod process owns the worker adapter.
 The adapter owns the model loop. No worker process receives a direct
 state-directory capability.
-
-## Local-first target seam
-
-Monolith now keeps deployment target selection separate from workflow/runtime
-execution.
-
-- The manifest still describes the workflow and worker runtime only.
-- The worker protocol still defines local pod-to-worker execution only.
-- The CLI target decides where that controller/runtime should execute.
-
-This is intentionally not a general plugin system yet. There is one working
-target implementation today (`local`), so the code uses a built-in target
-module instead of an early plugin registry. See `docs/local-first-targets.md`
-for the target model and the planned `ssh` / `proxmox` expansion path.
-
-Example targets file:
-
-```toml
-schema_version = 1
-default_target = "local"
-
-[[targets]]
-kind = "proxmox"
-name = "homelab-lxc"
-api_url = "https://pve-node-b:8006/api2/json"
-token_env = "MONOLITH_PROXMOX_TOKEN"
-cluster = "homelab"
-node = "pve-node-b"
-guest_type = "lxc"
-guest_id = 203
-artifact_lifecycle = "persistent"
-```
-
-The `targets` command reports whether the target is autodetected or
-configured, whether the target's secret reference env var is present, and
-whether the current build can actually execute that target.
 
 ## Worker protocol boundary
 
@@ -184,25 +193,20 @@ implementation that completes the same contract without Rust changes.
   prevent PID-reuse confusion.
 - State directories reject symlinks and use `0o700`/`0o600` permissions.
 
-## Spec-declared agents
-
-`monolith agent validate|plan|apply|status|logs|destroy|list` deploys an agent
-(Hermes or eve) from a TOML spec onto a named target. Each agent runs behind
-its own credential proxy and holds only placeholders for its secrets.
-
-- Spec format: `docs/agent-spec.md`
-- Commands, JSON envelopes and state: `docs/agent-cli.md`
-- Credential boundary and its local limits: `docs/credential-boundary.md`
-
-Today only the `local` target runs agents. The Proxmox driver, guest template
-and pool are not built yet.
-
 ## Development
 
 ```bash
 cargo build
-cargo test
+cargo test                      # live Proxmox tests skip unless BIMO_PROXMOX_LIVE=1
 sh tests/acceptance_worker.sh   # golden path with the deterministic fixture
-sh tests/acceptance_fabric.sh   # agent fabric E2E; live Proxmox only with MONOLITH_PROXMOX_LIVE=1
-cd workers/pi-core && npm test
+sh tests/acceptance_fabric.sh   # agent fabric E2E; live Proxmox only with BIMO_PROXMOX_LIVE=1
+node ../test/engine-proof.mjs   # bimo -> bimo-engine -> Hermes, through a deployment manifest
 ```
+
+A live run also needs the target's token variable and
+`BIMO_PROXMOX_FOREIGN_VMID`, an existing guest outside the target's pool that
+the driver must refuse to touch.
+
+`scripts/e2e-tools.sh` installs the pinned iron-proxy and hermes-agent the
+E2E tests use (it needs `uv`). The `MONOLITH_*` names of every `BIMO_*`
+variable still work.

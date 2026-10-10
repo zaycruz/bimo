@@ -2,7 +2,7 @@
 
 An agent never holds a real credential (R7). Its outbound traffic is denied by
 default, allowed per agent by the spec's `egress.allow`, and every request is
-recorded (R8). Monolith gets both from one iron-proxy instance per agent
+recorded (R8). The engine gets both from one iron-proxy instance per agent
 generation (KTD4), plus confinement that stops the agent from going around
 the proxy.
 
@@ -56,7 +56,7 @@ recovery, retired with its generation and stopped by `destroy`.
 
 The proxy writes one JSON line per request to
 `<state-root>/<agent>/logs/egress-audit.jsonl`, read with
-`monolith agent logs <name> --stream egress`. Lines with `"msg":"request"`
+`bimo agent logs <name> --stream egress`. Lines with `"msg":"request"`
 carry `audit.host`, `method`, `path`, `action` (`allow`, `reject`, `error`)
 and `status_code`; a refusal carries `rejected_by` (for example
 `allowlist`), and a swap carries `annotations.swapped` with the header it
@@ -142,7 +142,7 @@ The proxy guest:
   `monolith-proxy` tag. Its record is
   `<pool dir>/<target>-proxies/<tenant>.json` (mode 0600: it holds the bind
   credential and the control token), never the pool state, so pool fill,
-  drain and claim never touch it. `monolith proxy up|status|down` manages it;
+  drain and claim never touch it. `bimo proxy up|status|down` manages it;
   `agent apply` starts it when it is missing.
 - bound like any guest (payload `role: "proxy"`), then given a bundle with
   the supervisor and the Linux iron-proxy build through the bind agent. No
@@ -205,13 +205,13 @@ again. Secrets are never kept anywhere to re-send them.
 The Linux iron-proxy: the pinned upstream release
 `iron-proxy_0.52.0_linux_amd64.tar.gz`, downloaded and checked by
 `scripts/e2e-tools.sh` (it prints `IRON_PROXY_LINUX_BIN`). The control plane
-reads it from `MONOLITH_IRON_PROXY_GUEST_BIN` (default
+reads it from `BIMO_IRON_PROXY_GUEST_BIN` (default
 `target/e2e-tools/iron-proxy-0.52.0-linux_amd64/iron-proxy`), refuses any
 file whose SHA-256 is not the pinned build, and delivers it in the proxy
 guest's bundle. This was the simplest dependable choice: no cross build, no
 template change, one binary for every proxy guest.
 
-Proof: `tests/e2e_proxmox_agents.rs` (live, `MONOLITH_PROXMOX_LIVE=1`)
+Proof: `tests/e2e_proxmox_agents.rs` (live, `BIMO_PROXMOX_LIVE=1`)
 starts proxy guests for two tenants, waits past the restart window, applies
 eve and Hermes for tenant A and Hermes for tenant B, asks each for an answer,
 checks the audit log for the swap, searches the agent guest's state and

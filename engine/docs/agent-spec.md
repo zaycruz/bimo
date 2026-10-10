@@ -3,8 +3,8 @@
 An agent spec is a TOML file that declares one agent: what runs, from which
 source, for which tenant, which secrets it may use, where it may connect, and
 on which substrate it is placed. The same format deploys every runtime
-Monolith supports (today Hermes and eve). Substrate settings never appear in
-a spec; they belong to the named target in `.monolith/targets.toml`.
+the Bimo engine supports (today Hermes and eve). Substrate settings never appear in
+a spec; they belong to the named target in `.bimo/targets.toml`.
 
 Examples: `examples/hermes-agent.toml` and `examples/eve-agent.toml`.
 
@@ -73,9 +73,9 @@ hosts = ["openrouter.ai"]      # where the real value may be sent
 - Each `env` may appear once.
 - Every handle must resolve in the target's secret source at validate, plan
   and apply time. Sources are configured per target:
-  - `env` (default): `MONOLITH_SECRET_<TENANT>__<NAME>` in the control plane's
+  - `env` (default): `BIMO_SECRET_<TENANT>__<NAME>` in the control plane's
     environment, with non-alphanumerics mapped to `_`. Example:
-    `demo/openrouter` reads `MONOLITH_SECRET_DEMO__OPENROUTER`.
+    `demo/openrouter` reads `BIMO_SECRET_DEMO__OPENROUTER`.
   - `onepassword_connect`: a 1Password Connect server. Each tenant has its own
     vault named `vault_prefix` + tenant (default `monolith-<tenant>`); the item
     title is the handle name and its password field is the value.
@@ -123,7 +123,7 @@ claiming a guest per agent. Nothing in delivery or the proxy guest changes. Aski
 
 ## Validation
 
-`monolith agent validate <spec>` checks everything above without touching a
+`bimo agent validate <spec>` checks everything above without touching a
 substrate and reports every problem at once:
 
 ```text

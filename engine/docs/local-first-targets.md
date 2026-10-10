@@ -1,6 +1,6 @@
 # Local-first deployment targets
 
-Monolith now treats deployment target selection as a separate module from the
+The Bimo engine treats deployment target selection as a separate module from the
 workflow runtime.
 
 That seam is intentionally small:
@@ -13,8 +13,8 @@ That seam is intentionally small:
 
 The CLI has two target-oriented commands:
 
-- `monolith targets` shows the resolved target catalog.
-- `monolith deploy <manifest> --target <name>` resolves one target and runs the
+- `bimo engine targets` shows the resolved target catalog.
+- `bimo engine deploy <manifest> --target <name>` resolves one target and runs the
   existing local runtime only when that target is executable in the current
   build.
 
@@ -24,7 +24,7 @@ Supported target kinds:
 
 - `local` — implemented. This is the existing single-host process model and the
   only executable target kind in this release.
-- `ssh` — reserved. Planned for running the same Monolith controller on a
+- `ssh` — reserved. Planned for running the same engine controller on a
   remote Unix host over an operator-managed transport.
 - `proxmox` — driver implemented for spec-declared agents (U5, U6): linked
   LXC clones of a golden template, a per-tenant warm pool, static addresses,
@@ -32,8 +32,8 @@ Supported target kinds:
   guest is not built yet (U8). See `templates/README.md` and the driver
   fields in `examples/targets.toml`.
 
-Named targets may be declared in `.monolith/targets.toml`. The target name is
-what users pass to `--target`. The target kind tells Monolith which runtime
+Named targets may be declared in `.bimo/targets.toml`. The target name is
+what users pass to `--target`. The target kind tells the engine which runtime
 adapter would be responsible for that target.
 
 Example:
@@ -46,7 +46,7 @@ default_target = "local"
 kind = "proxmox"
 name = "homelab-lxc"
 api_url = "https://pve-node-b:8006/api2/json"
-token_env = "MONOLITH_PROXMOX_TOKEN"
+token_env = "BIMO_PROXMOX_TOKEN"
 cluster = "homelab"
 node = "pve-node-b"
 guest_type = "lxc"
@@ -55,7 +55,7 @@ artifact_lifecycle = "persistent"
 ```
 
 The current build reads that configuration and reports it through
-`monolith targets`. Factory manifests (`monolith deploy`) still run only on
+`bimo engine targets`. Factory manifests (`bimo engine deploy`) still run only on
 `local`; spec-declared agents placed on a proxmox target go through the
 Proxmox driver, which needs the driver fields shown in
 `examples/targets.toml` (pool, template_id, vmid_range, bridge,
@@ -93,5 +93,5 @@ When a second target is real, the module can deepen naturally:
 - `proxmox` can own VM/LXC placement, remote controller bootstrapping, and
   post-deploy attachment.
 
-Until then, Monolith stays honest: local-first is implemented, remote targets
+Until then, the engine stays honest: local-first is implemented, remote targets
 are named and configurable, but not claimed as deployable.

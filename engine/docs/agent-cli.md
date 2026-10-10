@@ -1,24 +1,24 @@
 # Agent CLI contract
 
-`monolith agent` is built to be driven by an agent, unattended. Every command
+`bimo agent` is built to be driven by an agent, unattended. Every command
 takes `--output json` and then prints exactly one JSON envelope on stdout,
 whether it succeeds or fails. The envelope's schema is
-`docs/agent-cli.schema.json` (`monolith.cli/v1`); the E2E suite validates
+`docs/agent-cli.schema.json` (`bimo.cli/v1`); the E2E suite validates
 every envelope it sees against it.
 
 ```text
-monolith agent validate <spec>
-monolith agent plan     <spec>
-monolith agent apply    <spec>
-monolith agent status   <name>
-monolith agent logs     <name> [--stream agent|egress|journal]
-monolith agent destroy  <name>
-monolith agent list
+bimo agent validate <spec>
+bimo agent plan     <spec>
+bimo agent apply    <spec>
+bimo agent status   <name>
+bimo agent logs     <name> [--stream agent|egress|journal]
+bimo agent destroy  <name>
+bimo agent list
 
 Options (every option takes a value; there are no boolean flags):
   --output json|text        default text
-  --state-root <dir>        default $MONOLITH_STATE_ROOT, then .monolith/agents
-  --targets-config <file>   default .monolith/targets.toml when present
+  --state-root <dir>        default $BIMO_STATE_ROOT, then .bimo/agents
+  --targets-config <file>   default .bimo/targets.toml when present
   --stream <name>           logs only
 ```
 
@@ -29,13 +29,13 @@ duplicate options and wrong positional counts are `usage` errors.
 
 ```json
 {
-  "schema": "monolith.cli/v1",
+  "schema": "bimo.cli/v1",
   "command": "apply",
   "ok": true,
   "changed": true,
   "result": { "name": "demo-hermes", "generation": 1, "ready_ms": 1311, "first_task_id": "run_...", "...": "..." },
   "error": null,
-  "next": ["monolith agent status demo-hermes"],
+  "next": ["bimo agent status demo-hermes"],
   "idempotency_key": "38381025cc5c1c223cb99ae02abeb2e3"
 }
 ```
@@ -65,7 +65,7 @@ Exit status: `0` on success, `2` for `usage`, `1` for any other error.
   resources: the agent's credential proxy (`proxy_process`), started first,
   and the runtime (`agent_process`). On a proxmox target it is two: the
   agent's `proxy_route` in its tenant's proxy guest (started with or before
-  the agent; `monolith proxy up|status|down` manages the proxy guest itself)
+  the agent; `bimo proxy up|status|down` manages the proxy guest itself)
   and the `guest` the runtime runs in; see `docs/credential-boundary.md`.
   Records from before the proxy guest may still list a `relay_process`. The previous
   generation is retired only after the new one commits. An unchanged, healthy
@@ -89,20 +89,20 @@ Exit status: `0` on success, `2` for `usage`, `1` for any other error.
 | Code | Meaning | Typical next step |
 |---|---|---|
 | `spec_invalid` | The spec has problems; all are in `details`. | Fix the fields, run validate. |
-| `target_unknown` | The placement or targets file names no known target. | Check `.monolith/targets.toml`. |
+| `target_unknown` | The placement or targets file names no known target. | Check `.bimo/targets.toml`. |
 | `target_unavailable` | The target exists but its driver cannot run, for example a missing API token. | The `next` hint names the variable to export. |
 | `tenant_conflict` | The agent name belongs to another tenant. | Choose another name or destroy the agent. |
-| `agent_not_found` | No agent with that name under the state root. | `monolith agent list`. |
+| `agent_not_found` | No agent with that name under the state root. | `bimo agent list`. |
 | `runtime_unavailable` | The runtime executable is not installed on the substrate. | Install it. |
 | `source_failed` | Checkout, copy or build of the source failed. | Check the repo, rev and build output. |
 | `substrate_failed` | The driver could not create, inspect or remove a resource. | Retry; check the substrate. |
 | `substrate_refused` | The driver refused a resource outside its scope: a VMID outside the target's `vmid_range`, a guest outside its pool, or a guest without the ownership marker. Nothing was changed. | Check the target's scope settings; never widen them to reach a guest Monolith did not create. |
-| `probe_failed` | The runtime exited, refused, or did not accept a first task in time (`MONOLITH_READY_TIMEOUT_MS`, default 90000). | `monolith agent logs <name>`. |
+| `probe_failed` | The runtime exited, refused, or did not accept a first task in time (`BIMO_READY_TIMEOUT_MS`, default 90000). | `bimo agent logs <name>`. |
 | `runtime_state_invalid` | The runtime accepted a task but is in the wrong auth mode. Nothing was committed. | Fix the runtime's auth configuration. |
 | `secret_unresolved` | A handle stopped resolving between validation and launch. | Provide the secret. |
-| `proxy_failed` | The credential proxy could not start or reload. | `monolith agent logs <name> --stream egress`. |
+| `proxy_failed` | The credential proxy could not start or reload. | `bimo agent logs <name> --stream egress`. |
 | `state_failed` | Agent state or the journal could not be read or written. | Check the state root. |
-| `usage` | The command line is wrong. | `monolith help`. |
+| `usage` | The command line is wrong. | `bimo engine help`. |
 
 ## State and recovery
 
@@ -114,7 +114,7 @@ supersedes), so a process killed at any point leaves every resource on
 record. `status` and `plan` show those as `remains`; the next `apply` or
 `destroy` clears them. A secret rotation adds a `secrets_rotated` event. The
 E2E suite kills apply after the runtime is created, at `ready` and at
-`commit` (`MONOLITH_INJECT_CRASH=<event>` or `<event>:<resource kind>`, for
+`commit` (`BIMO_INJECT_CRASH=<event>` or `<event>:<resource kind>`, for
 example `created:agent_process`, a test-only fault hook that exits the
 process right after journaling that event).
 

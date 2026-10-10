@@ -9,7 +9,7 @@ guest cloned from the same template (U7). This page covers what the operator
 builds by hand, how the pool behaves, how a runtime gets into a guest and how
 the proxy guest works.
 
-Monolith never SSHes to a node. The template is built by an operator on the
+The engine never SSHes to a node. The template is built by an operator on the
 node; after that the driver uses only the Proxmox HTTPS API with the
 pool-scoped token.
 
@@ -36,8 +36,8 @@ pool-scoped token.
 
 ```sh
 # from a workstation with this repo
-scp -r scripts/build-template.sh templates/bind-agent root@pve-node-a:/root/monolith-template/
-ssh root@pve-node-a 'sh /root/monolith-template/build-template.sh'
+scp -r scripts/build-template.sh templates/bind-agent root@<node>:/root/monolith-template/
+ssh root@<node> 'sh /root/monolith-template/build-template.sh'
 ```
 
 The script reuses CT 9000 if it exists and is not yet a template, so a CT
@@ -75,19 +75,19 @@ variables (`VMID`, `OSTEMPLATE`, `STORAGE`, `DISK_GB`, `POOL`, `BRIDGE`,
 To rebuild, `pct destroy 9000` and run the script again:
 
 ```sh
-ssh root@pve-node-a 'pct destroy 9000'
-scp -r scripts/build-template.sh templates/bind-agent root@pve-node-a:/root/monolith-template/
-ssh root@pve-node-a 'sh /root/monolith-template/build-template.sh'
+ssh root@<node> 'pct destroy 9000'
+scp -r scripts/build-template.sh templates/bind-agent root@<node>:/root/monolith-template/
+ssh root@<node> 'sh /root/monolith-template/build-template.sh'
 ```
 
-Then `monolith pool drain --target proxmox-live` (or the next fill) retires
+Then `bimo pool drain --target proxmox-live` (or the next fill) retires
 guests from the old template. The proxy guest needs bind agent API 3
 (`TEMPLATE_VERSION` label `debian13-bind-v4`); with an older template,
-`monolith proxy up` and `agent apply` fail with `target_unavailable` and this
+`bimo proxy up` and `agent apply` fail with `target_unavailable` and this
 step. The driver's
 template version is the first 12 hex digits of the template config's
 `digest`, so any rebuild or config change is a new version: the next
-`monolith pool fill` retires pooled guests from the old one, and a claim
+`bimo pool fill` retires pooled guests from the old one, and a claim
 never takes a guest whose version differs from the one the last fill saw.
 
 ## Token and scope
@@ -139,7 +139,7 @@ what close that window; until they exist the test pool shares `vmbr0`.
 
 ## Runtime delivery (U8)
 
-After the bind, `monolith agent apply` (`src/proxmox/delivery.rs`):
+After the bind, `bimo agent apply` (`src/proxmox/delivery.rs`):
 
 1. packs the adapter's guest recipe on the control plane: eve ships its
    built `.output` server bundle (made by `eve build`), Hermes its config
@@ -161,9 +161,9 @@ claim check, and apply fails with `target_unavailable` and the rebuild step.
 
 ## The proxy guest (U7)
 
-One per tenant and target, started by `monolith proxy up --target T --tenant
-X` or by the first apply that needs it; `monolith proxy status` shows it and
-its routes, `monolith proxy down` destroys it (refused while it serves a
+One per tenant and target, started by `bimo proxy up --target T --tenant
+X` or by the first apply that needs it; `bimo proxy status` shows it and
+its routes, `bimo proxy down` destroys it (refused while it serves a
 route, unless `--force`). It is a linked clone like any guest, in the same
 pool and VMID range, with `role=proxy` in its description and the
 `monolith-proxy` tag, 384 MB; its record is
@@ -209,43 +209,43 @@ a Mac. Everything else in the bundle is plain JavaScript.
 
 ## The warm pool
 
-Pool state is `.monolith/pools/<target>.json` (override the directory with
-`MONOLITH_POOL_DIR`), under an exclusive lock, so separate CLI invocations
+Pool state is `.bimo/pools/<target>.json` (override the directory with
+`BIMO_POOL_DIR`), under an exclusive lock, so separate CLI invocations
 share it.
 
 ```sh
-monolith pool fill   --target proxmox-live --tenant acme --output json
-monolith pool status --target proxmox-live --output json
-monolith pool drain  --target proxmox-live [--tenant acme] --output json
+bimo pool fill   --target proxmox-live --tenant acme --output json
+bimo pool status --target proxmox-live --output json
+bimo pool drain  --target proxmox-live [--tenant acme] --output json
 ```
 
 - `fill` brings the tenant up to `warm_pool_size` (default 2, cap 4): it
   clears records left by a filler that died, retires stale or stopped guests,
   then clones the shortfall one at a time (clone, set address, memory and
   tags, start, wait for the bind agent).
-- A claim (`monolith agent apply` on a proxmox placement) takes a ready guest
+- A claim (`bimo agent apply` on a proxmox placement) takes a ready guest
   for the spec's tenant with no Proxmox API call, journals it, binds it and
   confirms the bind with the credential. A guest that will not bind is
   destroyed, never handed out. With no ready guest the claim falls back to a
   cold clone and reports `pooled: false`.
-- After a claim the CLI starts `monolith pool fill` in the background to
-  replace it (`MONOLITH_POOL_REFILL=0` turns that off).
+- After a claim the CLI starts `bimo pool fill` in the background to
+  replace it (`BIMO_POOL_REFILL=0` turns that off).
 - `drain` destroys unclaimed guests. Claimed guests belong to agents and are
-  removed by `monolith agent destroy`.
+  removed by `bimo agent destroy`.
 
 Pools are per tenant: a tenant's claim only ever takes that tenant's guests,
 and a guest is cloned fresh from the template, so it holds no other tenant's
 data. With `tenant_vlans` set on the target, each tenant's guests go on its
 own VLAN and an unmapped tenant is refused.
 
-Sizing on pve-node-a: about 15 GB free, shared with other guests. Two
+Sizing on the test node (pve-node-a): about 15 GB free, shared with other guests. Two
 pooled guests per tenant at 256 MB each is the default; the benchmark
 records the idle memory each pooled guest actually uses. A claimed eve guest
 is raised to 384 MB (Node RSS is about 190 MB); Hermes idles at about 90 MB.
 
 ## Warm runtimes (R3: apply to first task under one second)
 
-Measured on pve-node-a before this work, through `monolith agent apply` on a
+Measured on pve-node-a before this work, through `bimo agent apply` on a
 pooled guest, request to first task accepted (KTD7):
 
 | Runtime | Total | Where it went |
@@ -256,7 +256,7 @@ pooled guest, request to first task accepted (KTD7):
 Decisions:
 
 1. **Hermes: a warm runtime per (tenant, runtime), late-bound by go.**
-   `monolith pool fill --tenant T --warm hermes` binds each ready guest of
+   `bimo pool fill --tenant T --warm hermes` binds each ready guest of
    the tenant's pool to the pool itself (payload `{tenant, warm: <key>,
    target, template_version}`, no agent), uploads a launcher bundle
    (`src/runtimes/hermes_warm.py` and its module list) and starts it under
@@ -283,7 +283,7 @@ Decisions:
    fail slowly); the readiness probe no longer stops its run before ready
    (`settle` stops it after the ready journal entry).
 3. **eve: build once per source revision.** `eve build` output is cached
-   under `MONOLITH_BUILD_CACHE` (default `.monolith/cache`) by a key of the
+   under `BIMO_BUILD_CACHE` (default `.bimo/cache`) by a key of the
    source revision, Node version and platform; the staged bundle is cached
    by content. A cache hit makes prepare and bundle about 10 to 20 ms. eve
    has no generic warm runtime: the agent is compiled into its server bundle
@@ -317,8 +317,8 @@ Restarts: a warm guest's binding and runtime live in tmpfs, so a guest
 restart empties it. A claim that finds a warm guest emptied does not use it:
 the guest becomes a dead record for the next fill or drain to destroy (off
 the request path), and the claim takes the next guest. `pool fill --warm`
-re-checks warm guests and re-warms emptied ones. On pve-node-a something outside
-Monolith installs tailscale into every new container and restarts it about
+re-checks warm guests and re-warms emptied ones. On the test node something outside
+the engine installs tailscale into every new container and restarts it about
 three minutes after its first start;
 that also kills any agent claimed in that window, cold or warm, and is an
 operator item.
