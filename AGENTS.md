@@ -1,8 +1,11 @@
 # Working on Bimo
 
 Bimo is a zero-dependency Node.js ESM CLI that deploys bounded, auditable
-agent workflows as ephemeral Docker fleets. This file is the whole
-orientation: verification loop, hard rules, PR flow, and the design docs.
+agent workflows as ephemeral Docker fleets. Its engine, in `engine/`, is a
+Rust crate (`bimo-engine`) that places long-running Hermes and eve agents on
+local or Proxmox targets; `bimo agent|pool|proxy|engine` drive it through
+`src/engine.mjs`. This file is the whole orientation: verification loop, hard
+rules, PR flow, and the design docs.
 
 ## Verification loop
 
@@ -15,6 +18,20 @@ npm pack --dry-run  # verify the package manifest and shipped file set
 ```
 
 All three must pass before opening a PR, including for docs-only changes.
+
+A change under `engine/`, `src/engine.mjs` or the engine bridge also runs the
+engine checks (Rust stable and `uv`, which installs the pinned E2E tools):
+
+```sh
+cargo build --manifest-path engine/Cargo.toml
+cargo test --manifest-path engine/Cargo.toml   # live Proxmox suites skip without BIMO_PROXMOX_LIVE=1
+sh engine/tests/acceptance_worker.sh
+sh engine/tests/acceptance_fabric.sh
+node test/engine-proof.mjs                     # bimo -> bimo-engine -> Hermes; writes engine/target/e2e-bimo/
+```
+
+Never run the live Proxmox suites (`BIMO_PROXMOX_LIVE=1`) without an operator
+and a gitignored `.bimo/targets.toml`.
 
 ## Hard rules
 
@@ -34,6 +51,12 @@ All three must pass before opening a PR, including for docs-only changes.
   waits.
 - **Frozen option objects.** Parsed options and cross-module inputs are
   `Object.freeze`d at the boundary and treated as immutable.
+- **The engine keeps its contracts.** `engine/` follows its own docs:
+  `bimo.cli/v1` envelopes, the agent spec, and the guest-side
+  `MONOLITH_*` names and paths baked into the golden template. Rename those
+  only with a template version bump (see docs/engine.md). Real cluster
+  addresses, node names, token IDs and vault names never enter the repo;
+  examples use `192.0.2.0/24` and placeholders.
 - **Exact-shape receipts.** Every JSON receipt — agent, verifier,
   artifact, plan, error — is validated against an exact field set
   (`assertExactFields`). Unknown or missing fields fail closed.
@@ -57,6 +80,11 @@ All three must pass before opening a PR, including for docs-only changes.
 - [docs/agent-runtimes.md](docs/agent-runtimes.md) — the closed
   agent-runtime registry (`opencode`, `pi`), the adapter contract a third
   agent runtime must satisfy, and the invariants it may not weaken.
+- [docs/engine.md](docs/engine.md) — the Bimo engine: the CLI seam, the
+  deployment-manifest bridge, `BIMO_*` names and their `MONOLITH_*`
+  aliases, and the renames deferred to a template bump. The engine's own
+  design docs are in [engine/docs/](engine/docs/) and
+  [engine/templates/README.md](engine/templates/README.md).
 - [docs/templates.md](docs/templates.md) — the data-only template
   boundary: manifest schema, digest binding, customization path, and
   non-promises.

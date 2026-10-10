@@ -1,0 +1,27 @@
+# An eve agent declared with the same runtime-agnostic agent spec as
+# examples/hermes-agent.toml. See docs/agent-spec.md.
+#
+# eve launches from a git repository at a full commit id. This example pins
+# the deterministic local repository that `sh scripts/eve-example-repo.sh`
+# publishes from examples/eve-agent/; run it before applying. A real agent
+# points `repo` at its hosted repository instead.
+schema_version = 1
+name = "demo-eve"
+tenant_id = "demo"
+runtime = "eve"
+
+[source]
+kind = "git"
+repo = "../target/eve-agent.git"
+rev = "05b6fa5d3791a97e489dbc5c066648207bca1263"
+
+[[secrets]]
+env = "OPENROUTER_API_KEY"
+handle = "demo/openrouter"
+hosts = ["openrouter.ai"]
+
+[egress]
+allow = ["openrouter.ai"]
+
+[placement]
+substrate = "local"

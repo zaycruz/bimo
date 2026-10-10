@@ -179,7 +179,7 @@ before the next one starts.
   not a runtime. The operator chooses LXC or QEMU VM at deploy time, and
   Bimo provisions the guest through the Proxmox API instead of assuming an
   existing guest.
-- **Platform requirements**: the owner's Proxmox host PV05 is the E2E rig;
+- **Platform requirements**: a dedicated Proxmox host is the E2E rig;
   API token scoped to guest lifecycle on a dedicated pool.
 - **Image/payload format**: the guest still runs Docker (or a later
   runtime); the API replaces SSH as the provisioning and command transport
@@ -187,9 +187,9 @@ before the next one starts.
 - **Open questions**: credential handling — the API token must not appear in
   argv, logs, or run records; command execution channel into the guest
   (guest agent versus SSH after provisioning); teardown guarantees so a
-  failed deploy never strands a guest on PV05.
+  failed deploy never strands a guest on the E2E host.
 - **Why third**: it widens the target side using runtime evidence already
-  gathered, and PV05 is already the proven Proxmox rig.
+  gathered, and that host is already the proven Proxmox rig.
 
 ### 4. native LXC — no nested Docker
 

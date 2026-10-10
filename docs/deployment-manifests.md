@@ -1,7 +1,9 @@
 # Operator deployment manifests: preview version 1
 
 `bimo plan FILE [--json]` validates deployment intent offline. This contract
-is experimental; it cannot deploy or adopt resources. It is separate from
+is experimental. Only a manifest whose target kind is `engine` can run, through
+`bimo agent apply FILE` and the [Bimo engine](engine.md); `plan` itself never
+deploys or adopts resources. It is separate from
 workflow manifests and organizer-generated plans: only an operator supplies
 deployment identity, placement, credentials and budgets.
 
@@ -16,10 +18,10 @@ The packaged JSON examples are the complete reference shape.
 | clientId, agentId | 1–32 lowercase letters, digits and dashes; starts with a letter |
 | lifecycle | job or service |
 | runtime | opencode or pi for jobs; hermes for services |
-| target | `{kind:"local"}`, `{kind:"ssh",host:"operator@host"}`, or `{kind:"proxmox-lxc",proxmox:"operator@host",vmid:"100"}` |
-| workload | Jobs: `{template:"react-solo"}`, `{template:"react-app"}` or `{template:"parallel-engineering-pod"}`; services: `{service:"aurum"}` |
-| model | `{provider:"openrouter",fallback:"disabled"}` or `{provider:"local",fallback:"disabled"}` |
-| secretRefs | `{model:"op://VAULT/ITEM/FIELD"}` for OpenRouter; `{model:null}` for local inference |
+| target | `{kind:"local"}`, `{kind:"ssh",host:"operator@host"}`, `{kind:"proxmox-lxc",proxmox:"operator@host",vmid:"100"}`, or `{kind:"engine",name:"local"}` (a Bimo engine target name) |
+| workload | Jobs: `{template:"react-solo"}`, `{template:"react-app"}` or `{template:"parallel-engineering-pod"}`; services: `{service:"aurum"}`; engine Hermes services: `{config:"DIR"}`, a Hermes configuration directory relative to the manifest |
+| model | `{provider:"openrouter",fallback:"disabled"}` or `{provider:"local",fallback:"disabled"}`; engine targets accept OpenRouter only |
+| secretRefs | `{model:"op://VAULT/ITEM/FIELD"}` for OpenRouter; `{model:null}` for local inference; engine targets: `{model:"TENANT/NAME"}`, a handle the engine resolves from its target's secret source |
 | limits | memoryMiB: integer 128–65536; cpus: finite number 0.25–64; maxConcurrentRuns: integer 1–8; runTimeoutSeconds: integer 1–7200 |
 
 Host and VM identifiers follow the existing deployment target restrictions.
@@ -34,6 +36,11 @@ runs for this agent, not the number of workers inside an engineering pod.
 runTimeoutSeconds bounds a requested job or service request, not the lifetime
 of a persistent gateway. Aggregate host admission and service request handling
 must enforce these policies before they become operational.
+
+An `engine` target runs Hermes services only, and `bimo plan` does not read the
+engine's targets file: the target name, the secret handle and the
+configuration directory are checked by `bimo agent validate FILE`. See
+[the engine bridge](engine.md#from-a-deployment-manifest-to-an-engine-agent).
 
 ## Receipt and errors
 
@@ -50,7 +57,8 @@ Malformed JSON errors omit parser excerpts to avoid echoing input contents.
 With --json, failures produce one existing Bimo error envelope and nonzero exit.
 A valid plan exits zero even when execution is unsupported, because the command
 certifies only the intent schema. Automation must inspect executionSupported
-and must not treat exit zero as permission to deploy.
+and must not treat exit zero as permission to deploy. executionSupported is
+true only for engine targets.
 
 The reader accepts a regular non-symlink file, at most 64 KiB, with a two-second
 read deadline and capped allocation. It rejects directories, named pipes,

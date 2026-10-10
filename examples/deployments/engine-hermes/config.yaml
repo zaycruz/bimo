@@ -1,0 +1,8 @@
+model:
+  default: openai/gpt-4o-mini
+  provider: openrouter
+# The API server is the task surface the Bimo engine probes and clients call.
+# Keep its toolsets explicit: the browser toolset makes Hermes download
+# Node.js and a browser on first use, which a client agent does not need.
+platform_toolsets:
+  api_server: [web, file, memory, todo]

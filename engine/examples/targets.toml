@@ -1,0 +1,30 @@
+schema_version = 1
+default_target = "local"
+
+# A proxmox target for the U5 driver and U6 warm pool. Every driver field
+# below is required before the driver touches the cluster; without them the
+# target still lists and plans. The token is read from token_env only
+# (format user@realm!tokenid=secret) and is never written anywhere.
+[[targets]]
+kind = "proxmox"
+name = "homelab-lxc"
+api_url = "https://pve-node-a:8006/api2/json"
+token_env = "BIMO_PROXMOX_TOKEN"
+cluster = "homelab"
+node = "pve-node-a"                 # clones are made on the template's node
+guest_type = "lxc"              # the driver creates lxc guests only
+artifact_lifecycle = "ephemeral"
+pool = "pool-monolith-test"     # resource pool the token is scoped to
+template_id = 9000              # golden template (scripts/build-template.sh)
+vmid_range = [9100, 9199]       # the driver refuses any other VMID
+bridge = "vmbr0"
+address_range = "192.0.2.230-192.0.2.238"  # static, no DHCP
+prefix_len = 25
+gateway = "192.0.2.129"
+tls_ca_file = "/path/to/pve-root-ca.pem"  # or tls_verify = false
+warm_pool_size = 2              # ready guests per tenant, at most 4
+guest_memory_mb = 256
+bind_port = 7070                # bind agent in the template
+# Per-tenant segments (KTD5). When set, a tenant without a VLAN is refused.
+# [targets.tenant_vlans]
+# acme = 210

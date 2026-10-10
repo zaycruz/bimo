@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "clientId": "demo",
+  "agentId": "hermes",
+  "lifecycle": "service",
+  "runtime": "hermes",
+  "target": {
+    "kind": "engine",
+    "name": "local"
+  },
+  "workload": {
+    "config": "engine-hermes"
+  },
+  "model": {
+    "provider": "openrouter",
+    "fallback": "disabled"
+  },
+  "secretRefs": {
+    "model": "demo/openrouter"
+  },
+  "limits": {
+    "memoryMiB": 512,
+    "cpus": 1,
+    "maxConcurrentRuns": 1,
+    "runTimeoutSeconds": 120
+  }
+}

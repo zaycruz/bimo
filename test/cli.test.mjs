@@ -767,7 +767,7 @@ test("explicit Proxmox LXC target wraps Docker with pct exec", async t => {
     "logs",
     "--deployment", "fleet-demo",
     "--target", "proxmox-lxc",
-    "--proxmox", "root@pve-05",
+    "--proxmox", "root@pve-node-c",
     "--vmid", "212",
     "--image", "bimo-workflow:test",
   ], { env: tools.env });
@@ -1896,7 +1896,7 @@ test("doctor checks ssh targets and credential readability without printing secr
 test("doctor checks proxmox reachability, guest status, and in-guest docker", async t => {
   const tools = await fakeDeployTools(t);
   const result = await invoke([
-    "doctor", "--target", "proxmox-lxc", "--proxmox", "root@pve-05", "--vmid", "212", "--json",
+    "doctor", "--target", "proxmox-lxc", "--proxmox", "root@pve-node-c", "--vmid", "212", "--json",
   ], { env: tools.env });
   assert.equal(result.code, 0, result.stderr);
   const report = JSON.parse(result.stdout);
@@ -1911,7 +1911,7 @@ test("doctor checks proxmox reachability, guest status, and in-guest docker", as
   assert.ok(commands.some(command => command.slice(0, 5).join(" ") === "pct exec 212 -- docker"));
 
   const stopped = await invoke([
-    "doctor", "--target", "proxmox-lxc", "--proxmox", "root@pve-05", "--vmid", "212", "--json",
+    "doctor", "--target", "proxmox-lxc", "--proxmox", "root@pve-node-c", "--vmid", "212", "--json",
   ], { env: { ...tools.env, BIMO_TEST_PCT_STATUS: "status: stopped\n" } });
   assert.equal(stopped.code, 1);
   const stoppedReport = JSON.parse(stopped.stdout);

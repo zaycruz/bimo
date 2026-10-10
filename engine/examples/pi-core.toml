@@ -1,0 +1,9 @@
+name = "pi-core-example"
+trusted_executable_roots = ["/usr/bin"]
+[[pods]]
+name = "agent"
+engine = "pi-core"
+command = ["/usr/bin/env", "node", "workers/pi-core/dist/main.js"]
+allowed_env = ["PATH", "MODEL_API_KEY"]
+capabilities = ["factory.read_state"]
+config = { provider = "operator-selected", model = "operator-selected" }

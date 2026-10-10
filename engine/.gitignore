@@ -1,0 +1,8 @@
+/target
+.omx/
+graphify-out/
+# Machine-local engine state: agents, warm-pool state, live target, specs,
+# test reports (.monolith/ is the pre-rename location).
+/.bimo/
+/.monolith/
+__pycache__/

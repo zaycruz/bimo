@@ -31,8 +31,11 @@ credential references, and requested limits. It reads one local JSON file
 (at most 64 KiB) and returns its SHA-256 digest. It does not contact Docker,
 SSH, a model provider, or 1Password, and does not create deployment state.
 
-Every result declares `planOnly: true` and `executionSupported: false`:
-this command does not execute even an existing job workflow. Hermes services,
+Every result declares `planOnly: true`. For the targets above it also declares
+`executionSupported: false`: this command does not execute even an existing job
+workflow. A manifest whose target kind is `engine` reports
+`executionSupported: true` and runs through `bimo agent apply` (see
+[the Bimo engine](#the-bimo-engine)). Hermes services,
 local inference, persistent client identity, and aggregate capacity enforcement
 are not implemented by this preview. Valid limits are requests, not resource
 reservations or proof of client isolation. The Aurum example is a test plan
@@ -208,6 +211,43 @@ filesystem, no direct network egress, and no credential in its environment;
 the OpenRouter key stayed inside a run-scoped credential gateway. The
 container is already removed. The [security boundary](#security-boundary)
 section has the full posture.
+
+## The Bimo engine
+
+The Bimo engine ([`engine/`](engine/README.md), binary `bimo-engine`) is
+Bimo's Rust runtime fabric for long-running agents. It places spec-declared
+Hermes and eve agents on a named target, the local machine or a Proxmox
+cluster through its API, keeps a per-tenant warm pool of guests, and runs each
+agent behind its own credential proxy so the agent holds only placeholders for
+its secrets. `bimo` drives it:
+
+```bash
+cargo build --release --manifest-path engine/Cargo.toml
+export BIMO_SECRET_DEMO__OPENROUTER=...        # read by the local target; never put it in a file
+bimo plan examples/deployments/engine-hermes.json
+bimo agent apply examples/deployments/engine-hermes.json   # renders .bimo/specs/demo-hermes.toml, then applies it
+bimo agent status demo-hermes
+bimo agent logs demo-hermes
+bimo agent destroy demo-hermes
+```
+
+`bimo agent validate|plan|apply` also take an engine spec (`.toml`) directly.
+`bimo pool` and `bimo proxy` manage a Proxmox target's warm pool and per-tenant
+proxy guest, and `bimo engine ARGS...` passes any arguments to the engine
+unchanged (`bimo engine help`). With `--output json`, every engine command
+prints one `bimo.cli/v1` envelope. Proxmox targets live in
+`.bimo/targets.toml`, which stays out of git; the token is read from the
+variable the target names.
+
+The engine's measured readiness and isolation are in the
+[v0.7.0 release notes](docs/releases/v0.7.0.md). [docs/engine.md](docs/engine.md)
+covers the seam, the manifest bridge and the `BIMO_*` names;
+the engine's own docs cover the
+[agent spec](engine/docs/agent-spec.md),
+[CLI envelopes](engine/docs/agent-cli.md),
+[credential boundary](engine/docs/credential-boundary.md) and
+[Proxmox template](engine/templates/README.md). The npm package does not
+include the engine.
 
 ## Runtimes and targets
 
@@ -461,7 +501,7 @@ credential resolvability, reporting pass, fail, or skip per check and exiting
 non-zero on any failure. Every command accepts the same target flags as deploy.
 
 ```bash
-bimo runs --deployment fleet-demo --proxmox root@pve-05 --vmid 113
+bimo runs --deployment fleet-demo --proxmox root@pve-node-c --vmid 113
 bimo status --deployment fleet-demo --host deploy@docker-host.example --json
 bimo logs --deployment fleet-demo --follow
 bimo doctor --deployment fleet-demo --host deploy@docker-host.example \
@@ -547,11 +587,11 @@ See [the organizer how-to](docs/organize.md) and the runnable
 [small-app](examples/prompts/small-app.md) and
 [parallel-pod](examples/prompts/parallel-engineering-pod.md) prompts.
 
-### Deploy through `pve-05`
+### Deploy through `pve-node-c`
 
 `--proxmox` connects to the Proxmox node over SSH and runs Docker inside the
 selected LXC through `pct exec`. The verified demo target is the dedicated,
-unprivileged Docker LXC `113` on `pve-05`:
+unprivileged Docker LXC `113` on `pve-node-c`:
 
 ```bash
 BIMO_PACKAGE_ROOT="${BIMO_PACKAGE_ROOT:-$(npm root --global)/bimo-workflow}"
@@ -564,7 +604,7 @@ POD_PLAN="$(bimo -p "$POD_ASSIGNMENT" \
   -n 3 \
   --deployment pod-plan-demo \
   --target proxmox-lxc \
-  --proxmox root@pve-05 \
+  --proxmox root@pve-node-c \
   --vmid 113 \
   --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
   --json)"
@@ -574,7 +614,7 @@ printf '%s\n' "$POD_PLAN" | jq .
 bimo deploy parallel-engineering-pod \
   --deployment pod-demo \
   --target proxmox-lxc \
-  --proxmox root@pve-05 \
+  --proxmox root@pve-node-c \
   --vmid 113 \
   --task-file "$POD_TASK_FILE" \
   --secret-ref 'op://VAULT/ITEM/OPENROUTER_KEY' \
@@ -603,7 +643,7 @@ Read the pod's structured events using the run ID returned by deploy:
 ```bash
 bimo logs \
   --deployment pod-demo \
-  --proxmox root@pve-05 \
+  --proxmox root@pve-node-c \
   --vmid 113 \
   --run <RUN_ID> \
   --json
@@ -613,12 +653,12 @@ Deploy the sequential three-role workflow independently:
 
 ```bash
 BIMO_PACKAGE_ROOT="${BIMO_PACKAGE_ROOT:-$(npm root --global)/bimo-workflow}"
-LXC_ADDRESS='10.200.160.143' # Replace this when targeting another LXC.
+LXC_ADDRESS='192.0.2.143' # Replace this when targeting another LXC.
 
 bimo deploy react-app \
   --deployment fleet-demo \
   --target proxmox-lxc \
-  --proxmox root@pve-05 \
+  --proxmox root@pve-node-c \
   --vmid 113 \
   --task-file "$BIMO_PACKAGE_ROOT/examples/fleet-demo.md" \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
@@ -631,7 +671,7 @@ Deploy the sequential one-role template independently:
 bimo deploy react-solo \
   --deployment solo-demo \
   --target proxmox-lxc \
-  --proxmox root@pve-05 \
+  --proxmox root@pve-node-c \
   --vmid 113 \
   --task-file "$BIMO_PACKAGE_ROOT/examples/solo-demo.md" \
   --secret-ref 'op://VAULT/ITEM/FIELD' \
@@ -644,12 +684,12 @@ Read the latest sequential human log or one run's JSON events:
 ```bash
 bimo logs \
   --deployment fleet-demo \
-  --proxmox root@pve-05 \
+  --proxmox root@pve-node-c \
   --vmid 113
 
 bimo logs \
   --deployment fleet-demo \
-  --proxmox root@pve-05 \
+  --proxmox root@pve-node-c \
   --vmid 113 \
   --run <RUN_ID> \
   --json
@@ -812,11 +852,14 @@ Never put a credential in a task, prompt, workflow file, repository file,
   workspace.
 - OpenRouter is the only provider. There is no provider discovery, marketplace,
   generic DAG, manager service, inter-agent chat, message bus, or graph runtime.
-- Deployment uses the local Docker daemon, Docker over SSH, or Docker inside a
-  Proxmox LXC through `pct exec`. There is no Proxmox API adapter, native Linux
-  LXC lifecycle manager, Apple `container` adapter, Seatbelt runtime, Helm,
-  Terraform, Kubernetes scheduler, multi-host placement, HA, or autoscaling
-  layer.
+- Workflow deployment uses the local Docker daemon, Docker over SSH, or Docker
+  inside a Proxmox LXC through `pct exec`. Only the Bimo engine uses the
+  Proxmox API, and only for spec-declared agents. There is no native Linux
+  LXC lifecycle manager for workflows, Apple `container` adapter, Seatbelt
+  runtime, Helm, Terraform, Kubernetes scheduler, multi-host placement, HA, or
+  autoscaling layer.
+- The engine runs Hermes services from deployment manifests; eve agents need an
+  engine spec. Manifest limits are not applied to engine agents.
 - Deployment targets are a closed built-in registry, not executable third-party
   plugins. Templates remain data-only packs. A plugin ABI would add lifecycle,
   trust, and compatibility surface before Bimo has a second container runtime
@@ -832,7 +875,10 @@ Never put a credential in a task, prompt, workflow file, repository file,
 
 ## Release verification
 
-The release gate runs the full Node test suite, package manifest verification,
+The release gate runs the full Node test suite, the engine's `cargo test`
+(live Proxmox suites skip without `BIMO_PROXMOX_LIVE=1`), the
+`bimo` to `bimo-engine` end-to-end proof (`node test/engine-proof.mjs`),
+package manifest verification,
 Docker image build, all template validations, and the bundled starter offline
 test, build, and smoke commands. The Bimo brand contract also rejects any
 legacy product identifier in the shipped package. Exact results are attached to

@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bimo:schema:agent-cli:v1",
+  "title": "bimo agent CLI envelope, v1",
+  "description": "Every 'bimo agent <command> --output json' prints exactly one object matching this schema on stdout. Branch on ok and error.code; never parse error.message.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "command", "ok", "changed", "result", "error", "next", "idempotency_key"],
+  "properties": {
+    "schema": { "const": "bimo.cli/v1" },
+    "command": { "type": "string" },
+    "ok": { "type": "boolean" },
+    "changed": { "type": "boolean" },
+    "next": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "idempotency_key": { "type": ["string", "null"], "pattern": "^[0-9a-f]{32}$" },
+    "result": true,
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": {
+              "enum": [
+                "spec_invalid",
+                "target_unknown",
+                "target_unavailable",
+                "tenant_conflict",
+                "agent_not_found",
+                "runtime_unavailable",
+                "source_failed",
+                "substrate_failed",
+                "substrate_refused",
+                "probe_failed",
+                "runtime_state_invalid",
+                "secret_unresolved",
+                "proxy_failed",
+                "state_failed",
+                "usage"
+              ]
+            },
+            "message": { "type": "string", "minLength": 1 },
+            "details": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["field", "message"],
+                "properties": {
+                  "field": { "type": "string" },
+                  "message": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": true } } },
+      "then": {
+        "properties": { "error": { "type": "null" } },
+        "allOf": [
+          {
+            "if": { "properties": { "command": { "const": "validate" } } },
+            "then": { "properties": { "result": { "$ref": "#/$defs/validate" } } }
+          },
+          {
+            "if": { "properties": { "command": { "const": "plan" } } },
+            "then": { "properties": { "result": { "$ref": "#/$defs/plan" } } }
+          },
+          {
+            "if": { "properties": { "command": { "const": "apply" } } },
+            "then": { "properties": { "result": { "$ref": "#/$defs/apply" } } }
+          },
+          {
+            "if": { "properties": { "command": { "const": "status" } } },
+            "then": { "properties": { "result": { "$ref": "#/$defs/status" } } }
+          },
+          {
+            "if": { "properties": { "command": { "const": "logs" } } },
+            "then": { "properties": { "result": { "$ref": "#/$defs/logs" } } }
+          },
+          {
+            "if": { "properties": { "command": { "const": "destroy" } } },
+            "then": { "properties": { "result": { "$ref": "#/$defs/destroy" } } }
+          },
+          {
+            "if": { "properties": { "command": { "const": "list" } } },
+            "then": { "properties": { "result": { "type": "array", "items": { "$ref": "#/$defs/status" } } } }
+          }
+        ]
+      },
+      "else": {
+        "properties": {
+          "error": { "type": "object" },
+          "result": { "type": "null" },
+          "changed": { "const": false }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "name": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$" },
+    "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "key": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "resource": {
+      "type": "object",
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "enum": ["agent_process", "proxy_process", "guest", "relay_process", "proxy_route"] },
+        "id": { "type": "string", "minLength": 1 },
+        "process": {
+          "type": "object",
+          "required": ["pid", "process_group", "session", "launch_fingerprint", "start_time"]
+        },
+        "guest": {
+          "type": "object",
+          "required": ["node", "vmid", "guest_type"]
+        }
+      }
+    },
+    "remain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "resource", "reason"],
+      "properties": {
+        "target": { "type": "string" },
+        "resource": { "$ref": "#/$defs/resource" },
+        "reason": { "type": "string" }
+      }
+    },
+    "validate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tenant_id", "runtime", "substrate", "fingerprint", "secrets", "egress_allow"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "tenant_id": { "$ref": "#/$defs/name" },
+        "runtime": { "type": "string" },
+        "substrate": { "type": "string" },
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "secrets": { "type": "integer", "minimum": 0 },
+        "egress_allow": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "action", "reason", "changes", "current_generation", "fingerprint", "idempotency_key", "remains"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "action": { "enum": ["create", "replace", "restart", "none"] },
+        "reason": { "type": "string" },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["field", "from", "to"],
+            "properties": { "field": { "type": "string" }, "from": true, "to": true }
+          }
+        },
+        "current_generation": { "type": ["integer", "null"] },
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "idempotency_key": { "$ref": "#/$defs/key" },
+        "remains": { "type": "array", "items": { "$ref": "#/$defs/remain" } }
+      }
+    },
+    "apply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tenant_id", "runtime", "target", "generation", "fingerprint", "idempotency_key", "endpoint", "ready_ms", "first_task_id", "resources", "recovered", "retired", "rotated"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "tenant_id": { "$ref": "#/$defs/name" },
+        "runtime": { "type": "string" },
+        "target": { "type": "string" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "idempotency_key": { "$ref": "#/$defs/key" },
+        "endpoint": { "type": ["string", "null"] },
+        "ready_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "first_task_id": { "type": ["string", "null"] },
+        "resources": { "type": "array", "items": { "$ref": "#/$defs/resource" } },
+        "recovered": { "type": "array", "items": { "$ref": "#/$defs/remain" } },
+        "retired": { "type": "array", "items": { "$ref": "#/$defs/resource" } },
+        "rotated": { "type": "array", "items": { "type": "string" }, "description": "Secret env names whose values were rotated in the running proxy by reload, without a restart." },
+        "phases": {
+          "type": "array",
+          "description": "Where ready_ms went: each apply step in order, timed from the request. Names include validate, source, prepare, proxy_plan, bundle, proxy_start (local), proxy_ready (proxmox: the tenant proxy guest's health check), claim_warm|claim_pooled|claim_cold_clone, upload, route (proxmox, warm: the agent's route in the proxy guest), go, runtime_start and 'first_task_accepted after N probe(s)'. relay_start appears only in records from before the proxy guest.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "at_ms", "ms"],
+            "properties": {
+              "phase": { "type": "string" },
+              "at_ms": { "type": "number" },
+              "ms": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tenant_id", "runtime", "target", "status", "generation", "fingerprint", "endpoint", "ready_ms", "resources", "remains"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "tenant_id": { "type": ["string", "null"] },
+        "runtime": { "type": ["string", "null"] },
+        "target": { "type": ["string", "null"] },
+        "status": { "enum": ["ready", "degraded", "destroyed", "absent"] },
+        "generation": { "type": ["integer", "null"] },
+        "fingerprint": { "type": ["string", "null"] },
+        "endpoint": { "type": ["string", "null"] },
+        "ready_ms": { "type": ["integer", "null"] },
+        "resources": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/resource" },
+              { "type": "object", "required": ["alive"], "properties": { "alive": { "type": "boolean" } } }
+            ]
+          }
+        },
+        "remains": { "type": "array", "items": { "$ref": "#/$defs/remain" } }
+      }
+    },
+    "logs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "stream", "text"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "stream": { "enum": ["agent", "egress", "journal"] },
+        "text": { "type": "string" }
+      }
+    },
+    "destroy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "destroyed", "recovered"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "destroyed": { "type": "array", "items": { "$ref": "#/$defs/resource" } },
+        "recovered": { "type": "array", "items": { "$ref": "#/$defs/remain" } }
+      }
+    }
+  }
+}

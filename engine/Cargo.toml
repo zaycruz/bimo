@@ -1,0 +1,27 @@
+[package]
+name = "bimo-engine"
+version = "0.7.0"
+edition = "2024"
+description = "The Bimo engine: a runtime fabric that places spec-declared agents on local and Proxmox targets."
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "bimo-engine"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1.4"
+sha2 = "0.10.9"
+fs2 = "0.4.3"
+libc = "0.2.175"
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+tiny_http = "0.12"
+rcgen = "0.14"
+x509-parser = "0.18.1"
+
+[dev-dependencies]
+jsonschema = "0.58.5"
+serde_json = "1.0"

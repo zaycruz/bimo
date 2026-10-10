@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# The example manifests name their workers relative to the engine directory.
+cd "$ROOT"
+STATE=$(mktemp -d "${TMPDIR:-/tmp}/monolith-worker.XXXXXX")
+trap '"$ROOT/target/debug/bimo-engine" destroy "$STATE" >/dev/null 2>&1 || true; rm -rf "$STATE"' EXIT
+cargo build --manifest-path "$ROOT/Cargo.toml"
+"$ROOT/target/debug/bimo-engine" validate "$ROOT/examples/llm-demo.toml"
+"$ROOT/target/debug/bimo-engine" plan "$ROOT/examples/llm-demo.toml" --state-dir "$STATE"
+"$ROOT/target/debug/bimo-engine" apply "$ROOT/examples/llm-demo.toml" --state-dir "$STATE"
+"$ROOT/target/debug/bimo-engine" send "$STATE" --from planner --to worker --kind work.requested --payload '{"task":"acceptance"}'
+sleep 1
+"$ROOT/target/debug/bimo-engine" status "$STATE"
+test -n "$(find "$STATE/terminals" -type f -print -quit)"
+"$ROOT/target/debug/bimo-engine" destroy "$STATE"
