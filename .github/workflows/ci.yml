@@ -84,3 +84,30 @@ jobs:
           for file in bin/bimo src/*.mjs test/*.mjs; do
             node --check "$file"
           done
+  engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install the Rust toolchain and uv
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          pipx install uv==0.12.15
+      - run: cargo build --locked --manifest-path engine/Cargo.toml
+      - name: Test the engine (live Proxmox suites skip without BIMO_PROXMOX_LIVE=1)
+        run: cargo test --locked --manifest-path engine/Cargo.toml
+      - name: Run the engine acceptance scripts
+        run: |
+          sh engine/tests/acceptance_worker.sh
+          sh engine/tests/acceptance_fabric.sh
+      - name: Prove bimo drives the engine end to end
+        run: node test/engine-proof.mjs
