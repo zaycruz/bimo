@@ -1,3 +1,4 @@
+pub mod bimo;
 pub mod capabilities;
 pub mod durability;
 pub mod fabric;

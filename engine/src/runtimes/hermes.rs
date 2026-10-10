@@ -30,7 +30,7 @@ impl RuntimeAdapter for Hermes {
     }
 
     fn launch(&self, context: &LaunchContext<'_>) -> Result<LaunchRecipe, String> {
-        let program = find_program("MONOLITH_HERMES_BIN", "hermes")?;
+        let program = find_program("HERMES_BIN", "hermes")?;
         let mut env = BTreeMap::new();
         env.insert(
             "HERMES_HOME".to_owned(),

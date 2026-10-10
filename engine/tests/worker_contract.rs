@@ -6,7 +6,7 @@
 //! Integration tests run with the package root as the working directory, so
 //! the fixture paths are relative to the crate root.
 
-use monolith::protocol::{self, ControlState, Direction, FrameType, Machine};
+use bimo_engine::protocol::{self, ControlState, Direction, FrameType, Machine};
 
 fn terminal_frame(payload: serde_json::Value) -> String {
     serde_json::json!({

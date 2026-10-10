@@ -306,7 +306,7 @@ impl crate::spec::SpecEnvironment for TargetCatalog {
         let target = self.resolve(Some(substrate))?;
         if target.source == TargetSource::Reserved {
             return Err(format!(
-                "substrate '{substrate}' is not configured; declare a named target in .monolith/targets.toml (see examples/targets.toml)"
+                "substrate '{substrate}' is not configured; declare a named target in .bimo/targets.toml (see examples/targets.toml)"
             ));
         }
         Ok(target.secret_source)
@@ -353,7 +353,7 @@ fn targets_schema() -> u32 {
 }
 
 fn default_targets_path() -> PathBuf {
-    PathBuf::from(".monolith").join("targets.toml")
+    crate::bimo::local_path("targets.toml")
 }
 
 fn load_targets_file(path: &Path) -> Result<TargetsFile, String> {
@@ -489,7 +489,7 @@ fn reserved_target(kind: DeploymentTarget) -> ResolvedTarget {
             "ssh is reserved for a future remote host adapter; configure a named target when that driver exists".to_owned()
         }
         DeploymentTarget::Proxmox => {
-            "proxmox is reserved for configured cluster targets; add a named proxmox target in .monolith/targets.toml and a deploy adapter before using it".to_owned()
+            "proxmox is reserved for configured cluster targets; add a named proxmox target in .bimo/targets.toml and a deploy adapter before using it".to_owned()
         }
     };
     ResolvedTarget {

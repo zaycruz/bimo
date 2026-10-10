@@ -62,7 +62,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 fn node() -> Result<PathBuf, String> {
-    find_program("MONOLITH_NODE_BIN", "node")
+    find_program("NODE_BIN", "node")
 }
 
 fn base_env(node: &Path, home: &Path) -> BTreeMap<String, String> {
@@ -146,7 +146,7 @@ impl RuntimeAdapter for Eve {
             return Err("the eve source has no package-lock.json; commit one so installs are reproducible".to_owned());
         }
         let mut env = base_env(&node, context.home_dir);
-        let cache = std::env::var("MONOLITH_NPM_CACHE")
+        let cache = crate::bimo::var("NPM_CACHE")
             .unwrap_or_else(|_| context.home_dir.join(".npm").to_string_lossy().into_owned());
         env.insert("npm_config_cache".to_owned(), cache);
         env.insert("npm_config_update_notifier".to_owned(), "false".to_owned());

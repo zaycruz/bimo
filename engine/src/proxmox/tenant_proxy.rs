@@ -252,11 +252,11 @@ fn proxy_error(message: impl Into<String>) -> FabricError {
     FabricError::new(codes::PROXY_FAILED, message)
 }
 
-/// Where the Linux iron-proxy build comes from: `MONOLITH_IRON_PROXY_GUEST_BIN`,
+/// Where the Linux iron-proxy build comes from: `BIMO_IRON_PROXY_GUEST_BIN`,
 /// else the pinned download `scripts/e2e-tools.sh` makes. Its SHA-256 must
 /// match the pinned build.
 pub fn guest_iron_proxy() -> Result<PathBuf, FabricError> {
-    let path = std::env::var_os("MONOLITH_IRON_PROXY_GUEST_BIN")
+    let path = crate::bimo::var_os("IRON_PROXY_GUEST_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(IRON_PROXY_LINUX_DEFAULT));
     let missing = || {
@@ -264,7 +264,7 @@ pub fn guest_iron_proxy() -> Result<PathBuf, FabricError> {
             "the proxy guest needs iron-proxy 0.52.0 for linux_amd64, and '{}' is not a file",
             path.display()
         ))
-        .next("run sh scripts/e2e-tools.sh (it prints IRON_PROXY_LINUX_BIN) and set MONOLITH_IRON_PROXY_GUEST_BIN to that path")
+        .next("run sh scripts/e2e-tools.sh (it prints IRON_PROXY_LINUX_BIN) and set BIMO_IRON_PROXY_GUEST_BIN to that path")
     };
     let mut file = fs::File::open(&path).map_err(|_| missing())?;
     let mut hasher = Sha256::new();
@@ -282,7 +282,7 @@ pub fn guest_iron_proxy() -> Result<PathBuf, FabricError> {
             "'{}' is not the pinned iron-proxy 0.52.0 linux_amd64 build (sha256 {got})",
             path.display()
         ))
-        .next("point MONOLITH_IRON_PROXY_GUEST_BIN at the IRON_PROXY_LINUX_BIN that scripts/e2e-tools.sh prints"));
+        .next("point BIMO_IRON_PROXY_GUEST_BIN at the IRON_PROXY_LINUX_BIN that scripts/e2e-tools.sh prints"));
     }
     Ok(path)
 }
@@ -575,7 +575,7 @@ impl ProxmoxDriver {
                         codes::USAGE,
                         format!("tenant '{tenant}' proxy guest {} still serves {routes} route(s)", record.vmid),
                     )
-                    .next("destroy the tenant's agents first (monolith agent destroy <name>), or pass --force"));
+                    .next("destroy the tenant's agents first (bimo agent destroy <name>), or pass --force"));
                 }
             }
         }
@@ -759,7 +759,7 @@ impl ProxmoxDriver {
         Err(proxy_error(format!(
             "could not remove route {route} from proxy guest {vmid}: the guest runs but does not answer"
         ))
-        .next("retry the destroy; if the proxy guest is wedged, monolith proxy down --force"))
+        .next("retry the destroy; if the proxy guest is wedged, bimo proxy down --force"))
     }
 
     /// Send rotated secret values to the agent's route; its iron-proxy
@@ -875,7 +875,7 @@ pub fn check_bind_api(status: &Value, vmid: u32, target: &str) -> Result<(), Fab
         ),
     )
     .next("rebuild the golden template with scripts/build-template.sh (templates/README.md, 'Build it')")
-    .next(format!("monolith pool drain --target {target}")))
+    .next(format!("bimo pool drain --target {target}")))
 }
 
 fn control_health(address: Ipv4Addr, timeout: Duration) -> Result<Value, String> {

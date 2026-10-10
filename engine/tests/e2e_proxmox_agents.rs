@@ -37,7 +37,7 @@
 mod common;
 
 use common::live_gate::{gate, live_driver, pool_members, repo, write_report, Gate, Sweeper};
-use monolith::proxmox::delivery::GuestChannel;
+use bimo_engine::proxmox::delivery::GuestChannel;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -80,7 +80,7 @@ struct Cli {
 
 impl Cli {
     fn run(&self, args: &[&str]) -> (i32, Value) {
-        let output = Command::new(env!("CARGO_BIN_EXE_monolith"))
+        let output = Command::new(env!("CARGO_BIN_EXE_bimo-engine"))
             .arg("agent")
             .args(args)
             .args(["--output", "json", "--state-root"])
@@ -103,7 +103,7 @@ impl Cli {
 
 impl Cli {
     fn proxy(&self, args: &[&str]) -> (i32, Value) {
-        let output = Command::new(env!("CARGO_BIN_EXE_monolith"))
+        let output = Command::new(env!("CARGO_BIN_EXE_bimo-engine"))
             .arg("proxy")
             .args(args)
             .args(["--output", "json", "--targets-config"])
@@ -121,7 +121,7 @@ impl Cli {
     }
 
     fn pool(&self, args: &[&str]) -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_monolith"))
+        let output = Command::new(env!("CARGO_BIN_EXE_bimo-engine"))
             .arg("pool")
             .args(args)
             .args(["--output", "json", "--targets-config"])
@@ -130,7 +130,7 @@ impl Cli {
             .output()
             .expect("could not run monolith");
         let envelope: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
-        assert!(output.status.success(), "monolith pool {args:?} failed: {envelope:#}");
+        assert!(output.status.success(), "bimo pool {args:?} failed: {envelope:#}");
         envelope
     }
 }
@@ -307,7 +307,7 @@ fn split_proxy_url(url: &str) -> (String, String) {
     (userinfo.to_owned(), host.trim_end_matches('/').to_owned())
 }
 
-/// The tenant's proxy guest as `monolith proxy status` shows it.
+/// The tenant's proxy guest as `bimo proxy status` shows it.
 fn proxy_view(cli: &Cli, target: &str, tenant: &str) -> Value {
     let (code, envelope) = cli.proxy(&["status", "--target", target, "--tenant", tenant]);
     assert_eq!(code, 0, "proxy status failed: {envelope:#}");
@@ -328,7 +328,7 @@ struct Running {
 #[allow(clippy::too_many_arguments)]
 fn apply_and_check(
     cli: &mut Cli,
-    driver: &monolith::proxmox::ProxmoxDriver,
+    driver: &bimo_engine::proxmox::ProxmoxDriver,
     target: &str,
     runtime: &str,
     name: &str,
@@ -536,7 +536,7 @@ fn apply_and_check(
 }
 
 /// Destroy an agent and check its guest and its route are gone.
-fn destroy_and_check(cli: &mut Cli, driver: &monolith::proxmox::ProxmoxDriver, target: &str, tenant: &str, running: &mut Running) {
+fn destroy_and_check(cli: &mut Cli, driver: &bimo_engine::proxmox::ProxmoxDriver, target: &str, tenant: &str, running: &mut Running) {
     let (code, destroyed) = cli.run(&["destroy", &running.name]);
     assert_eq!(code, 0, "{destroyed:#}");
     assert!(driver.vmid_free(running.vmid).unwrap(), "guest {} is gone", running.vmid);
@@ -549,7 +549,7 @@ fn destroy_and_check(cli: &mut Cli, driver: &monolith::proxmox::ProxmoxDriver, t
 
 /// Look for tailscaled among the proxy guest's processes (through its bind
 /// agent; nothing from the proxy guest is written to disk).
-fn tailscaled_in(driver: &monolith::proxmox::ProxmoxDriver, tenant: &str) -> Value {
+fn tailscaled_in(driver: &bimo_engine::proxmox::ProxmoxDriver, tenant: &str) -> Value {
     let settings = driver.settings().unwrap();
     let Some(record) = driver.proxy_record(tenant).unwrap() else {
         return json!({"error": "no proxy record"});
@@ -615,15 +615,15 @@ fn eve_and_hermes_run_in_proxmox_guests_and_answer_without_the_real_secret() {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let mut env = BTreeMap::new();
-    env.insert("MONOLITH_IRON_PROXY_BIN".to_owned(), tools["IRON_PROXY_BIN"].clone());
-    env.insert("MONOLITH_IRON_PROXY_GUEST_BIN".to_owned(), tools["IRON_PROXY_LINUX_BIN"].clone());
-    env.insert("MONOLITH_NODE_BIN".to_owned(), format!("{}/node", tools["NODE_BIN_DIR"]));
+    env.insert("BIMO_IRON_PROXY_BIN".to_owned(), tools["IRON_PROXY_BIN"].clone());
+    env.insert("BIMO_IRON_PROXY_GUEST_BIN".to_owned(), tools["IRON_PROXY_LINUX_BIN"].clone());
+    env.insert("BIMO_NODE_BIN".to_owned(), format!("{}/node", tools["NODE_BIN_DIR"]));
     env.insert(
-        "MONOLITH_NPM_CACHE".to_owned(),
+        "BIMO_NPM_CACHE".to_owned(),
         repo().join("target/e2e-tools/npm-cache").to_string_lossy().into_owned(),
     );
-    env.insert("MONOLITH_READY_TIMEOUT_MS".to_owned(), "300000".to_owned());
-    env.insert("MONOLITH_POOL_REFILL".to_owned(), "0".to_owned());
+    env.insert("BIMO_READY_TIMEOUT_MS".to_owned(), "300000".to_owned());
+    env.insert("BIMO_POOL_REFILL".to_owned(), "0".to_owned());
     // Tenant B's own handle resolves to the same key, so B can answer too.
     env.insert(SECRET_ENV_B.to_owned(), secret.clone());
     let mut cli = Cli {

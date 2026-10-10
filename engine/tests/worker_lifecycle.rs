@@ -7,8 +7,8 @@
 //! startup, and the crash fires on the first delivery. A restart therefore
 //! replays without crashing again.
 
-use monolith::runtime::process_is_alive;
-use monolith::state::{self, PodStatus};
+use bimo_engine::runtime::process_is_alive;
+use bimo_engine::state::{self, PodStatus};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn monolith() -> &'static str {
-    env!("CARGO_BIN_EXE_monolith")
+    env!("CARGO_BIN_EXE_bimo-engine")
 }
 
 fn run_with_env(args: &[&str], envs: &[(&str, &str)]) -> (bool, String) {

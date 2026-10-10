@@ -404,7 +404,7 @@ pub fn start_local_proxy(
     journal.created(&proxy)?;
     wait_for_port(ports.tunnel, &proxy_identity, Duration::from_secs(15)).map_err(|message| {
         FabricError::new(codes::PROXY_FAILED, message)
-            .next(format!("monolith agent logs {} --stream egress", request.agent))
+            .next(format!("bimo agent logs {} --stream egress", request.agent))
     })?;
     Ok((proxy, ports))
 }

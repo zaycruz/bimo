@@ -1,7 +1,14 @@
 [package]
-name = "monolith"
-version = "0.1.0"
+name = "bimo-engine"
+version = "0.7.0"
 edition = "2024"
+description = "The Bimo engine: a runtime fabric that places spec-declared agents on local and Proxmox targets."
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "bimo-engine"
+path = "src/main.rs"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

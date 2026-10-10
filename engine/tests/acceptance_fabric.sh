@@ -1,13 +1,14 @@
 #!/bin/sh
 # Fabric acceptance (U9). Runs the local-mode fabric E2E suite, then the live
-# Proxmox suites, which reach the cluster only when MONOLITH_PROXMOX_LIVE=1
-# and the target config and token are present. Writes a dated report to
-# .monolith/reports/ either way. Exits non-zero if the local suite fails, or
+# Proxmox suites, which reach the cluster only when BIMO_PROXMOX_LIVE=1
+# (alias MONOLITH_PROXMOX_LIVE=1) and the target config and token are
+# present. Writes a dated report to .bimo/reports/ either way. Exits non-zero if the local suite fails, or
 # if a live run was requested and did not pass.
 set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-REPORTS="$ROOT/.monolith/reports"
+REPORTS="$ROOT/.bimo/reports"
+LIVE_FLAG=${BIMO_PROXMOX_LIVE:-${MONOLITH_PROXMOX_LIVE:-}}
 mkdir -p "$REPORTS"
 LOG="$REPORTS/$STAMP-fabric-acceptance.log"
 REPORT="$REPORTS/$STAMP-fabric-acceptance.md"
@@ -28,7 +29,7 @@ cargo test --manifest-path "$ROOT/Cargo.toml" --test e2e_spawn_latency --test e2
     --test e2e_proxmox_agents --no-fail-fast -- --nocapture >>"$LOG" 2>&1
 LIVE_RC=$?
 
-if [ "${MONOLITH_PROXMOX_LIVE:-}" = "1" ]; then
+if [ "$LIVE_FLAG" = "1" ]; then
     LIVE_REQUESTED=yes
     if [ "$LIVE_RC" -eq 0 ]; then
         LIVE_STATUS="PASSED"
@@ -41,7 +42,7 @@ if [ "${MONOLITH_PROXMOX_LIVE:-}" = "1" ]; then
     fi
 else
     LIVE_REQUESTED=no
-    LIVE_STATUS="NOT RUN (MONOLITH_PROXMOX_LIVE is not 1)"
+    LIVE_STATUS="NOT RUN (BIMO_PROXMOX_LIVE is not 1)"
 fi
 
 TRANSCRIPTS=$(find "$ROOT/target/e2e-fabric" -name transcript.jsonl -newer "$MARKER" 2>/dev/null | sort)

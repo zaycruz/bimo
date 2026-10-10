@@ -5,7 +5,7 @@
 //! (KTD7) and commits. Substrate-backed agents keep their own versioned state
 //! file (KTD8), separate from factory state.
 //!
-//! Layout under the state root (default `.monolith/agents`):
+//! Layout under the state root (default `.bimo/agents`):
 //!
 //! ```text
 //! <name>/agent.json      versioned agent record
@@ -220,9 +220,9 @@ impl Fabric {
     }
 
     pub fn default_state_root() -> PathBuf {
-        std::env::var_os("MONOLITH_STATE_ROOT")
+        crate::bimo::var_os("STATE_ROOT")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(".monolith").join("agents"))
+            .unwrap_or_else(|| crate::bimo::local_path("agents"))
     }
 
     pub fn load_spec(&self, path: &Path) -> Result<LoadedSpec, FabricError> {
@@ -241,7 +241,7 @@ impl Fabric {
                 ),
             )
             .next(format!(
-                "fix the listed fields in {} and run 'monolith agent validate {}'",
+                "fix the listed fields in {} and run 'bimo agent validate {}'",
                 path.display(),
                 path.display()
             ));
@@ -537,7 +537,7 @@ impl Fabric {
                 record.proxy_management.as_deref(),
                 secrets,
             )
-            .map_err(|error| error.next(format!("monolith agent destroy {}, then apply again", record.name)))?;
+            .map_err(|error| error.next(format!("bimo agent destroy {}, then apply again", record.name)))?;
         let mut updated = record.clone();
         updated.secrets_digest = Some(digest.to_owned());
         updated.updated_at_ms = now_ms();
@@ -703,7 +703,7 @@ impl Fabric {
                             codes::PROBE_FAILED,
                             format!("{} refused its first task: {reason}", spec.runtime),
                         )
-                        .next(format!("monolith agent logs {}", spec.name)),
+                        .next(format!("bimo agent logs {}", spec.name)),
                     ));
                 }
                 Probe::NotReady(reason) => last = reason,
@@ -720,7 +720,7 @@ impl Fabric {
                             codes::PROBE_FAILED,
                             format!("{} exited before accepting its first task", spec.runtime),
                         )
-                        .next(format!("monolith agent logs {}", spec.name)),
+                        .next(format!("bimo agent logs {}", spec.name)),
                     ));
                 }
             }
@@ -734,7 +734,7 @@ impl Fabric {
                             timeout.as_millis()
                         ),
                     )
-                    .next(format!("monolith agent logs {}", spec.name)),
+                    .next(format!("bimo agent logs {}", spec.name)),
                 ));
             }
             std::thread::sleep(Duration::from_millis(25));
@@ -776,7 +776,7 @@ impl Fabric {
                     codes::NOT_FOUND,
                     format!("no agent named '{name}' under {}", self.state_root.display()),
                 )
-                .next("monolith agent list"));
+                .next("bimo agent list"));
             }
             return Ok(StatusResult {
                 name: name.to_owned(),
@@ -848,7 +848,7 @@ impl Fabric {
                 codes::NOT_FOUND,
                 format!("no agent named '{name}' under {}", self.state_root.display()),
             )
-            .next("monolith agent list"));
+            .next("bimo agent list"));
         }
         let _lock = FactoryLock::acquire(&dir)
             .map_err(|e| FabricError::io(codes::STATE_FAILED, "could not lock agent state", e))?;
@@ -921,7 +921,7 @@ impl Fabric {
                 codes::NOT_FOUND,
                 format!("no agent named '{name}'"),
             )
-            .next("monolith agent list"));
+            .next("bimo agent list"));
         }
         let file = match stream {
             "agent" => dir.join("logs").join("agent.log"),
@@ -1363,7 +1363,7 @@ fn tail(path: &Path, limit: u64) -> std::io::Result<String> {
 }
 
 fn ready_timeout() -> Duration {
-    std::env::var("MONOLITH_READY_TIMEOUT_MS")
+    crate::bimo::var("READY_TIMEOUT_MS")
         .ok()
         .and_then(|value| value.parse().ok())
         .map(Duration::from_millis)
@@ -1371,11 +1371,11 @@ fn ready_timeout() -> Duration {
 }
 
 /// Fault injection for crash-recovery E2E tests: when
-/// `MONOLITH_INJECT_CRASH` names a journal event (`created`) or an event and
+/// `BIMO_INJECT_CRASH` (alias `MONOLITH_INJECT_CRASH`) names a journal event (`created`) or an event and
 /// resource kind (`created:agent_process`), the process exits immediately
 /// after writing that event, without cleanup, like a host crash.
 fn inject_crash(event: &str) {
-    if std::env::var("MONOLITH_INJECT_CRASH").as_deref() == Ok(event) {
+    if crate::bimo::var("INJECT_CRASH").as_deref() == Ok(event) {
         unsafe { libc::_exit(137) };
     }
 }

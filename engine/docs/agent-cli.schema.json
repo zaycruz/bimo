@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://monolith.raava.dev/schemas/agent-cli/v1.json",
-  "title": "monolith agent CLI envelope, v1",
-  "description": "Every 'monolith agent <command> --output json' prints exactly one object matching this schema on stdout. Branch on ok and error.code; never parse error.message.",
+  "$id": "urn:bimo:schema:agent-cli:v1",
+  "title": "bimo agent CLI envelope, v1",
+  "description": "Every 'bimo agent <command> --output json' prints exactly one object matching this schema on stdout. Branch on ok and error.code; never parse error.message.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "command", "ok", "changed", "result", "error", "next", "idempotency_key"],
   "properties": {
-    "schema": { "const": "monolith.cli/v1" },
+    "schema": { "const": "bimo.cli/v1" },
     "command": { "type": "string" },
     "ok": { "type": "boolean" },
     "changed": { "type": "boolean" },

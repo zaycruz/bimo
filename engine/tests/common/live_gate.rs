@@ -1,9 +1,10 @@
 //! The gate for live Proxmox suites (U1, U5 to U9).
 //!
-//! A live suite runs only when `MONOLITH_PROXMOX_LIVE=1`, a targets file
-//! with a proxmox target is present (`MONOLITH_PROXMOX_TARGETS`, default
-//! `.monolith/targets.toml`), and that target's token variable is set. Every
-//! run writes a dated JSON report to `.monolith/reports/`, including runs that
+//! A live suite runs only when `BIMO_PROXMOX_LIVE=1` (alias
+//! `MONOLITH_PROXMOX_LIVE`), a targets file with a proxmox target is present
+//! (`BIMO_PROXMOX_TARGETS`, default `.bimo/targets.toml`, or
+//! `.monolith/targets.toml` when only that exists), and that target's token
+//! variable is set. Every run writes a dated JSON report to `.bimo/reports/`, including runs that
 //! did not reach the cluster, so a NOT RUN is never mistaken for a pass.
 #![allow(dead_code)]
 use serde_json::{json, Value};
@@ -18,7 +19,7 @@ pub fn repo() -> PathBuf {
 pub enum Gate {
     /// Not attempted; the reason says which precondition is missing.
     NotRun(String),
-    /// `MONOLITH_PROXMOX_LIVE=1` was set but a precondition is missing. The
+    /// `BIMO_PROXMOX_LIVE=1` was set but a precondition is missing. The
     /// suite fails so a requested live run never shows as passed.
     Requested(String),
     /// Every precondition is present.
@@ -26,22 +27,22 @@ pub enum Gate {
 }
 
 pub fn gate() -> Gate {
-    if std::env::var("MONOLITH_PROXMOX_LIVE").as_deref() != Ok("1") {
-        return Gate::NotRun("MONOLITH_PROXMOX_LIVE is not 1".to_owned());
+    if bimo_engine::bimo::var("PROXMOX_LIVE").as_deref() != Ok("1") {
+        return Gate::NotRun("BIMO_PROXMOX_LIVE (alias MONOLITH_PROXMOX_LIVE) is not 1".to_owned());
     }
-    let targets = std::env::var_os("MONOLITH_PROXMOX_TARGETS")
+    let targets = bimo_engine::bimo::var_os("PROXMOX_TARGETS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo().join(".monolith/targets.toml"));
+        .unwrap_or_else(|| bimo_engine::bimo::local_path_in(&repo(), "targets.toml"));
     let Ok(text) = fs::read_to_string(&targets) else {
         return Gate::Requested(format!(
-            "no targets file at {} (set MONOLITH_PROXMOX_TARGETS)",
+            "no targets file at {} (set BIMO_PROXMOX_TARGETS)",
             targets.display()
         ));
     };
     let Ok(parsed) = text.parse::<toml::Table>() else {
         return Gate::Requested(format!("{} is not valid TOML", targets.display()));
     };
-    let wanted = std::env::var("MONOLITH_PROXMOX_TARGET").ok();
+    let wanted = bimo_engine::bimo::var("PROXMOX_TARGET").ok();
     let target = parsed
         .get("targets")
         .and_then(|t| t.as_array())
@@ -71,14 +72,14 @@ pub fn gate() -> Gate {
     Gate::Live { targets, target: name, token_env }
 }
 
-/// Write `.monolith/reports/<UTC timestamp>-<suite>.json` and return its path.
+/// Write `.bimo/reports/<UTC timestamp>-<suite>.json` and return its path.
 pub fn write_report(suite: &str, status: &str, body: Value) -> PathBuf {
     let stamp = Command::new("date")
         .args(["-u", "+%Y%m%dT%H%M%SZ"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .unwrap_or_else(|_| "unknown-time".to_owned());
-    let dir = repo().join(".monolith/reports");
+    let dir = repo().join(".bimo/reports");
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{stamp}-{suite}-{}.json", std::process::id()));
     let report = json!({
@@ -93,33 +94,33 @@ pub fn write_report(suite: &str, status: &str, body: Value) -> PathBuf {
 }
 
 /// The live target's Proxmox driver, built the way the CLI builds it.
-pub fn live_driver(targets: &Path, target: &str) -> monolith::proxmox::ProxmoxDriver {
+pub fn live_driver(targets: &Path, target: &str) -> bimo_engine::proxmox::ProxmoxDriver {
     let arguments = vec!["--targets-config".to_owned(), targets.to_string_lossy().into_owned()];
-    let loaded = monolith::target::load_catalog_from_cli(&arguments).expect("targets file loads");
+    let loaded = bimo_engine::target::load_catalog_from_cli(&arguments).expect("targets file loads");
     let resolved = loaded.catalog.resolve(Some(target)).expect("live target resolves");
-    monolith::proxmox::ProxmoxDriver::from_target(&resolved).expect("driver builds")
+    bimo_engine::proxmox::ProxmoxDriver::from_target(&resolved).expect("driver builds")
 }
 
 /// A journal that records what the driver touched and created, the way the
 /// control plane's journal does.
 #[derive(Default)]
 pub struct Recorder {
-    pub touched: Vec<monolith::substrate::Resource>,
-    pub created: Vec<monolith::substrate::Resource>,
+    pub touched: Vec<bimo_engine::substrate::Resource>,
+    pub created: Vec<bimo_engine::substrate::Resource>,
     /// Make `created` fail, as a control plane killed after the guest
     /// exists but before it is recorded.
     pub fail_created: bool,
 }
 
-impl monolith::substrate::ResourceJournal for Recorder {
-    fn touching(&mut self, resource: &monolith::substrate::Resource) -> Result<(), monolith::substrate::FabricError> {
+impl bimo_engine::substrate::ResourceJournal for Recorder {
+    fn touching(&mut self, resource: &bimo_engine::substrate::Resource) -> Result<(), bimo_engine::substrate::FabricError> {
         self.touched.push(resource.clone());
         Ok(())
     }
-    fn created(&mut self, resource: &monolith::substrate::Resource) -> Result<(), monolith::substrate::FabricError> {
+    fn created(&mut self, resource: &bimo_engine::substrate::Resource) -> Result<(), bimo_engine::substrate::FabricError> {
         if self.fail_created {
-            return Err(monolith::substrate::FabricError::new(
-                monolith::substrate::codes::STATE_FAILED,
+            return Err(bimo_engine::substrate::FabricError::new(
+                bimo_engine::substrate::codes::STATE_FAILED,
                 "injected: the control plane died before recording the guest",
             ));
         }
@@ -132,13 +133,13 @@ impl monolith::substrate::ResourceJournal for Recorder {
 /// pools and takes down their proxy guests, so a failing live run leaves
 /// nothing behind on the cluster.
 pub struct Sweeper<'a> {
-    pub driver: &'a monolith::proxmox::ProxmoxDriver,
+    pub driver: &'a bimo_engine::proxmox::ProxmoxDriver,
     pub vmids: std::cell::RefCell<Vec<u32>>,
     pub tenants: Vec<String>,
 }
 
 impl<'a> Sweeper<'a> {
-    pub fn new(driver: &'a monolith::proxmox::ProxmoxDriver, tenants: &[&str]) -> Self {
+    pub fn new(driver: &'a bimo_engine::proxmox::ProxmoxDriver, tenants: &[&str]) -> Self {
         Self {
             driver,
             vmids: Default::default(),
@@ -179,7 +180,7 @@ fn git_head(dir: &Path) -> Option<String> {
 }
 
 /// The pool's members on the cluster (VMIDs), through the API.
-pub fn pool_members(driver: &monolith::proxmox::ProxmoxDriver) -> Vec<u64> {
+pub fn pool_members(driver: &bimo_engine::proxmox::ProxmoxDriver) -> Vec<u64> {
     let pool = driver.settings().expect("settings").pool.clone();
     let data = driver
         .api_get(&format!("/pools/{pool}"))

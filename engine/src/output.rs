@@ -1,10 +1,10 @@
 //! The agent-native CLI contract (KTD6, U4).
 //!
-//! With `--output json`, every `monolith agent` command prints exactly one
+//! With `--output json`, every `bimo agent` command prints exactly one
 //! JSON envelope on stdout, success or failure:
 //!
 //! ```json
-//! {"schema":"monolith.cli/v1","command":"apply","ok":true,"changed":false,
+//! {"schema":"bimo.cli/v1","command":"apply","ok":true,"changed":false,
 //!  "result":{...},"error":null,"next":[],"idempotency_key":"..."}
 //! ```
 //!
@@ -13,7 +13,7 @@
 use crate::substrate::{codes, FabricError};
 use serde::Serialize;
 
-pub const SCHEMA: &str = "monolith.cli/v1";
+pub const SCHEMA: &str = "bimo.cli/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {

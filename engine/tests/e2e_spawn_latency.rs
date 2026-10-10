@@ -9,7 +9,7 @@
 //! `.monolith/reports/`; a live run also rewrites
 //! `docs/benchmarks/spawn-latency.md`.
 //!
-//! What the clock covers (R3, KTD7): `monolith agent apply` of the example
+//! What the clock covers (R3, KTD7): `bimo agent apply` of the example
 //! spec through the real CLI, from the request to the runtime accepting its
 //! first task, as the CLI reports it in `ready_ms` with its phase breakdown.
 //! That is spec validation, source, prepare, the tenant proxy guest's health
@@ -43,7 +43,7 @@
 //! - guests the run created are left on the cluster after it ends or fails.
 //!
 //! The proxy guests of the measured tenants are started before anything is
-//! timed and checked again after every settle (`monolith proxy up`), so a
+//! timed and checked again after every settle (`bimo proxy up`), so a
 //! sample never pays for a proxy guest's creation or its re-provisioning
 //! after the node's restart; both are reported.
 //!
@@ -56,8 +56,8 @@
 mod common;
 
 use common::live_gate::{gate, live_driver, repo, write_report, Gate, Recorder, Sweeper};
-use monolith::proxmox::delivery::GuestChannel;
-use monolith::substrate::Substrate;
+use bimo_engine::proxmox::delivery::GuestChannel;
+use bimo_engine::substrate::Substrate;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -102,7 +102,7 @@ impl Cli {
     /// `--state-root` for agent commands. Every call is kept in
     /// `transcript.jsonl` beside the run.
     fn run(&self, args: &[&str]) -> (i32, Value) {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_monolith"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bimo-engine"));
         command.args(args).args(["--output", "json"]);
         if args.first() == Some(&"agent") {
             command.arg("--state-root").arg(&self.state_root);
@@ -257,7 +257,7 @@ fn pool_guests(cli: &Cli, target: &str, tenant: &str) -> Vec<Value> {
 /// `min_age_s` ago. Returns the seconds waited.
 fn settle(
     cli: &Cli,
-    driver: &monolith::proxmox::ProxmoxDriver,
+    driver: &bimo_engine::proxmox::ProxmoxDriver,
     target: &str,
     tenants: &[&str],
     min_age_s: u64,
@@ -331,7 +331,7 @@ fn check_unclaimed_warm_guest(guest: &Value, bind_port: u16, dir: &Path, target:
 
     // The pool's bind credential for this guest (kept by the control plane,
     // not a tenant secret) opens the bind agent's inspect endpoint.
-    let pools = repo().join(".monolith/pools");
+    let pools = bimo_engine::bimo::local_path_in(&repo(), "pools");
     let warm: Value =
         serde_json::from_slice(&fs::read(pools.join(format!("{target}-warm/{vmid}.json"))).unwrap()).unwrap();
     let channel = GuestChannel::new(address, bind_port, warm["credential"].as_str().unwrap());
@@ -421,18 +421,18 @@ fn pooled_apply_reaches_first_task_under_one_second_on_the_cluster() {
     fs::create_dir_all(&dir).unwrap();
     let path = |p: &str| repo().join(p).to_string_lossy().into_owned();
     let mut env = BTreeMap::new();
-    env.insert("MONOLITH_IRON_PROXY_BIN".to_owned(), tools["IRON_PROXY_BIN"].clone());
-    env.insert("MONOLITH_IRON_PROXY_GUEST_BIN".to_owned(), tools["IRON_PROXY_LINUX_BIN"].clone());
-    env.insert("MONOLITH_NODE_BIN".to_owned(), format!("{}/node", tools["NODE_BIN_DIR"]));
-    env.insert("MONOLITH_NPM_CACHE".to_owned(), path("target/e2e-tools/npm-cache"));
-    env.insert("MONOLITH_BUILD_CACHE".to_owned(), path(".monolith/cache"));
-    env.insert("MONOLITH_POOL_DIR".to_owned(), path(".monolith/pools"));
-    env.insert("MONOLITH_READY_TIMEOUT_MS".to_owned(), "300000".to_owned());
+    env.insert("BIMO_IRON_PROXY_BIN".to_owned(), tools["IRON_PROXY_BIN"].clone());
+    env.insert("BIMO_IRON_PROXY_GUEST_BIN".to_owned(), tools["IRON_PROXY_LINUX_BIN"].clone());
+    env.insert("BIMO_NODE_BIN".to_owned(), format!("{}/node", tools["NODE_BIN_DIR"]));
+    env.insert("BIMO_NPM_CACHE".to_owned(), path("target/e2e-tools/npm-cache"));
+    env.insert("BIMO_BUILD_CACHE".to_owned(), bimo_engine::bimo::local_path_in(&repo(), "cache").to_string_lossy().into_owned());
+    env.insert("BIMO_POOL_DIR".to_owned(), bimo_engine::bimo::local_path_in(&repo(), "pools").to_string_lossy().into_owned());
+    env.insert("BIMO_READY_TIMEOUT_MS".to_owned(), "300000".to_owned());
     // eve's tenant gets the same provider key under its own handle; the
     // value goes only to the CLI's environment, as the operator would set it.
-    env.insert(monolith::secrets::env_variable_for(&monolith::secrets::Handle::parse(&format!("{EVE_TENANT}/openrouter")).unwrap()), secret.clone());
+    env.insert(bimo_engine::secrets::env_variable_for(&bimo_engine::secrets::Handle::parse(&format!("{EVE_TENANT}/openrouter")).unwrap()), secret.clone());
     // The run fills the pool itself before each sample, off the clock.
-    env.insert("MONOLITH_POOL_REFILL".to_owned(), "0".to_owned());
+    env.insert("BIMO_POOL_REFILL".to_owned(), "0".to_owned());
     let cli = Cli {
         state_root: dir.join("state"),
         targets: targets.clone(),
@@ -720,7 +720,7 @@ fn pooled_apply_reaches_first_task_under_one_second_on_the_cluster() {
         "runs": runs,
         "r3_threshold_ms": R3_MS,
         "r3_evidence": true,
-        "clock": "monolith agent apply through the CLI, from the request to the runtime accepting its first task (ready_ms); pools filled before each sample, off the clock",
+        "clock": "bimo agent apply through the CLI, from the request to the runtime accepting its first task (ready_ms); pools filled before each sample, off the clock",
         "runtimes": per_runtime,
         "unclaimed_warm_guest": unclaimed_checks,
         "settle": {"min_guest_age_s": settle_s, "min_uptime_s": uptime_s, "waited_s": settle_waits, "why": "every new container on pve-node-a is restarted from outside Monolith about three minutes after its first start (tailscale is installed into it); samples use guests past that restart and its boot aftermath, and a fill after it re-warms guests the restart emptied"},
@@ -869,7 +869,7 @@ fn write_benchmark_doc(detail: &Value, report: &Path) {
          The credential proxy runs in the tenant's proxy guest: `proxy_plan` mints the agent's CA (no local config, no process), \
          `proxy_ready` is the proxy guest's health check, and the agent's route starts there beside the upload (`upload`) \
          or before go (`route`). No proxy or relay process runs on the control plane.\n\n\
-         - Proxy guests (`monolith proxy up`, off the clock): {proxies}\n\
+         - Proxy guests (`bimo proxy up`, off the clock): {proxies}\n\
          - Cold clone, claim only (clone, start, bind; no runtime): p50 {cold_p50} ms, p95 {cold_p95} ms (n {cold_n}); not counted toward R3.\n\
          - Unclaimed warm guests checked (no task before go, no tenant material): {unclaimed}\n\
          - Tenant isolation: {isolation}\n",

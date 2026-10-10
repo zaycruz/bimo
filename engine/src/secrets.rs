@@ -65,7 +65,8 @@ pub fn is_identifier(value: &str) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SecretSourceConfig {
-    /// Local-mode source: `MONOLITH_SECRET_<TENANT>__<NAME>` in the control
+    /// Local-mode source: `BIMO_SECRET_<TENANT>__<NAME>` (alias
+    /// `MONOLITH_SECRET_<TENANT>__<NAME>`) in the control
     /// plane's own environment.
     #[default]
     Env,
@@ -96,7 +97,7 @@ impl SecretSourceConfig {
         match self {
             Self::Env => {
                 let variable = env_variable_for(handle);
-                match std::env::var(&variable) {
+                match crate::bimo::var(&env_suffix_for(handle)) {
                     Ok(value) if !value.is_empty() => Ok(value),
                     _ => Err(SecretError::NotFound(format!(
                         "secret handle '{handle}' does not resolve: environment variable {variable} is not set"
@@ -126,7 +127,13 @@ impl fmt::Display for SecretError {
     }
 }
 
+/// The variable the env secret source reads first: `BIMO_SECRET_<TENANT>__<NAME>`
+/// (alias `MONOLITH_SECRET_<TENANT>__<NAME>`).
 pub fn env_variable_for(handle: &Handle) -> String {
+    format!("BIMO_{}", env_suffix_for(handle))
+}
+
+fn env_suffix_for(handle: &Handle) -> String {
     fn part(value: &str) -> String {
         value
             .chars()
@@ -140,7 +147,7 @@ pub fn env_variable_for(handle: &Handle) -> String {
             .collect()
     }
     format!(
-        "MONOLITH_SECRET_{}__{}",
+        "SECRET_{}__{}",
         part(&handle.tenant),
         part(&handle.name)
     )

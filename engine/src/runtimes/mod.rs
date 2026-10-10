@@ -111,12 +111,12 @@ pub struct GuestRecipe {
 }
 
 /// Where build outputs and packed bundles are kept between applies
-/// (`MONOLITH_BUILD_CACHE`, default `.monolith/cache`). Entries are keyed by
+/// (`BIMO_BUILD_CACHE`, default `.bimo/cache`). Entries are keyed by
 /// content, never by agent, and hold no secret.
 pub fn build_cache_dir() -> PathBuf {
-    std::env::var_os("MONOLITH_BUILD_CACHE")
+    crate::bimo::var_os("BUILD_CACHE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".monolith").join("cache"))
+        .unwrap_or_else(|| crate::bimo::local_path("cache"))
 }
 
 /// A runtime started in a pooled guest before any agent is claimed (a warm
@@ -208,8 +208,10 @@ pub fn names() -> Vec<&'static str> {
 }
 
 /// Find a runtime executable: an explicit override variable, then PATH.
-pub fn find_program(override_env: &str, name: &str) -> Result<PathBuf, String> {
-    if let Some(value) = std::env::var_os(override_env) {
+/// `override_suffix` names `BIMO_<suffix>` (alias `MONOLITH_<suffix>`).
+pub fn find_program(override_suffix: &str, name: &str) -> Result<PathBuf, String> {
+    let override_env = format!("BIMO_{override_suffix}");
+    if let Some(value) = crate::bimo::var_os(override_suffix) {
         let path = PathBuf::from(value);
         if path.is_file() {
             return Ok(path);

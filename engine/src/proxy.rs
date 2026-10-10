@@ -95,9 +95,9 @@ pub struct ProxyPorts {
 }
 
 pub fn find_iron_proxy() -> Result<PathBuf, FabricError> {
-    crate::runtimes::find_program("MONOLITH_IRON_PROXY_BIN", "iron-proxy").map_err(|message| {
+    crate::runtimes::find_program("IRON_PROXY_BIN", "iron-proxy").map_err(|message| {
         FabricError::new(codes::PROXY_FAILED, message)
-            .next("install iron-proxy 0.52.0 (sh scripts/e2e-tools.sh prints its path) or set MONOLITH_IRON_PROXY_BIN")
+            .next("install iron-proxy 0.52.0 (sh scripts/e2e-tools.sh prints its path) or set BIMO_IRON_PROXY_BIN")
     })
 }
 

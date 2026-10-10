@@ -5,8 +5,8 @@
 //! bind agent in the guest and hands it to the agent journal. The claim path
 //! makes no Proxmox API call; refilling happens off the request path.
 //!
-//! Pool state lives in `<pool dir>/<target>.json` (default `.monolith/pools`,
-//! override with `MONOLITH_POOL_DIR`) under an exclusive file lock, so
+//! Pool state lives in `<pool dir>/<target>.json` (default `.bimo/pools`,
+//! override with `BIMO_POOL_DIR`) under an exclusive file lock, so
 //! separate CLI invocations share it. Every guest is recorded before it is
 //! cloned (`cloning`, with the filler's pid), so a filler that dies leaves a
 //! record the next fill clears.
@@ -128,9 +128,9 @@ pub struct FillReport {
 }
 
 pub fn pool_dir() -> PathBuf {
-    std::env::var_os("MONOLITH_POOL_DIR")
+    crate::bimo::var_os("POOL_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".monolith").join("pools"))
+        .unwrap_or_else(|| crate::bimo::local_path("pools"))
 }
 
 pub(super) struct Locked {
@@ -761,7 +761,7 @@ impl ProxmoxDriver {
                         settings.addresses.first, settings.addresses.last, self.target_name
                     ),
                 )
-                .next("drain an idle pool (monolith pool drain) or widen address_range")
+                .next("drain an idle pool (bimo pool drain) or widen address_range")
             })?;
             used_addresses.insert(address);
             addresses.push(address);
@@ -912,16 +912,16 @@ pub fn wait_for_bind_agent(address: Ipv4Addr, port: u16, hostname: &str, deadlin
     }
 }
 
-/// Start `monolith pool fill` for the tenant as a detached process so the
+/// Start `bimo-engine pool fill` for the tenant as a detached process so the
 /// pool is replenished off the request path. Only the CLI binary does this;
 /// library callers (and the live suites) fill explicitly. Set
-/// `MONOLITH_POOL_REFILL=0` to turn it off.
+/// `BIMO_POOL_REFILL=0` (alias `MONOLITH_POOL_REFILL`) to turn it off.
 pub fn spawn_refill(target: &str, tenant: &str, warm_runtime: Option<&str>) {
-    if std::env::var("MONOLITH_POOL_REFILL").as_deref() == Ok("0") {
+    if crate::bimo::var("POOL_REFILL").as_deref() == Ok("0") {
         return;
     }
     let Ok(exe) = std::env::current_exe() else { return };
-    if exe.file_name().and_then(|n| n.to_str()) != Some("monolith") {
+    if !matches!(exe.file_name().and_then(|n| n.to_str()), Some("bimo-engine" | "monolith")) {
         return;
     }
     let mut command = std::process::Command::new(exe);

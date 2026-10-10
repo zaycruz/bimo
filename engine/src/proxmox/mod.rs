@@ -90,7 +90,7 @@ impl ProxmoxDriver {
             return Err(FabricError::new(
                 codes::TARGET_UNAVAILABLE,
                 format!(
-                    "target '{}' is the reserved proxmox kind; declare a named proxmox target in .monolith/targets.toml",
+                    "target '{}' is the reserved proxmox kind; declare a named proxmox target in .bimo/targets.toml",
                     target.name
                 ),
             )
@@ -560,12 +560,12 @@ impl Substrate for ProxmoxDriver {
                 ),
             )
             .next("rebuild the golden template with scripts/build-template.sh (see templates/README.md)")
-            .next(format!("monolith pool drain --target {}", self.target_name)),
+            .next(format!("bimo pool drain --target {}", self.target_name)),
             ChannelError::Failed(message) => FabricError::new(
                 codes::SUBSTRATE_FAILED,
                 format!("could not {step} in guest {}: {message}", claim.vmid),
             )
-            .next(format!("monolith agent logs {}", request.agent)),
+            .next(format!("bimo agent logs {}", request.agent)),
         };
         // The route starts in the proxy guest while the runtime is delivered;
         // the runtime starts (or takes go) only once both are done, so its
@@ -595,7 +595,7 @@ impl Substrate for ProxmoxDriver {
                 .unwrap_or_else(|_| Err(FabricError::new(codes::PROXY_FAILED, "the route request panicked")));
             (routed, delivered)
         });
-        routed.map_err(|e| e.next(format!("monolith agent logs {} --stream egress", request.agent)))?;
+        routed.map_err(|e| e.next(format!("bimo agent logs {} --stream egress", request.agent)))?;
         journal.created(&route_resource)?;
         delivered?;
         request.clock.mark(if claim.go_token.is_some() { "route" } else { "upload" });
@@ -613,7 +613,7 @@ impl Substrate for ProxmoxDriver {
             )
             .map_err(|message| {
                 FabricError::new(codes::SUBSTRATE_FAILED, format!("guest {}: {message}", claim.vmid))
-                    .next(format!("monolith agent logs {}", request.agent))
+                    .next(format!("bimo agent logs {}", request.agent))
             })?;
             request.clock.mark("go");
         } else {

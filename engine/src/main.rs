@@ -1,4 +1,4 @@
-use monolith::{
+use bimo_engine::{
     capabilities, durability, fabric, manifest, output, protocol, runtime, state, substrate, target,
     validation,
 };
@@ -19,44 +19,45 @@ use sha2::Digest;
 use state::MessageEnvelope;
 use validation::validate;
 
-const HELP: &str = r#"monolith - local agent factory foundation
+const HELP: &str = r#"bimo-engine - the Bimo runtime fabric (users run it as bimo agent|pool|proxy or bimo engine)
 
 USAGE:
-  monolith agent validate <spec> [--output json|text] [--targets-config <file>]
-  monolith agent plan <spec>     [--output json|text] [--state-root <dir>] [--targets-config <file>]
-  monolith agent apply <spec>    [--output json|text] [--state-root <dir>] [--targets-config <file>]
-  monolith agent status <name>   [--output json|text] [--state-root <dir>] [--targets-config <file>]
-  monolith agent logs <name>     [--stream agent|egress|journal] [--output json|text] [--state-root <dir>]
-  monolith agent destroy <name>  [--output json|text] [--state-root <dir>] [--targets-config <file>]
-  monolith agent list            [--output json|text] [--state-root <dir>] [--targets-config <file>]
-  monolith pool status|fill|drain --target <name> [--tenant <id>] [--warm <runtime>] [--output json|text] [--targets-config <file>]
-  monolith proxy up|status|down --target <name> [--tenant <id>] [--force] [--output json|text] [--targets-config <file>]
-  monolith targets [--targets-config <file>]
-  monolith deploy <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
-  monolith validate <manifest>
-  monolith plan <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
-  monolith apply <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
-  monolith status <state-dir> [--target <name>] [--targets-config <file>]
-  monolith send <state-dir> --from <pod> --to <pod> --kind <kind> --payload <text> [--target <name>] [--targets-config <file>]
-  monolith logs <state-dir> <pod> [--target <name>] [--targets-config <file>]
-  monolith destroy <state-dir> [--target <name>] [--targets-config <file>]
-  monolith demo <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+  bimo agent validate <spec> [--output json|text] [--targets-config <file>]
+  bimo agent plan <spec>     [--output json|text] [--state-root <dir>] [--targets-config <file>]
+  bimo agent apply <spec>    [--output json|text] [--state-root <dir>] [--targets-config <file>]
+  bimo agent status <name>   [--output json|text] [--state-root <dir>] [--targets-config <file>]
+  bimo agent logs <name>     [--stream agent|egress|journal] [--output json|text] [--state-root <dir>]
+  bimo agent destroy <name>  [--output json|text] [--state-root <dir>] [--targets-config <file>]
+  bimo agent list            [--output json|text] [--state-root <dir>] [--targets-config <file>]
+  bimo pool status|fill|drain --target <name> [--tenant <id>] [--warm <runtime>] [--output json|text] [--targets-config <file>]
+  bimo proxy up|status|down --target <name> [--tenant <id>] [--force] [--output json|text] [--targets-config <file>]
+  bimo engine targets [--targets-config <file>]
+  bimo engine deploy <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+  bimo engine validate <manifest>
+  bimo engine plan <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+  bimo engine apply <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
+  bimo engine status <state-dir> [--target <name>] [--targets-config <file>]
+  bimo engine send <state-dir> --from <pod> --to <pod> --kind <kind> --payload <text> [--target <name>] [--targets-config <file>]
+  bimo engine logs <state-dir> <pod> [--target <name>] [--targets-config <file>]
+  bimo engine destroy <state-dir> [--target <name>] [--targets-config <file>]
+  bimo engine demo <manifest> [--state-dir <dir>] [--target <name>] [--targets-config <file>]
 
-'monolith agent' runs spec-declared agents (Hermes, eve) on a substrate
+'bimo agent' runs spec-declared agents (Hermes, eve) on a substrate
 named by the spec's placement: 'local' or a configured proxmox target. With
 '--output json' every agent command prints one JSON envelope; see
-docs/agent-cli.md. The state root defaults to .monolith/agents.
+docs/agent-cli.md. The state root defaults to .bimo/agents (.monolith/agents when only that
+exists).
 
 The demo uses local child processes and durable JSON inboxes. The pod-process
 subcommand is an internal runtime used by apply and demo.
 
 Factory manifests run on 'local'. Spec-declared agents run on 'local' or a
-named proxmox target in .monolith/targets.toml. The proxmox driver claims a
+named proxmox target in .bimo/targets.toml. The proxmox driver claims a
 guest from the tenant's warm pool (or clones one cold), binds it, delivers
 the runtime bundle through the guest's bind agent and runs it there; the
 agent's credential proxy runs as a route in its tenant's proxy guest, the
 only address the agent guest may reach (see docs/credential-boundary.md).
-'monolith pool' keeps a target's per-tenant warm pool; 'monolith proxy'
+'bimo pool' keeps a target's per-tenant warm pool; 'bimo proxy'
 starts, shows or stops a tenant's proxy guest (apply starts it when needed).
 'ssh' is reserved and has no driver.
 "#;
@@ -123,13 +124,13 @@ fn run() -> Result<(), String> {
         "destroy" => command_destroy(&rest),
         "demo" => command_demo(&rest),
         "pod-process" => command_pod_process(&rest),
-        other => Err(format!("unknown command '{other}'. Run 'monolith help'.")),
+        other => Err(format!("unknown command '{other}'. Run 'bimo engine help'.")),
     }
 }
 
 const AGENT_FLAGS: &[&str] = &["--output", "--state-root", "--targets-config", "--stream"];
 
-/// `monolith agent <verb>`: the agent-native control plane. Always returns an
+/// `bimo agent <verb>`: the agent-native control plane. Always returns an
 /// exit code after printing exactly one envelope (json) or a summary (text).
 fn command_agent(arguments: &[String]) -> i32 {
     let verb = arguments.first().cloned().unwrap_or_default();
@@ -154,7 +155,7 @@ fn command_agent(arguments: &[String]) -> i32 {
 
 fn agent_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, substrate::FabricError> {
     use substrate::{codes, FabricError};
-    let usage = |message: String| FabricError::new(codes::USAGE, message).next("monolith help");
+    let usage = |message: String| FabricError::new(codes::USAGE, message).next("bimo engine help");
     for argument in arguments {
         if argument.starts_with("--") && !AGENT_FLAGS.contains(&argument.as_str()) {
             return Err(usage(format!("unknown option '{argument}' for 'agent {verb}'")));
@@ -185,6 +186,9 @@ fn agent_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, 
         .map_err(usage)?
         .map(PathBuf::from)
         .unwrap_or_else(fabric::Fabric::default_state_root);
+    // Local runtimes and proxies start in their own directories, so a
+    // relative state root (the default .bimo/agents) must be made absolute.
+    let state_root = std::path::absolute(&state_root).unwrap_or(state_root);
     let fabric = fabric::Fabric::new(state_root, loaded.catalog);
     let argument = positionals.first().copied().unwrap_or_default();
     let started = Instant::now();
@@ -195,16 +199,16 @@ fn agent_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, 
                 verb,
                 false,
                 &result,
-                vec![format!("monolith agent plan {argument}")],
+                vec![format!("bimo agent plan {argument}")],
                 None,
             )
         }
         "plan" => {
             let result = fabric.plan(Path::new(argument))?;
             let next = if result.action == "none" {
-                vec![format!("monolith agent status {}", result.name)]
+                vec![format!("bimo agent status {}", result.name)]
             } else {
-                vec![format!("monolith agent apply {argument}")]
+                vec![format!("bimo agent apply {argument}")]
             };
             let key = Some(result.idempotency_key.clone());
             output::Envelope::success(verb, false, &result, next, key)
@@ -212,7 +216,7 @@ fn agent_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, 
         "apply" => {
             let outcome = fabric.apply(Path::new(argument), started)?;
             let key = Some(outcome.result.idempotency_key.clone());
-            let next = vec![format!("monolith agent status {}", outcome.result.name)];
+            let next = vec![format!("bimo agent status {}", outcome.result.name)];
             output::Envelope::success(verb, outcome.changed, &outcome.result, next, key)
         }
         "status" => {
@@ -220,13 +224,13 @@ fn agent_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, 
             let mut next = Vec::new();
             if !result.remains.is_empty() {
                 next.push(format!(
-                    "{} resource(s) remain from an interrupted run; 'monolith agent apply <spec>' converges or 'monolith agent destroy {}' clears them",
+                    "{} resource(s) remain from an interrupted run; 'bimo agent apply <spec>' converges or 'bimo agent destroy {}' clears them",
                     result.remains.len(),
                     result.name
                 ));
             }
             if result.status == "degraded" {
-                next.push(format!("monolith agent logs {}", result.name));
+                next.push(format!("bimo agent logs {}", result.name));
             }
             output::Envelope::success(verb, false, &result, next, None)
         }
@@ -251,8 +255,8 @@ fn agent_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, 
 
 const POOL_FLAGS: &[&str] = &["--output", "--target", "--tenant", "--targets-config", "--warm"];
 
-/// `monolith pool <status|fill|drain>`: the per-tenant warm pool of a proxmox
-/// target (U6). Prints one envelope, like `monolith agent`.
+/// `bimo pool <status|fill|drain>`: the per-tenant warm pool of a proxmox
+/// target (U6). Prints one envelope, like `bimo agent`.
 fn command_pool(arguments: &[String]) -> i32 {
     let verb = arguments.first().cloned().unwrap_or_default();
     let rest = arguments.get(1..).unwrap_or_default();
@@ -268,7 +272,7 @@ fn command_pool(arguments: &[String]) -> i32 {
 
 fn pool_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, substrate::FabricError> {
     use substrate::{codes, FabricError};
-    let usage = |message: String| FabricError::new(codes::USAGE, message).next("monolith help");
+    let usage = |message: String| FabricError::new(codes::USAGE, message).next("bimo engine help");
     for argument in arguments {
         if argument.starts_with("--") && !POOL_FLAGS.contains(&argument.as_str()) {
             return Err(usage(format!("unknown option '{argument}' for 'pool {verb}'")));
@@ -290,7 +294,7 @@ fn pool_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, s
     if resolved.kind != target::DeploymentTarget::Proxmox {
         return Err(usage(format!("target '{target_name}' is not a proxmox target")));
     }
-    let driver = monolith::proxmox::ProxmoxDriver::from_target(&resolved)?;
+    let driver = bimo_engine::proxmox::ProxmoxDriver::from_target(&resolved)?;
     let command = format!("pool {verb}");
     Ok(match verb {
         "status" => output::Envelope::success(&command, false, driver.pool_state()?, Vec::new(), None),
@@ -299,9 +303,9 @@ fn pool_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, s
             let report = match option_value(arguments, "--warm").map_err(usage)? {
                 None => driver.fill(&tenant)?,
                 Some(runtime) => {
-                    let recipe = monolith::runtimes::lookup(&runtime)
+                    let recipe = bimo_engine::runtimes::lookup(&runtime)
                         .ok_or_else(|| usage(format!("unknown runtime '{runtime}' for --warm")))?
-                        .warm(monolith::runtimes::GUEST_RUNTIME_PORT)
+                        .warm(bimo_engine::runtimes::GUEST_RUNTIME_PORT)
                         .ok_or_else(|| usage(format!("runtime '{runtime}' has no warm runtime")))?;
                     driver.fill_warm(&tenant, &recipe)?
                 }
@@ -324,8 +328,8 @@ fn pool_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, s
 
 const PROXY_FLAGS: &[&str] = &["--output", "--target", "--tenant", "--targets-config"];
 
-/// `monolith proxy <up|status|down>`: a tenant's proxy guest on a proxmox
-/// target (U7). Prints one envelope, like `monolith pool`.
+/// `bimo proxy <up|status|down>`: a tenant's proxy guest on a proxmox
+/// target (U7). Prints one envelope, like `bimo pool`.
 fn command_proxy(arguments: &[String]) -> i32 {
     let verb = arguments.first().cloned().unwrap_or_default();
     let rest = arguments.get(1..).unwrap_or_default();
@@ -341,7 +345,7 @@ fn command_proxy(arguments: &[String]) -> i32 {
 
 fn proxy_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, substrate::FabricError> {
     use substrate::{codes, FabricError};
-    let usage = |message: String| FabricError::new(codes::USAGE, message).next("monolith help");
+    let usage = |message: String| FabricError::new(codes::USAGE, message).next("bimo engine help");
     let force = arguments.iter().any(|a| a == "--force");
     let arguments: Vec<String> = arguments.iter().filter(|a| *a != "--force").cloned().collect();
     for argument in &arguments {
@@ -365,7 +369,7 @@ fn proxy_envelope(verb: &str, arguments: &[String]) -> Result<output::Envelope, 
     if resolved.kind != target::DeploymentTarget::Proxmox {
         return Err(usage(format!("target '{target_name}' is not a proxmox target")));
     }
-    let driver = monolith::proxmox::ProxmoxDriver::from_target(&resolved)?;
+    let driver = bimo_engine::proxmox::ProxmoxDriver::from_target(&resolved)?;
     let command = format!("proxy {verb}");
     Ok(match verb {
         "status" => {
@@ -420,7 +424,7 @@ fn command_deploy(arguments: &[String]) -> Result<(), String> {
     if driver.kind() != "local" {
         return Err(format!(
             "target '{}' uses the {} driver, which runs spec-declared agents, not factory manifests; \
-             set placement.substrate = \"{}\" in an agent spec and run 'monolith agent apply <spec>'",
+             set placement.substrate = \"{}\" in an agent spec and run 'bimo agent apply <spec>'",
             resolved.name,
             driver.kind(),
             resolved.name
@@ -1301,7 +1305,7 @@ fn manifest_state_dir(
 ) -> PathBuf {
     let raw = override_dir
         .or_else(|| manifest.state_dir.clone())
-        .unwrap_or_else(|| ".monolith".to_owned());
+        .unwrap_or_else(|| default_manifest_state_dir(manifest_path));
     let path = PathBuf::from(raw);
     if path.is_absolute() {
         path
@@ -1313,6 +1317,15 @@ fn manifest_state_dir(
     }
 }
 
+/// `.bimo` next to the manifest, or `.monolith` when only that exists there.
+fn default_manifest_state_dir(manifest_path: &str) -> String {
+    let base = Path::new(manifest_path).parent().unwrap_or_else(|| Path::new("."));
+    let dir = bimo_engine::bimo::local_path_in(base, "");
+    dir.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| bimo_engine::bimo::LOCAL_DIR.to_owned())
+}
+
 fn required_positional<'a>(
     arguments: &'a [String],
     index: usize,
@@ -1321,11 +1334,11 @@ fn required_positional<'a>(
     positional_arguments(arguments)
         .get(index)
         .copied()
-        .ok_or_else(|| format!("missing {label}. Run 'monolith help'."))
+        .ok_or_else(|| format!("missing {label}. Run 'bimo engine help'."))
 }
 
 fn required_option(arguments: &[String], flag: &str) -> Result<String, String> {
-    option_value(arguments, flag)?.ok_or_else(|| format!("missing {flag}. Run 'monolith help'."))
+    option_value(arguments, flag)?.ok_or_else(|| format!("missing {flag}. Run 'bimo engine help'."))
 }
 
 fn option_value(arguments: &[String], flag: &str) -> Result<Option<String>, String> {
@@ -1371,7 +1384,7 @@ fn resolve_target(arguments: &[String], command: &str) -> Result<target::Resolve
     if selection.kind != target::DeploymentTarget::Local {
         return Err(format!(
             "target '{}' is a {} target; '{command}' manages local factory processes only. \
-             Spec-declared agents run on it through 'monolith agent apply <spec>'",
+             Spec-declared agents run on it through 'bimo agent apply <spec>'",
             selection.name, selection.kind
         ));
     }

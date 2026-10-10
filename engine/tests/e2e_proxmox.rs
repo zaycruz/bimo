@@ -1,9 +1,11 @@
 //! Live checks on the Proxmox cluster (U5 to U9).
 //!
-//! Gated on `MONOLITH_PROXMOX_LIVE=1`, a proxmox target in the targets file
+//! Gated on `BIMO_PROXMOX_LIVE=1`, a proxmox target in the targets file
 //! and that target's pool-scoped write token (see
-//! `tests/common/live_gate.rs`). Every run writes a dated report to
-//! `.monolith/reports/`.
+//! `tests/common/live_gate.rs`). The U5 driver suite also needs
+//! `BIMO_PROXMOX_FOREIGN_VMID`: an existing guest outside the target's pool
+//! and VMID range, which the driver must refuse and the token must not read.
+//! Every run writes a dated report to `.bimo/reports/`.
 //!
 //! Live safety, enforced by the driver this suite drives: only the
 //! user-provided pool-scoped token is used; no token, role, ACL, SDN or
@@ -29,7 +31,7 @@
 mod common;
 
 use common::live_gate::{gate, live_driver, write_report, Gate, Recorder, Sweeper};
-use monolith::substrate::{codes, GuestRef, Resource, ResourceKind, Substrate};
+use bimo_engine::substrate::{codes, GuestRef, Resource, ResourceKind, Substrate};
 use serde_json::{json, Value};
 
 /// U5: create, tag, scope, recover and destroy real guests.
@@ -47,8 +49,20 @@ fn driver_creates_scoped_tagged_guests_and_destroys_only_its_own() {
         }
         Gate::Live { targets, target, .. } => (targets, target),
     };
+    // An existing guest outside the pool and VMID range, named by the
+    // operator: the cluster's own guests are not part of the repository.
+    let Some(foreign_vmid) = bimo_engine::bimo::var("PROXMOX_FOREIGN_VMID").ok().and_then(|v| v.parse::<u32>().ok())
+    else {
+        let reason = "BIMO_PROXMOX_FOREIGN_VMID is not set to the VMID of an existing guest outside the target's pool";
+        let report = write_report("proxmox-driver", "NOT_RUN", json!({"reason": reason, "requested": true}));
+        panic!("NOT RUN (live run requested): {reason}. Report: {}", report.display());
+    };
     let driver = live_driver(&targets, &target);
     let settings = driver.settings().expect("the live target has every driver field").clone();
+    assert!(
+        !(settings.vmid_low..=settings.vmid_high).contains(&foreign_vmid),
+        "BIMO_PROXMOX_FOREIGN_VMID {foreign_vmid} is inside the target's VMID range"
+    );
     if let Err(error) = driver.template_version() {
         let reason = format!("the golden template is not ready: {error} (next: {})", error.next.join("; "));
         let report = write_report("proxmox-driver", "BLOCKED", json!({"reason": reason, "target": target}));
@@ -59,7 +73,7 @@ fn driver_creates_scoped_tagged_guests_and_destroys_only_its_own() {
 
     // Scope: VMIDs outside the range are refused before any API call. The
     // template and an unrelated guest are the two that matter.
-    for vmid in [settings.template_id, 116] {
+    for vmid in [settings.template_id, foreign_vmid] {
         let foreign = Resource {
             kind: ResourceKind::Guest,
             id: format!("pve:{}:{vmid}", settings.node),
@@ -79,7 +93,7 @@ fn driver_creates_scoped_tagged_guests_and_destroys_only_its_own() {
 
     // KTD3: the token itself cannot reach outside the pool (read only).
     let denied = driver
-        .api_get(&format!("/nodes/{}/lxc/116/config", settings.node))
+        .api_get(&format!("/nodes/{}/lxc/{foreign_vmid}/config", settings.node))
         .unwrap()
         .expect_err("the pool-scoped token must not read a guest outside its pool");
     assert_eq!(denied.status, 403, "{denied}");

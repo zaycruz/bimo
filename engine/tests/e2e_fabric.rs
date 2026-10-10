@@ -91,16 +91,16 @@ impl Fabric {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let mut env = BTreeMap::new();
-        env.insert("MONOLITH_HERMES_BIN".to_owned(), tools()["HERMES_BIN"].clone());
-        env.insert("MONOLITH_IRON_PROXY_BIN".to_owned(), tools()["IRON_PROXY_BIN"].clone());
+        env.insert("BIMO_HERMES_BIN".to_owned(), tools()["HERMES_BIN"].clone());
+        env.insert("BIMO_IRON_PROXY_BIN".to_owned(), tools()["IRON_PROXY_BIN"].clone());
         env.insert("MONOLITH_SECRET_DEMO__OPENROUTER".to_owned(), REAL_SECRET.to_owned());
-        env.insert("MONOLITH_READY_TIMEOUT_MS".to_owned(), "90000".to_owned());
+        env.insert("BIMO_READY_TIMEOUT_MS".to_owned(), "90000".to_owned());
         env.insert(
-            "MONOLITH_NODE_BIN".to_owned(),
+            "BIMO_NODE_BIN".to_owned(),
             format!("{}/node", tools()["NODE_BIN_DIR"]),
         );
         env.insert(
-            "MONOLITH_NPM_CACHE".to_owned(),
+            "BIMO_NPM_CACHE".to_owned(),
             repo().join("target/e2e-tools/npm-cache").to_string_lossy().into_owned(),
         );
         Self {
@@ -168,13 +168,13 @@ impl Fabric {
     }
 
     fn agent_with(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Run {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_monolith"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bimo-engine"));
         command.arg("agent").args(args);
         command.args(["--output", "json", "--state-root"]).arg(&self.state_root);
         if let Some(targets) = &self.targets {
             command.arg("--targets-config").arg(targets);
         }
-        command.env_remove("MONOLITH_INJECT_CRASH");
+        command.env_remove("BIMO_INJECT_CRASH");
         command.envs(&self.env);
         for (key, value) in extra_env {
             command.env(key, value);
@@ -233,7 +233,7 @@ impl Drop for Fabric {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let mut command = Command::new(env!("CARGO_BIN_EXE_monolith"));
+            let mut command = Command::new(env!("CARGO_BIN_EXE_bimo-engine"));
             command
                 .args(["agent", "destroy", &name, "--output", "json", "--state-root"])
                 .arg(&self.state_root)
@@ -382,7 +382,7 @@ fn an_apply_killed_before_commit_leaves_remains_that_status_shows_and_apply_clea
 
     // Killed right after the runtime (started after its proxy) was journaled
     // as created.
-    let crashed = fabric.agent_with(&["apply", spec], &[("MONOLITH_INJECT_CRASH", "created:agent_process")]);
+    let crashed = fabric.agent_with(&["apply", spec], &[("BIMO_INJECT_CRASH", "created:agent_process")]);
     assert_eq!(crashed.code, 137);
     let status = fabric.agent(&["status", "e2e-crash"]);
     let result = ok(&status);
@@ -411,7 +411,7 @@ fn an_apply_killed_before_commit_leaves_remains_that_status_shows_and_apply_clea
     // clears both the committed agent and the remains.
     let config = fabric.dir.join("e2e-crash-config/SOUL.md");
     fs::write(&config, "You are a terse assistant. Generation two.\n").unwrap();
-    let crashed = fabric.agent_with(&["apply", spec], &[("MONOLITH_INJECT_CRASH", "ready")]);
+    let crashed = fabric.agent_with(&["apply", spec], &[("BIMO_INJECT_CRASH", "ready")]);
     assert_eq!(crashed.code, 137);
     let status = fabric.agent(&["status", "e2e-crash"]);
     let result = ok(&status);
@@ -440,7 +440,7 @@ fn an_apply_killed_after_commit_still_retires_the_superseded_generation() {
     .unwrap();
     let plan = fabric.agent(&["plan", spec]);
     assert_eq!(ok(&plan)["action"], "replace");
-    let crashed = fabric.agent_with(&["apply", spec], &[("MONOLITH_INJECT_CRASH", "commit")]);
+    let crashed = fabric.agent_with(&["apply", spec], &[("BIMO_INJECT_CRASH", "commit")]);
     assert_eq!(crashed.code, 137);
 
     let status = fabric.agent(&["status", "e2e-retire"]);
@@ -501,7 +501,7 @@ node = "pve-node-c"
         for field in ["name", "tenant_id", "vmid", "placement.node", "secrets[0].hosts"] {
             assert!(fields.contains(&field), "missing {field} in {fields:?}");
         }
-        assert!(run.envelope["next"][0].as_str().unwrap().contains("monolith agent validate"));
+        assert!(run.envelope["next"][0].as_str().unwrap().contains("bimo agent validate"));
     }
     assert!(!fabric.state_root.exists(), "a bad spec must not touch the substrate");
 

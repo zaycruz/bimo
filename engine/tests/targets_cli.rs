@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn monolith() -> &'static str {
-    env!("CARGO_BIN_EXE_monolith")
+    env!("CARGO_BIN_EXE_bimo-engine")
 }
 
 fn run(args: &[&str]) -> (bool, String) {
@@ -103,7 +103,7 @@ guest_id = 203
         ),
     )
     .unwrap();
-    let live = std::env::var("MONOLITH_PROXMOX_LIVE").as_deref() == Ok("1")
+    let live = bimo_engine::bimo::var("PROXMOX_LIVE").as_deref() == Ok("1")
         && std::env::var("MONOLITH_PROXMOX_TOKEN").is_ok_and(|v| !v.is_empty());
 
     let mut command = Command::new(monolith());
