@@ -105,6 +105,10 @@ jobs:
       - run: cargo build --locked --manifest-path engine/Cargo.toml
       - name: Test the engine (live Proxmox suites skip without BIMO_PROXMOX_LIVE=1)
         run: cargo test --locked --manifest-path engine/Cargo.toml
+      - name: Prove the cloudflare substrate under wrangler dev (F1 to F18)
+        run: |
+          (cd engine/cloudflare/host && npm ci && npm audit --audit-level=high)
+          BIMO_CLOUDFLARE_E2E=local cargo test --locked --manifest-path engine/Cargo.toml --test e2e_cloudflare
       - name: Run the engine acceptance scripts
         run: |
           sh engine/tests/acceptance_worker.sh

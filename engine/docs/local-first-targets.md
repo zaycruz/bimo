@@ -32,6 +32,12 @@ Supported target kinds:
   guest is not built yet (U8). See `templates/README.md` and the driver
   fields in `examples/targets.toml`.
 
+- `cloudflare` — driver implemented for `workerd` agents: a Bimo host
+  Worker (`cloudflare/host`) runs each generation as a Dynamic Worker behind
+  its credential gateway. Fields: `url` (the host, `https://`, or
+  `http://127.0.0.1:<port>` for `wrangler dev`) and `token_env` (the host's
+  operator token). See `cloudflare/host/README.md`.
+
 Named targets may be declared in `.bimo/targets.toml`. The target name is
 what users pass to `--target`. The target kind tells the engine which runtime
 adapter would be responsible for that target.

@@ -6,7 +6,7 @@
 //! process groups on this host; `proxmox` runs them in guests.
 use crate::process::{self, ProcessIdentity};
 use crate::proxy::{ProxyPlan, ProxyPorts};
-use crate::runtimes::{Endpoint, GuestRecipe, LaunchRecipe};
+use crate::runtimes::{Endpoint, GuestRecipe, LaunchRecipe, WorkerRecipe};
 use crate::state;
 use crate::target::{DeploymentTarget, ResolvedTarget};
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,9 @@ pub enum ResourceKind {
     AgentProcess,
     /// The agent's iron-proxy instance.
     ProxyProcess,
+    /// One agent generation as a Dynamic Worker on a Bimo Cloudflare host:
+    /// `cf:<tenant>:<agent>:g<generation>`.
+    Worker,
     /// A Proxmox guest.
     Guest,
     /// Retired: the control-plane end of a guest's egress tunnel to a
@@ -185,6 +188,9 @@ pub struct CreateRequest<'a> {
     /// Builds the runtime's guest recipe (guest substrates) for the port the
     /// runtime serves on inside the guest. Placeholders are already merged.
     pub guest_recipe: &'a dyn Fn(u16) -> Result<GuestRecipe, FabricError>,
+    /// Builds the runtime's Worker recipe (the cloudflare substrate), with
+    /// the control key and placeholders in its environment.
+    pub worker_recipe: &'a dyn Fn() -> Result<WorkerRecipe, FabricError>,
     pub control_key: &'a str,
     /// The agent's credential proxy. The driver starts it before the agent,
     /// points the agent's traffic at it and confines the agent so it cannot
@@ -260,6 +266,9 @@ pub fn driver_for(target: &ResolvedTarget) -> Result<Box<dyn Substrate>, FabricE
         DeploymentTarget::Proxmox => {
             crate::proxmox::ProxmoxDriver::from_target(target).map(|d| Box::new(d) as Box<dyn Substrate>)
         }
+        DeploymentTarget::Cloudflare => {
+            crate::cloudflare::CloudflareDriver::from_target(target).map(|d| Box::new(d) as Box<dyn Substrate>)
+        }
         DeploymentTarget::Ssh => Err(FabricError::new(
             codes::TARGET_UNAVAILABLE,
             format!(
@@ -267,7 +276,7 @@ pub fn driver_for(target: &ResolvedTarget) -> Result<Box<dyn Substrate>, FabricE
                 target.name
             ),
         )
-        .next("place the agent on 'local' or a configured proxmox target")),
+        .next("place the agent on 'local' or a configured proxmox or cloudflare target")),
     }
 }
 
