@@ -6,12 +6,17 @@
 //! - unset: writes a NOT_RUN report and passes;
 //! - `local`: runs the host under `wrangler dev` (Dynamic Workers and
 //!   Durable Objects run locally in workerd) with an upstream server on this
-//!   host's loopback, and checks the whole failure list;
-//! - anything else (`live` included, until a deployed host is approved)
-//!   fails, so a requested run never shows as passed.
+//!   host's loopback that records what arrives. Needs `npm ci` in
+//!   engine/cloudflare/host.
+//! - `live`: a deployed host at `BIMO_CLOUDFLARE_URL`, operator token in
+//!   `BIMO_CLOUDFLARE_TOKEN`. Requests leave from Cloudflare's network, so
+//!   public echo services stand in for the upstreams (httpbin.org is the
+//!   secret's host, postman-echo.com another allowed host) and the suite
+//!   reads what arrived from their echo. Checks that need the recorder or
+//!   the host's storage (that nothing arrived, F12) are local only.
+//! - anything else fails, so a requested run never shows as passed.
 //!
-//! Needs `npm ci` in engine/cloudflare/host. Every run writes
-//! `.bimo/reports/<time>-cloudflare-<pid>.json`.
+//! Every run writes `.bimo/reports/<time>-cloudflare-<pid>.json`.
 //!
 //! Failure modes, written before the cases (plan:
 //! docs/plans/2026-10-10-cloudflare-substrate.md):
@@ -312,8 +317,106 @@ impl Cli {
     }
 }
 
-/// A worker spec for `name` in `tenant`, its source copied next to it.
-fn write_spec(dir: &Path, name: &str, tenant: &str, fixture: &str, extra_allow: &[&str]) -> PathBuf {
+/// Where the agents' requests go and how the suite sees what arrived.
+enum World {
+    /// `wrangler dev` and a recording upstream on loopback.
+    Local { host: Host, upstream: Upstream },
+    /// A deployed host; public echo services report what they received.
+    Live { url: String },
+}
+
+impl World {
+    fn url(&self) -> &str {
+        match self {
+            World::Local { host, .. } => &host.url,
+            World::Live { url } => url,
+        }
+    }
+
+    fn local(&self) -> Option<&Upstream> {
+        match self {
+            World::Local { upstream, .. } => Some(upstream),
+            World::Live { .. } => None,
+        }
+    }
+
+    fn persist(&self) -> Option<&Path> {
+        match self {
+            World::Local { host, .. } => Some(&host.persist),
+            World::Live { .. } => None,
+        }
+    }
+
+    fn allow(&self) -> &'static [&'static str] {
+        match self {
+            World::Local { .. } => &["localhost", "127.0.0.1"],
+            World::Live { .. } => &["httpbin.org", "postman-echo.com"],
+        }
+    }
+
+    fn secret_hosts(&self) -> &'static [&'static str] {
+        &self.allow()[..1]
+    }
+
+    /// A URL on the secret's host, tagged so the suite can find it.
+    fn secret_url(&self, tag: &str) -> String {
+        match self {
+            World::Local { upstream, .. } => format!("http://localhost:{}/{tag}", upstream.port),
+            World::Live { .. } => format!("https://httpbin.org/anything/{tag}"),
+        }
+    }
+
+    /// A URL on an allowed host that is not the secret's.
+    fn other_url(&self, tag: &str) -> String {
+        match self {
+            World::Local { upstream, .. } => format!("http://127.0.0.1:{}/{tag}", upstream.port),
+            World::Live { .. } => format!("https://postman-echo.com/get?tag={tag}"),
+        }
+    }
+
+    /// A URL that answers 302 to another allowed host.
+    fn redirect_url(&self) -> String {
+        match self {
+            World::Local { upstream, .. } => format!("http://localhost:{}/redirect", upstream.port),
+            World::Live { .. } => {
+                "https://httpbin.org/redirect-to?url=https%3A%2F%2Fpostman-echo.com%2Fget%3Ftag%3Dlanded&status_code=302".to_owned()
+            }
+        }
+    }
+
+    fn tcp_target(&self) -> (String, u16) {
+        match self {
+            World::Local { upstream, .. } => ("127.0.0.1".to_owned(), upstream.port),
+            World::Live { .. } => ("httpbin.org".to_owned(), 80),
+        }
+    }
+
+    /// The `X-Token` the upstream received for `tag`: from the recorder, or
+    /// from the echo in the agent's view of the response.
+    fn received(&self, tag: &str, response: &Value) -> Option<String> {
+        match self {
+            World::Local { upstream, .. } => upstream.find(&format!("/{tag}"))?.headers.get("x-token").cloned(),
+            World::Live { .. } => {
+                let echo: Value = serde_json::from_str(response["body"].as_str()?).ok()?;
+                echo["headers"]
+                    .as_object()?
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("x-token"))
+                    .and_then(|(_, value)| value.as_str().map(str::to_owned))
+            }
+        }
+    }
+}
+
+/// The path of a URL, as the gateway's audit line records it.
+fn path_of(url: &str) -> String {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let path = rest.find('/').map(|i| &rest[i..]).unwrap_or("/");
+    path.split('?').next().unwrap_or("/").to_owned()
+}
+
+/// A workerd spec for `name` in `tenant`, its source copied next to it.
+fn write_spec(dir: &Path, world: &World, name: &str, tenant: &str, fixture: &str, extra_allow: &[&str]) -> PathBuf {
     let source = dir.join(format!("{name}-src"));
     fs::create_dir_all(&source).unwrap();
     fs::copy(
@@ -321,8 +424,9 @@ fn write_spec(dir: &Path, name: &str, tenant: &str, fixture: &str, extra_allow: 
         source.join("index.js"),
     )
     .unwrap();
-    let mut allow = vec!["\"localhost\"".to_owned(), "\"127.0.0.1\"".to_owned()];
-    allow.extend(extra_allow.iter().map(|h| format!("\"{h}\"")));
+    let quote = |hosts: &[&str]| hosts.iter().map(|h| format!("\"{h}\"")).collect::<Vec<_>>().join(", ");
+    let mut allow: Vec<&str> = world.allow().to_vec();
+    allow.extend_from_slice(extra_allow);
     let text = format!(
         r#"schema_version = 1
 name = "{name}"
@@ -336,7 +440,7 @@ path = "{name}-src"
 [[secrets]]
 env = "{SECRET_ENV}"
 handle = "{tenant}/upstream"
-hosts = ["localhost"]
+hosts = [{secret_hosts}]
 
 [egress]
 allow = [{allow}]
@@ -344,7 +448,8 @@ allow = [{allow}]
 [placement]
 substrate = "{TARGET}"
 "#,
-        allow = allow.join(", ")
+        secret_hosts = quote(world.secret_hosts()),
+        allow = quote(&allow),
     );
     let path = dir.join(format!("{name}.toml"));
     fs::write(&path, text).unwrap();
@@ -395,6 +500,12 @@ impl Checks {
         self.list.push(json!({"id": id, "check": what, "ok": ok, "detail": detail}));
     }
 
+    /// A check this mode cannot make; recorded so the report says so.
+    fn skip(&mut self, id: &str, what: &str, why: &str) {
+        eprintln!("[skip] {id} {what}: {why}");
+        self.list.push(json!({"id": id, "check": what, "ok": true, "skipped": why}));
+    }
+
     fn failed(&self) -> Vec<&Value> {
         self.list.iter().filter(|c| c["ok"] != true).collect()
     }
@@ -406,46 +517,52 @@ fn code(envelope: &Value) -> String {
 
 #[test]
 fn cloudflare_substrate() {
-    let mode = bimo_engine::bimo::var("CLOUDFLARE_E2E").ok();
-    match mode.as_deref() {
-        None | Some("") => {
-            let path = write_report(SUITE, "NOT_RUN", json!({"reason": "BIMO_CLOUDFLARE_E2E is not set"}));
-            eprintln!("NOT RUN: BIMO_CLOUDFLARE_E2E is not set ({})", path.display());
-            return;
-        }
-        Some("local") => {}
-        Some(other) => {
-            let path = write_report(
-                SUITE,
-                "BLOCKED",
-                json!({"reason": format!("BIMO_CLOUDFLARE_E2E={other}: only 'local' is implemented; live needs a deployed host")}),
-            );
-            panic!("BIMO_CLOUDFLARE_E2E={other} is not supported yet ({})", path.display());
-        }
+    let mode = bimo_engine::bimo::var("CLOUDFLARE_E2E").ok().unwrap_or_default();
+    if mode.is_empty() {
+        let path = write_report(SUITE, "NOT_RUN", json!({"reason": "BIMO_CLOUDFLARE_E2E is not set"}));
+        eprintln!("NOT RUN: BIMO_CLOUDFLARE_E2E is not set ({})", path.display());
+        return;
     }
-
     let dir = repo().join("target/e2e-cloudflare").join(std::process::id().to_string());
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let token = random_hex(32);
-    let upstream = Upstream::start();
-    let host = match Host::start(&dir, &token) {
-        Ok(host) => host,
-        Err(reason) => {
-            let path = write_report(SUITE, "FAIL", json!({"reason": reason, "run_dir": dir}));
-            panic!("{reason} ({})", path.display());
+    let blocked = |reason: String| -> ! {
+        let path = write_report(SUITE, "BLOCKED", json!({"mode": mode, "reason": reason}));
+        panic!("{reason} ({})", path.display());
+    };
+    let (world, token) = match mode.as_str() {
+        "local" => {
+            let token = random_hex(32);
+            let upstream = Upstream::start();
+            match Host::start(&dir, &token) {
+                Ok(host) => (World::Local { host, upstream }, token),
+                Err(reason) => blocked(reason),
+            }
         }
+        "live" => {
+            let url = std::env::var("BIMO_CLOUDFLARE_URL").unwrap_or_default();
+            let token = std::env::var("BIMO_CLOUDFLARE_TOKEN").unwrap_or_default();
+            if !url.starts_with("https://") || token.is_empty() {
+                blocked("live mode needs BIMO_CLOUDFLARE_URL (https://) and BIMO_CLOUDFLARE_TOKEN".to_owned());
+            }
+            if request("GET", &format!("{url}/healthz"), None).0 != 200 {
+                blocked(format!("{url}/healthz does not answer 200"));
+            }
+            (World::Live { url: url.trim_end_matches('/').to_owned() }, token)
+        }
+        other => blocked(format!("BIMO_CLOUDFLARE_E2E={other}: use local or live")),
     };
     let started = Instant::now();
     let mut checks = Checks::default();
-    let report = run(&dir, &host, &upstream, &token, &mut checks);
+    let report = run(&dir, &world, &token, &mut checks);
     let failed = checks.failed().len();
     let status = if failed == 0 { "PASS" } else { "FAIL" };
     let path = write_report(
         SUITE,
         status,
         json!({
-            "mode": "local",
+            "mode": mode,
+            "host": world.url(),
             "run_dir": dir,
             "elapsed_ms": started.elapsed().as_millis() as u64,
             "checks": checks.list,
@@ -453,25 +570,27 @@ fn cloudflare_substrate() {
             "observed": report,
         }),
     );
-    drop(host);
+    drop(world);
     eprintln!("report: {}", path.display());
     assert_eq!(failed, 0, "{failed} check(s) failed; see {}", path.display());
 }
 
-fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut Checks) -> Value {
-    let up = upstream.port;
+fn run(dir: &Path, world: &World, token: &str, checks: &mut Checks) -> Value {
     let value_a = format!("cfval-a-{}", random_hex(12));
     let value_a2 = format!("cfval-a2-{}", random_hex(12));
     let value_b = format!("cfval-b-{}", random_hex(12));
     let values = [value_a.as_str(), value_a2.as_str(), value_b.as_str()];
-    let mut observed = json!({});
+    // Names unique per run, so runs against one live host never meet.
+    let run_id = random_hex(3);
+    let (name_a, name_b, name_r) = (format!("cf-a-{run_id}"), format!("cf-b-{run_id}"), format!("cf-r-{run_id}"));
+    let mut observed = json!({"agents": [name_a, name_b, name_r]});
 
     let targets = dir.join("targets.toml");
     fs::write(
         &targets,
         format!(
             "schema_version = 1\ndefault_target = \"{TARGET}\"\n\n[[targets]]\nkind = \"cloudflare\"\nname = \"{TARGET}\"\nurl = \"{}\"\ntoken_env = \"{TOKEN_ENV}\"\n",
-            host.url
+            world.url()
         ),
     )
     .unwrap();
@@ -486,16 +605,19 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
         targets: targets.clone(),
         env,
     };
-    let api = |path: &str| format!("{}{path}", host.url);
+    let api = |path: &str| format!("{}{path}", world.url());
+    let generation = |name: &str, n: u32| api(&format!("/v1/agents/{name}/generations/{n}"));
+    let route = |tenant: &str, name: &str, n: u32| api(&format!("/v1/tenants/{tenant}/routes/{name}-g{n}"));
+    let mut audited = Vec::new();
 
     // F11: the control API refuses a missing or wrong token, and so does
     // bimo when its token is wrong.
-    let (none, _) = request("GET", &api("/v1/agents/cf-a/generations/1"), None);
-    let (wrong, _) = request("GET", &api("/v1/agents/cf-a/generations/1"), Some("not-the-token"));
-    let (right, _) = request("GET", &api("/v1/agents/cf-a/generations/1"), Some(token));
+    let (none, _) = request("GET", &generation(&name_a, 1), None);
+    let (wrong, _) = request("GET", &generation(&name_a, 1), Some("not-the-token"));
+    let (right, _) = request("GET", &generation(&name_a, 1), Some(token));
     checks.check("F11", "control API refuses no token and a wrong token", none == 401 && wrong == 401, format!("no token {none}, wrong {wrong}"));
     checks.check("F11", "control API accepts the suite's operator token", right == 404, format!("HTTP {right} (404 expected: nothing applied yet)"));
-    let spec_a = write_spec(dir, "cf-a", "cfa", "cf-agent", &[]);
+    let spec_a = write_spec(dir, world, &name_a, "cfa", "cf-agent", &[]);
     let bad = Cli {
         env: cli.env.iter().map(|(k, v)| (k.clone(), if k == TOKEN_ENV { "wrong".to_owned() } else { v.clone() })).collect(),
         dir: dir.to_owned(),
@@ -507,10 +629,10 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
 
     // F1: an agent that refuses its first task is never ready and leaves
     // nothing on the host.
-    let spec_r = write_spec(dir, "cf-r", "cfa", "cf-agent-refuses", &[]);
+    let spec_r = write_spec(dir, world, &name_r, "cfa", "cf-agent-refuses", &[]);
     let (exit, envelope) = cli.run(&["apply", spec_r.to_str().unwrap()]);
-    let (gen_r, _) = request("GET", &api("/v1/agents/cf-r/generations/1"), Some(token));
-    let (route_r, _) = request("GET", &api("/v1/tenants/cfa/routes/cf-r-g1"), Some(token));
+    let (gen_r, _) = request("GET", &generation(&name_r, 1), Some(token));
+    let (route_r, _) = request("GET", &route("cfa", &name_r, 1), Some(token));
     checks.check("F1", "an agent that refuses tasks is not reported ready", exit != 0 && code(&envelope) == "probe_failed", format!("exit {exit}, code {}", code(&envelope)));
     checks.check("F1", "the failed apply leaves no generation or route on the host", gen_r == 404 && route_r == 404, format!("generation {gen_r}, route {route_r}"));
 
@@ -518,14 +640,14 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
     let (exit, envelope) = cli.run(&["apply", spec_a.to_str().unwrap()]);
     let result = &envelope["result"];
     let endpoint_a = result["endpoint"].as_str().unwrap_or_default().to_owned();
-    observed["apply_a"] = json!({"exit": exit, "generation": result["generation"], "ready_ms": result["ready_ms"], "endpoint": endpoint_a});
+    observed["apply_a"] = json!({"exit": exit, "generation": result["generation"], "ready_ms": result["ready_ms"], "phases": result["phases"]});
     checks.check(
         "F1",
         "apply of a working agent is ready with an accepted first task",
         exit == 0 && result["generation"] == 1 && result["first_task_id"].is_string() && !endpoint_a.is_empty(),
         format!("exit {exit}, code {}", code(&envelope)),
     );
-    let key_a = cli.control_key("cf-a");
+    let key_a = cli.control_key(&name_a);
 
     // F14: the agent needs its control key.
     let (anonymous, _) = request("POST", &format!("{endpoint_a}/bimo/v1/tasks"), None);
@@ -545,22 +667,24 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
         format!("HTTP {status}, placeholder present: {}", !placeholder_a.is_empty()),
     );
     let mut leaked = Vec::new();
-    for path in [
-        "/v1/agents/cf-a/generations/1",
-        "/v1/tenants/cfa/routes/cf-a-g1",
-        "/v1/tenants/cfa/routes/cf-a-g1/audit",
+    for url in [
+        generation(&name_a, 1),
+        route("cfa", &name_a, 1),
+        format!("{}/audit", route("cfa", &name_a, 1)),
     ] {
-        let (_, body) = request("GET", &api(path), Some(token));
+        let (_, body) = request("GET", &url, Some(token));
         if values.iter().any(|v| body.contains(v)) {
-            leaked.push(path);
+            leaked.push(path_of(&url));
         }
     }
     checks.check("F2", "no control API response holds a value", leaked.is_empty(), format!("leaked in {leaked:?}"));
 
-    let call = |endpoint: &str, key: &str, url: &str, header: &str| -> Value {
+    let mut call = |endpoint: &str, key: &str, url: &str, header: &str| -> Value {
+        audited.push(path_of(url));
+        let target = url.replace('%', "%25").replace('&', "%26").replace('?', "%3F").replace('=', "%3D");
         let (status, body) = request(
             "GET",
-            &format!("{endpoint}/test/call?url={url}&header=X-Token:{header}"),
+            &format!("{endpoint}/test/call?url={target}&header=X-Token:{header}"),
             Some(key),
         );
         let mut value: Value = serde_json::from_str(&body).unwrap_or(json!({"raw": body}));
@@ -569,25 +693,26 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
     };
 
     // F3: swapped on the secret's host.
-    let response = call(&endpoint_a, &key_a, &format!("http://localhost:{up}/f3"), SECRET_ENV);
-    let seen = upstream.find("/f3");
+    let response = call(&endpoint_a, &key_a, &world.secret_url("f3"), SECRET_ENV);
+    let got = world.received("f3", &response);
     checks.check(
         "F3",
         "the placeholder is swapped for the value on the secret's host",
-        seen.as_ref().and_then(|s| s.headers.get("x-token")).map(String::as_str) == Some(value_a.as_str()),
-        format!("agent saw {}, upstream got the request: {}", response["status"], seen.is_some()),
+        got.as_deref() == Some(value_a.as_str()),
+        format!("agent saw {}, upstream got the value: {}", response["status"], got.as_deref() == Some(value_a.as_str())),
     );
-    checks.check(
-        "F2",
-        "the upstream's response reaches the agent without a value",
-        response["status"] == 200 && !values.iter().any(|v| response.to_string().contains(v)),
-        format!("agent saw {}", response["status"]),
-    );
+    if world.local().is_some() {
+        checks.check(
+            "F2",
+            "the upstream's response reaches the agent without a value",
+            response["status"] == 200 && !values.iter().any(|v| response.to_string().contains(v)),
+            format!("agent saw {}", response["status"]),
+        );
+    }
 
     // F4: not swapped on another allowed host.
-    let response = call(&endpoint_a, &key_a, &format!("http://127.0.0.1:{up}/f4"), SECRET_ENV);
-    let seen = upstream.find("/f4");
-    let got = seen.as_ref().and_then(|s| s.headers.get("x-token")).cloned().unwrap_or_default();
+    let response = call(&endpoint_a, &key_a, &world.other_url("f4"), SECRET_ENV);
+    let got = world.received("f4", &response).unwrap_or_default();
     checks.check(
         "F4",
         "an allowed host that is not the secret's gets the placeholder",
@@ -597,17 +722,20 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
 
     // F5: a host outside the allowlist is refused before anything leaves.
     let mut refused = Vec::new();
-    if let Some(side) = upstream.side_port {
-        let response = call(&endpoint_a, &key_a, &format!("http://[::1]:{side}/f5"), SECRET_ENV);
-        refused.push(json!({"host": "[::1] (side listener)", "status": response["status"]}));
-        checks.check(
-            "F5",
-            "a request to a host outside the allowlist is refused and never arrives",
-            response["status"] == 403 && upstream.find("/f5").is_none(),
-            format!("agent saw {}, arrived: {}", response["status"], upstream.find("/f5").is_some()),
-        );
-    } else {
-        checks.check("F5", "a side listener on ::1 is available", false, "could not bind [::1]; F5 cannot observe a leak");
+    if let Some(upstream) = world.local() {
+        match upstream.side_port {
+            Some(side) => {
+                let response = call(&endpoint_a, &key_a, &format!("http://[::1]:{side}/f5"), SECRET_ENV);
+                refused.push(json!({"host": "[::1] (side listener)", "status": response["status"]}));
+                checks.check(
+                    "F5",
+                    "a request to a host outside the allowlist is refused and never arrives",
+                    response["status"] == 403 && upstream.find("/f5").is_none(),
+                    format!("agent saw {}, arrived: {}", response["status"], upstream.find("/f5").is_some()),
+                );
+            }
+            None => checks.check("F5", "a side listener on ::1 is available", false, "could not bind [::1]; F5 cannot observe a leak"),
+        }
     }
     let response = call(&endpoint_a, &key_a, "http://example.com/f5b", SECRET_ENV);
     refused.push(json!({"host": "example.com", "status": response["status"]}));
@@ -615,39 +743,42 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
     observed["refused"] = json!(refused);
 
     // F6: raw TCP carries nothing.
+    let (tcp_host, tcp_port) = world.tcp_target();
     let (status, body) = request(
         "GET",
-        &format!("{endpoint_a}/test/connect?host=127.0.0.1&port={up}"),
+        &format!("{endpoint_a}/test/connect?host={tcp_host}&port={tcp_port}"),
         Some(&key_a),
     );
     let connect: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let arrived = world.local().is_some_and(|u| u.find("/tcp").is_some());
     checks.check(
         "F6",
         "raw TCP from the agent reaches nothing",
-        status == 200 && connect["reached"] == false && upstream.find("/tcp").is_none(),
-        format!("HTTP {status}, agent: {connect}, arrived: {}", upstream.find("/tcp").is_some()),
+        status == 200 && connect["reached"] == false && !arrived,
+        format!("HTTP {status}, agent: {connect}, arrived: {arrived}"),
     );
     observed["connect"] = connect;
 
     // F17: redirects go back to the agent.
-    let response = call(&endpoint_a, &key_a, &format!("http://localhost:{up}/redirect"), SECRET_ENV);
+    let response = call(&endpoint_a, &key_a, &world.redirect_url(), SECRET_ENV);
+    let followed = world.local().is_some_and(|u| u.find("/landed").is_some());
     checks.check(
         "F17",
         "the gateway returns a redirect to the agent and does not follow it",
-        response["status"] == 302 && upstream.find("/landed").is_none(),
-        format!("agent saw {} (location {}), followed: {}", response["status"], response["location"], upstream.find("/landed").is_some()),
+        response["status"] == 302 && !followed,
+        format!("agent saw {} (location {}), followed: {followed}", response["status"], response["location"]),
     );
 
     // Agent B in tenant cfb. F7: A's placeholder is not B's to swap.
-    let spec_b = write_spec(dir, "cf-b", "cfb", "cf-agent", &[]);
+    let spec_b = write_spec(dir, world, &name_b, "cfb", "cf-agent", &[]);
     let (exit, envelope) = cli.run(&["apply", spec_b.to_str().unwrap()]);
     let endpoint_b = envelope["result"]["endpoint"].as_str().unwrap_or_default().to_owned();
-    let key_b = cli.control_key("cf-b");
+    let key_b = cli.control_key(&name_b);
     checks.check("F7", "agent B (tenant cfb) applies", exit == 0, format!("exit {exit}, code {}", code(&envelope)));
-    call(&endpoint_b, &key_b, &format!("http://localhost:{up}/f7-own"), SECRET_ENV);
-    call(&endpoint_b, &key_b, &format!("http://localhost:{up}/f7"), &placeholder_a);
-    let own = upstream.find("/f7-own").and_then(|s| s.headers.get("x-token").cloned()).unwrap_or_default();
-    let cross = upstream.find("/f7").and_then(|s| s.headers.get("x-token").cloned()).unwrap_or_default();
+    let response = call(&endpoint_b, &key_b, &world.secret_url("f7-own"), SECRET_ENV);
+    let own = world.received("f7-own", &response).unwrap_or_default();
+    let response = call(&endpoint_b, &key_b, &world.secret_url("f7"), &placeholder_a);
+    let cross = world.received("f7", &response).unwrap_or_default();
     checks.check("F7", "B's own placeholder is swapped for B's value", own == value_b, format!("B got its value: {}", own == value_b));
     checks.check(
         "F7",
@@ -656,7 +787,8 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
         format!("upstream got A's value: {}", cross == value_a),
     );
 
-    // F18: another tenant cannot take cf-a, even from another control plane.
+    // F18: another tenant cannot take A's name, even from another control
+    // plane, and its rollback does not touch A.
     let other = Cli {
         state_root: dir.join("state-other"),
         dir: dir.to_owned(),
@@ -665,7 +797,7 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
     };
     let takeover_dir = dir.join("takeover");
     fs::create_dir_all(&takeover_dir).unwrap();
-    let spec_t = write_spec(&takeover_dir, "cf-a", "cfb", "cf-agent", &[]);
+    let spec_t = write_spec(&takeover_dir, world, &name_a, "cfb", "cf-agent", &[]);
     let (exit, envelope) = other.run(&["apply", spec_t.to_str().unwrap()]);
     let (still, _) = request("POST", &format!("{endpoint_a}/bimo/v1/tasks"), Some(&key_a));
     checks.check("F18", "another tenant's apply of the same name is a tenant conflict", exit != 0 && code(&envelope) == "tenant_conflict", format!("exit {exit}, code {}", code(&envelope)));
@@ -681,16 +813,17 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
         exit == 0 && envelope["result"]["generation"] == 1 && rotated.contains(&json!(SECRET_ENV)),
         format!("exit {exit}, generation {}, rotated {rotated:?}", envelope["result"]["generation"]),
     );
-    call(&endpoint_a, &key_a, &format!("http://localhost:{up}/f8"), SECRET_ENV);
-    let got = upstream.find("/f8").and_then(|s| s.headers.get("x-token").cloned()).unwrap_or_default();
+    let response = call(&endpoint_a, &key_a, &world.secret_url("f8"), SECRET_ENV);
+    let got = world.received("f8", &response).unwrap_or_default();
     checks.check("F8", "the running agent's next request carries the new value", got == value_a2, format!("new value used: {}, old value used: {}", got == value_a2, got == value_a));
 
     // F9: one audit line per outbound request, no values.
-    let (exit, envelope) = cli.run(&["logs", "cf-a", "--stream", "egress"]);
+    let (exit, envelope) = cli.run(&["logs", &name_a, "--stream", "egress"]);
     let text = envelope["result"]["text"].as_str().unwrap_or_default().to_owned();
     let lines: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     let line_for = |path: &str| lines.iter().find(|l| l["audit"]["path"] == path).cloned().unwrap_or(Value::Null);
-    let f3 = line_for("/f3");
+    let f3_path = path_of(&world.secret_url("f3"));
+    let f3 = line_for(&f3_path);
     let f5 = line_for("/f5b");
     checks.check(
         "F9",
@@ -704,25 +837,32 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
         f5["audit"]["action"] == "reject" && f5["rejected_by"] == "allowlist",
         format!("line: {f5}"),
     );
-    let expected = ["/f3", "/f4", "/f5b", "/redirect", "/f8"];
-    let missing: Vec<&str> = expected.iter().copied().filter(|p| line_for(p).is_null()).collect();
+    // A's requests so far: every call made through endpoint A (B's two
+    // calls are in B's route).
+    let b_paths = [path_of(&world.secret_url("f7-own")), path_of(&world.secret_url("f7"))];
+    let missing: Vec<&String> = audited.iter().filter(|p| !b_paths.contains(p)).filter(|p| line_for(p).is_null()).collect();
     checks.check("F9", "every outbound request has an audit line", missing.is_empty(), format!("missing {missing:?} of {} lines", lines.len()));
     checks.check("F9", "no audit line holds a value", !values.iter().any(|v| text.contains(v)), "a value appears in the audit");
     observed["audit_lines"] = json!(lines.len());
 
-    // F12, F13 while values are stored: sealed on the host, absent here.
-    let in_storage = files_holding(&host.persist, &values);
-    checks.check("F12", "no value is stored in plaintext in host storage", in_storage.is_empty(), format!("found in {in_storage:?}"));
+    // F12 while values are stored: sealed in host storage.
+    match world.persist() {
+        Some(persist) => {
+            let in_storage = files_holding(persist, &values);
+            checks.check("F12", "no value is stored in plaintext in host storage", in_storage.is_empty(), format!("found in {in_storage:?}"));
+        }
+        None => checks.skip("F12", "no value is stored in plaintext in host storage", "Durable Object storage is not readable from outside in live mode; proven in local mode"),
+    }
 
     // F15: a new generation retires the old one completely.
-    let spec_a = write_spec(dir, "cf-a", "cfa", "cf-agent", &["example.com"]);
+    let spec_a = write_spec(dir, world, &name_a, "cfa", "cf-agent", &["example.org"]);
     let (exit, envelope) = cli.run(&["apply", spec_a.to_str().unwrap()]);
     let endpoint_a2 = envelope["result"]["endpoint"].as_str().unwrap_or_default().to_owned();
     let retired = envelope["result"]["retired"].as_array().map(Vec::len).unwrap_or(0);
     checks.check("F15", "a changed spec applies as generation 2", exit == 0 && envelope["result"]["generation"] == 2, format!("exit {exit}, generation {}", envelope["result"]["generation"]));
     let (old_task, _) = request("POST", &format!("{endpoint_a}/bimo/v1/tasks"), Some(&key_a));
-    let (old_gen, _) = request("GET", &api("/v1/agents/cf-a/generations/1"), Some(token));
-    let (old_route, _) = request("GET", &api("/v1/tenants/cfa/routes/cf-a-g1"), Some(token));
+    let (old_gen, _) = request("GET", &generation(&name_a, 1), Some(token));
+    let (old_route, _) = request("GET", &route("cfa", &name_a, 1), Some(token));
     let (new_task, _) = request("POST", &format!("{endpoint_a2}/bimo/v1/tasks"), Some(&key_a));
     checks.check(
         "F15",
@@ -731,12 +871,12 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
         format!("retired {retired}, old task {old_task}, old generation {old_gen}, old route {old_route}"),
     );
     checks.check("F15", "generation 2 serves", new_task == 202, format!("HTTP {new_task}"));
-    let (_, envelope) = cli.run(&["logs", "cf-a", "--stream", "egress"]);
-    let kept = envelope["result"]["text"].as_str().unwrap_or_default().contains("\"/f3\"");
-    checks.check("F9", "generation 1's audit is kept after it is retired", kept, "the /f3 line is gone");
+    let (_, envelope) = cli.run(&["logs", &name_a, "--stream", "egress"]);
+    let kept = envelope["result"]["text"].as_str().unwrap_or_default().contains(&format!("\"{f3_path}\""));
+    checks.check("F9", "generation 1's audit is kept after it is retired", kept, "the f3 line is gone");
 
     // F16: status follows the host.
-    let (_, envelope) = cli.run(&["status", "cf-a"]);
+    let (_, envelope) = cli.run(&["status", &name_a]);
     checks.check(
         "F16",
         "status reports ready at generation 2",
@@ -745,23 +885,26 @@ fn run(dir: &Path, host: &Host, upstream: &Upstream, token: &str, checks: &mut C
     );
 
     // F10: destroy is complete and idempotent.
-    let (first, _) = cli.run(&["destroy", "cf-a"]);
-    let (second, envelope) = cli.run(&["destroy", "cf-a"]);
+    let (first, _) = cli.run(&["destroy", &name_a]);
+    let (second, envelope) = cli.run(&["destroy", &name_a]);
     let destroyed_again = envelope["result"]["destroyed"].as_array().map(Vec::len).unwrap_or(99);
-    let (gen2, _) = request("GET", &api("/v1/agents/cf-a/generations/2"), Some(token));
-    let (route2, _) = request("GET", &api("/v1/tenants/cfa/routes/cf-a-g2"), Some(token));
+    let (gen2, _) = request("GET", &generation(&name_a, 2), Some(token));
+    let (route2, _) = request("GET", &route("cfa", &name_a, 2), Some(token));
     let (task2, _) = request("POST", &format!("{endpoint_a2}/bimo/v1/tasks"), Some(&key_a));
     checks.check("F10", "destroy succeeds twice, the second time with nothing to do", first == 0 && second == 0 && destroyed_again == 0, format!("exits {first}/{second}, second destroyed {destroyed_again}"));
     checks.check("F10", "the host keeps no generation, route or endpoint", gen2 == 404 && route2 == 404 && task2 == 404, format!("generation {gen2}, route {route2}, endpoint {task2}"));
-    let (_, envelope) = cli.run(&["status", "cf-a"]);
+    let (_, envelope) = cli.run(&["status", &name_a]);
     checks.check("F16", "status reports destroyed after destroy", envelope["result"]["status"] == "destroyed", format!("status {}", envelope["result"]["status"]));
-    let (exit, _) = cli.run(&["destroy", "cf-b"]);
-    checks.check("F10", "agent B is destroyed", exit == 0, format!("exit {exit}"));
+    let (exit, _) = cli.run(&["destroy", &name_b]);
+    let (gen_b, _) = request("GET", &generation(&name_b, 1), Some(token));
+    checks.check("F10", "agent B is destroyed", exit == 0 && gen_b == 404, format!("exit {exit}, generation {gen_b}"));
 
     // F12, F13 at the end: nothing in host storage, nothing on this disk
     // (state roots, specs, transcript, the host's own log).
-    let in_storage = files_holding(&host.persist, &values);
-    checks.check("F12", "no value remains in host storage", in_storage.is_empty(), format!("found in {in_storage:?}"));
+    if let Some(persist) = world.persist() {
+        let in_storage = files_holding(persist, &values);
+        checks.check("F12", "no value remains in host storage", in_storage.is_empty(), format!("found in {in_storage:?}"));
+    }
     let on_disk: Vec<String> = files_holding(dir, &values)
         .into_iter()
         .filter(|p| !p.starts_with("host-state"))

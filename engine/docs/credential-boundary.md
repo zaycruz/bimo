@@ -264,5 +264,6 @@ agent runs there as a Dynamic Worker, and the boundary is part of the host:
 
 Proof: `tests/e2e_cloudflare.rs` (F1 to F18 in
 `docs/plans/2026-10-10-cloudflare-substrate.md`). With
-`BIMO_CLOUDFLARE_E2E=local` it runs the host under `wrangler dev` and writes
-a report to `.bimo/reports/`.
+`BIMO_CLOUDFLARE_E2E=local` it runs the host under `wrangler dev`; with
+`live` it uses a deployed host (`BIMO_CLOUDFLARE_URL`,
+`BIMO_CLOUDFLARE_TOKEN`). Both write a report to `.bimo/reports/`.

@@ -108,6 +108,8 @@ The E2E suite (`tests/e2e_cloudflare.rs`, `BIMO_CLOUDFLARE_E2E=local|live`) must
   checks covering F1 to F18 pass. The first run caught a real F18 defect: a
   refused takeover's rollback deleted the owner's generation by name. Worker
   resources and host deletes are now scoped to the tenant.
-- Live (a deployed host, Paid plan) waits for operator approval. Live mode
-  in the suite also needs a public upstream to observe swaps, so it is not
-  wired yet. Until then the suite fails it as BLOCKED.
+- Live mode is wired: `BIMO_CLOUDFLARE_E2E=live` with `BIMO_CLOUDFLARE_URL`
+  and `BIMO_CLOUDFLARE_TOKEN`. Public echo services stand in for the
+  upstreams. F12 and the never-arrived checks are local only.
+- 2026-10-10, first live deploy: blocked. The account is on the Workers Free
+  plan and Dynamic Workers need Paid (API error 10195). Nothing was created.

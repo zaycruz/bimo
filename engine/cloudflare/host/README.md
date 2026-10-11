@@ -18,6 +18,7 @@ and failure list are in `docs/plans/2026-10-10-cloudflare-substrate.md`.
 ## Requirements
 
 - Workers Paid plan. Dynamic Workers (`worker_loaders`) are in open beta.
+  On the Free plan, `wrangler deploy` fails with API error 10195.
 - Two secrets, never in `wrangler.jsonc`:
   - `BIMO_OPERATOR_TOKEN`: the bearer token the engine sends. Put the same
     value in the variable named by the target's `token_env`.
