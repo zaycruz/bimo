@@ -28,3 +28,12 @@ bind_port = 7070                # bind agent in the template
 # Per-tenant segments (KTD5). When set, a tenant without a VLAN is refused.
 # [targets.tenant_vlans]
 # acme = 210
+
+# A Bimo host Worker on Cloudflare (cloudflare/host/README.md). workerd
+# agents run there as Dynamic Workers behind its credential gateway. The
+# operator token is read from token_env only and is never written anywhere.
+[[targets]]
+kind = "cloudflare"
+name = "cf"
+url = "https://bimo-host.example.workers.dev"   # or http://127.0.0.1:8787 for wrangler dev
+token_env = "BIMO_CLOUDFLARE_TOKEN"

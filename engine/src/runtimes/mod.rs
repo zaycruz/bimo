@@ -12,6 +12,9 @@ use std::time::Duration;
 
 pub mod eve;
 pub mod hermes;
+pub mod workerd;
+
+pub use workerd::WorkerRecipe;
 
 /// Inputs an adapter needs to build its launch recipe.
 pub struct LaunchContext<'a> {
@@ -174,6 +177,15 @@ pub trait RuntimeAdapter: Sync {
             self.name()
         ))
     }
+    /// How the runtime runs as a Cloudflare Dynamic Worker (the
+    /// `cloudflare` substrate). Only runtimes made of Worker modules have
+    /// one.
+    fn worker(&self, _source_dir: &Path, _control_key: &str) -> Result<WorkerRecipe, String> {
+        Err(format!(
+            "runtime '{}' does not run as a Worker; place it on 'local' or a proxmox target",
+            self.name()
+        ))
+    }
     /// A warm runtime the pool can start before claim, when the runtime has
     /// a generic part worth starting early. `None` (the default) means a
     /// claim delivers and starts the whole runtime.
@@ -197,7 +209,7 @@ pub trait RuntimeAdapter: Sync {
     }
 }
 
-static ADAPTERS: &[&dyn RuntimeAdapter] = &[&hermes::Hermes, &eve::Eve];
+static ADAPTERS: &[&dyn RuntimeAdapter] = &[&hermes::Hermes, &eve::Eve, &workerd::Workerd];
 
 pub fn lookup(name: &str) -> Option<&'static dyn RuntimeAdapter> {
     ADAPTERS.iter().copied().find(|adapter| adapter.name() == name)

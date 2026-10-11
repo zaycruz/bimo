@@ -39,7 +39,7 @@ Unknown fields are errors (KTD9). The spec is versioned by `schema_version`.
 | `schema_version` | yes | `1`. |
 | `name` | yes | 1 to 63 lowercase letters, digits or `-`, not starting or ending with `-`. Agents are addressed by name. |
 | `tenant_id` | yes | Same shape as `name`. A name belongs to one tenant: applying the same name for another tenant fails with `tenant_conflict`. |
-| `runtime` | yes | A registered runtime: `hermes` or `eve`. |
+| `runtime` | yes | A registered runtime: `hermes`, `eve` or `workerd` (cloudflare targets only). |
 | `source` | yes | Where the runtime's code or configuration comes from (below). |
 | `secrets` | no | Secret references (below). |
 | `egress.allow` | yes | Hosts the agent may reach: `example.com`, `*.example.com` (subdomains only, not the apex) or an IPv4 address. Enforced by the agent's credential proxy; anything else is refused and recorded (`docs/credential-boundary.md`). |
@@ -53,6 +53,7 @@ Each runtime accepts the source kinds it can launch from.
 |---|---|---|---|
 | `config` | `path` | hermes | A directory, relative to the spec, copied privately per generation. For Hermes it becomes `HERMES_HOME` (`config.yaml`, `SOUL.md`, skills). Symlinks are rejected. |
 | `git` | `repo`, `rev` | eve | A repository at a full 40-character commit id, so the source is immutable. `repo` is a URL, or a path relative to the spec. |
+| `config` or `git` | as above | workerd | ES modules (`.js`, `.mjs`, at most 1 MiB in all) and an optional `bimo-worker.json` (`{"main": "index.js", "compatibility_date": "2026-10-01"}`). Bimo uploads the modules as they are: bundle a TypeScript agent first. Symlinks are rejected. |
 
 ### Secrets
 
@@ -120,6 +121,18 @@ k3s-based multi-agent platform). Such a runtime would add an adapter whose
 `guest` returns `platform_vm`, and a driver path that creates the VM once per
 deployment and places further agents into the running platform instead of
 claiming a guest per agent. Nothing in delivery or the proxy guest changes. Asking for it today fails with `runtime_unavailable`.
+
+### Worker agents (`workerd`)
+
+A `workerd` agent runs as a Cloudflare Dynamic Worker on a `cloudflare`
+target (`docs/credential-boundary.md`, "On Cloudflare"). Its default
+export's `fetch` must admit only `Authorization: Bearer
+<env.BIMO_CONTROL_KEY>` and answer `POST /bimo/v1/tasks` with 202 and
+`{"task_id": ...}`; Bimo probes that before it reports the agent ready and
+checks that a task without the key is refused. Secrets arrive as
+placeholders in `env.<NAME>`; the agent makes its requests with plain
+`fetch()`. Raw TCP (`connect()`) is refused. Example:
+`examples/workerd-agent.toml`.
 
 ## Validation
 

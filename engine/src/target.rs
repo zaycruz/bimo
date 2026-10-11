@@ -11,6 +11,7 @@ pub enum DeploymentTarget {
     Local,
     Ssh,
     Proxmox,
+    Cloudflare,
 }
 
 impl DeploymentTarget {
@@ -19,8 +20,9 @@ impl DeploymentTarget {
             "local" => Ok(Self::Local),
             "ssh" => Ok(Self::Ssh),
             "proxmox" => Ok(Self::Proxmox),
+            "cloudflare" => Ok(Self::Cloudflare),
             other => Err(format!(
-                "unsupported target '{}'. Supported values are: local, ssh, proxmox, or a configured target name",
+                "unsupported target '{}'. Supported values are: local, ssh, proxmox, cloudflare, or a configured target name",
                 other
             )),
         }
@@ -33,6 +35,7 @@ impl fmt::Display for DeploymentTarget {
             Self::Local => "local",
             Self::Ssh => "ssh",
             Self::Proxmox => "proxmox",
+            Self::Cloudflare => "cloudflare",
         })
     }
 }
@@ -105,6 +108,21 @@ pub enum ConfiguredTarget {
         /// missing field when it is asked to touch the cluster.
         #[serde(flatten)]
         driver: ProxmoxDriverSettings,
+    },
+    /// A Bimo host Worker on Cloudflare (engine/cloudflare/host). Agents run
+    /// as Dynamic Workers behind its credential gateway; see
+    /// docs/plans/2026-10-10-cloudflare-substrate.md.
+    Cloudflare {
+        name: String,
+        /// The host Worker's base URL, for example
+        /// `https://bimo-host.<account>.workers.dev`.
+        url: String,
+        /// Environment variable holding the host's operator token.
+        token_env: String,
+        #[serde(default)]
+        artifact_lifecycle: ArtifactLifecycle,
+        #[serde(default)]
+        secret_source: SecretSourceConfig,
     },
 }
 
@@ -455,6 +473,34 @@ fn resolve_configured_target(target: &ConfiguredTarget) -> ResolvedTarget {
             secret_source: secret_source.clone(),
             configured: Some(target.clone()),
         },
+        ConfiguredTarget::Cloudflare {
+            name,
+            url,
+            token_env,
+            artifact_lifecycle,
+            secret_source,
+        } => ResolvedTarget {
+            name: name.clone(),
+            kind: DeploymentTarget::Cloudflare,
+            source: TargetSource::Configured,
+            artifact_lifecycle: *artifact_lifecycle,
+            runtime: "dynamic_worker",
+            host_platform: None,
+            support: if std::env::var_os(token_env).is_some_and(|value| !value.is_empty()) {
+                DeploySupport::Available
+            } else {
+                DeploySupport::Unavailable(format!(
+                    "the cloudflare driver needs the host's operator token in environment variable {token_env}, which is not set"
+                ))
+            },
+            auth_env: Some(token_env.clone()),
+            auth_present: Some(std::env::var_os(token_env).is_some()),
+            cluster: Some(url.clone()),
+            node: None,
+            guest: None,
+            secret_source: secret_source.clone(),
+            configured: Some(target.clone()),
+        },
     }
 }
 
@@ -491,6 +537,9 @@ fn reserved_target(kind: DeploymentTarget) -> ResolvedTarget {
         DeploymentTarget::Proxmox => {
             "proxmox is reserved for configured cluster targets; add a named proxmox target in .bimo/targets.toml and a deploy adapter before using it".to_owned()
         }
+        DeploymentTarget::Cloudflare => {
+            "cloudflare is reserved for configured host Workers; add a named cloudflare target in .bimo/targets.toml (see examples/targets.toml)".to_owned()
+        }
     };
     ResolvedTarget {
         name: kind.to_string(),
@@ -501,6 +550,7 @@ fn reserved_target(kind: DeploymentTarget) -> ResolvedTarget {
             DeploymentTarget::Local => "host_process",
             DeploymentTarget::Ssh => "remote_host",
             DeploymentTarget::Proxmox => "remote_guest",
+            DeploymentTarget::Cloudflare => "dynamic_worker",
         },
         host_platform: if kind == DeploymentTarget::Local {
             Some(std::env::consts::OS.to_owned())
@@ -611,6 +661,21 @@ fn validate_targets_file(file: &TargetsFile) -> Result<(), String> {
                         name
                     ));
                 }
+            }
+            ConfiguredTarget::Cloudflare { name, url, token_env, .. } => {
+                validate_target_name(name)?;
+                if !names.insert(name.clone()) {
+                    return Err(format!("duplicate target name '{name}'"));
+                }
+                let local = url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:");
+                if !(url.starts_with("https://") || local) || url.ends_with('/') {
+                    return Err(format!(
+                        "cloudflare target '{name}' url must be https:// (or http:// on 127.0.0.1 or localhost for wrangler dev) without a trailing slash"
+                    ));
+                }
+                validate_env_name(token_env).map_err(|error| {
+                    format!("cloudflare target '{name}' has invalid token_env: {error}")
+                })?;
             }
         }
     }

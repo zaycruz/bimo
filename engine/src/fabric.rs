@@ -646,6 +646,16 @@ impl Fabric {
             }
             Ok(recipe)
         };
+        let worker_recipe = || {
+            let mut recipe = adapter.worker(&source_dir, control_key).map_err(|message| {
+                FabricError::new(codes::RUNTIME_UNAVAILABLE, message)
+                    .next("place a workerd agent on a cloudflare target, or use a runtime with a guest recipe")
+            })?;
+            for (key, value) in &env {
+                recipe.env.insert(key.clone(), value.clone());
+            }
+            Ok(recipe)
+        };
         let request = CreateRequest {
             agent: &spec.name,
             tenant: &spec.tenant_id,
@@ -655,6 +665,7 @@ impl Fabric {
             log_path: &log_path,
             recipe: &recipe,
             guest_recipe: &guest_recipe,
+            worker_recipe: &worker_recipe,
             control_key,
             proxy: &proxy_plan,
             clock,

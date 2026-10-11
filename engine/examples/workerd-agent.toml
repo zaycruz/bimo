@@ -1,0 +1,21 @@
+# A workerd agent: JavaScript modules that run as a Dynamic Worker on a
+# cloudflare target. See docs/agent-spec.md ("Worker agents").
+schema_version = 1
+name = "demo-workerd"
+tenant_id = "demo"
+runtime = "workerd"
+
+[source]
+kind = "config"
+path = "workerd-agent"
+
+[[secrets]]
+env = "OPENROUTER_API_KEY"
+handle = "demo/openrouter"
+hosts = ["openrouter.ai"]
+
+[egress]
+allow = ["openrouter.ai"]
+
+[placement]
+substrate = "cf"

@@ -1,0 +1,17 @@
+// Bimo's Cloudflare host Worker. One per account and environment.
+// Secrets (never in this file): BIMO_OPERATOR_TOKEN, BIMO_VAULT_KEK.
+// See README.md.
+{
+  "name": "bimo-host",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "AGENTS", "class_name": "AgentStore" },
+      { "name": "VAULT", "class_name": "TenantVault" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AgentStore", "TenantVault"] }],
+  "observability": { "enabled": true }
+}

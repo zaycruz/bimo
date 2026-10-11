@@ -1,0 +1,14 @@
+{
+  "name": "bimo-cloudflare-host",
+  "private": true,
+  "type": "module",
+  "description": "Bimo's Cloudflare substrate: places agents as Dynamic Workers behind a credential gateway.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.149.0"
+  }
+}

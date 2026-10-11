@@ -220,3 +220,50 @@ egress (only the proxy front connects), checks the cross-tenant refusals
 above, destroys everything and checks that the pool on the cluster holds only
 the template. It needs a template whose bind agent speaks API 3
 (`templates/README.md`).
+
+## On Cloudflare
+
+A `cloudflare` target is a Bimo host Worker (`cloudflare/host`, deployed
+once per account and environment). Each agent generation of a `workerd`
+agent runs there as a Dynamic Worker, and the boundary is part of the host:
+
+- **The gateway.** The host loads every agent with `globalOutbound` set to
+  its `Gateway` entrypoint (`cloudflare/host/src/gateway.ts`), bound to the
+  agent's tenant and route by the host, not by the agent. Every `fetch()` the
+  agent makes arrives there. It applies the same rules as the iron-proxy
+  configuration above: a host outside the allowlist gets `403` and a
+  `rejected_by: allowlist` audit line and never leaves; a placeholder is
+  swapped in any header only on requests to that secret's `hosts`, and sent
+  unchanged anywhere else; redirects are returned to the agent, never
+  followed; raw TCP (`connect()`) is refused. Requests go out from
+  Cloudflare's network, so private and loopback ranges are not reachable as
+  they are on a host.
+- **The vault.** One `TenantVault` Durable Object per tenant holds its
+  routes: allowlist, placeholders, secret hosts and the values, sealed with
+  AES-256-GCM under the host's `BIMO_VAULT_KEK` secret and bound (AAD) to
+  tenant, route and variable. Only the gateway opens them. The control API
+  never returns a value; `describe` shows the route without them.
+- **Delivery.** Values exist on the control plane only in memory while it
+  applies (`Placement::Remote`), travel in the generation `PUT` and in
+  rotations (`POST /v1/tenants/<t>/routes/<route>/secrets`), over HTTPS
+  with the operator token. The host writes the route before the agent, so
+  the agent is never reachable without its boundary. A rotation takes effect
+  on the agent's next request; there is no restart.
+- **Tenants.** An agent name belongs to the tenant that first applied it;
+  another tenant's apply is a `tenant_conflict` (409), and every call on an
+  agent's resources (`cf:<tenant>:<agent>:g<n>`, `cf:route:<tenant>:<route>`)
+  is scoped to its tenant, so a refused apply's rollback cannot remove the
+  owner's agent. A route is found only in its own tenant's vault: another
+  tenant's placeholder is never swapped.
+- **Audit.** One line per request in the route's vault, the same fields as
+  iron-proxy's (`msg: "request"`, `audit.{host,method,path,action,status_code}`,
+  `annotations.swapped`), never a value. `bimo agent logs <name> --stream
+  egress` fetches them into `<state-root>/<agent>/logs/egress-audit.jsonl`
+  (per route in `egress-audit.d/`), and they are fetched before a generation
+  is retired or destroyed.
+
+Proof: `tests/e2e_cloudflare.rs` (F1 to F18 in
+`docs/plans/2026-10-10-cloudflare-substrate.md`). With
+`BIMO_CLOUDFLARE_E2E=local` it runs the host under `wrangler dev`; with
+`live` it uses a deployed host (`BIMO_CLOUDFLARE_URL`,
+`BIMO_CLOUDFLARE_TOKEN`). Both write a report to `.bimo/reports/`.
